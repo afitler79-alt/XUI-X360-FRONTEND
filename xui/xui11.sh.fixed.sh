@@ -5063,6 +5063,7 @@ DASH_SCRIPT="$HOME/.xui/dashboard/pyqt_dashboard_improved.py"
 SETUP_SCRIPT="$HOME/.xui/bin/xui_first_setup.py"
 SETUP_STATE="$HOME/.xui/data/setup_state.json"
 PY_RUNNER="$HOME/.xui/bin/xui_python.sh"
+LOCK_FILE="$HOME/.xui/data/dashboard-session.lock"
 
 info(){ echo -e "\e[34m[INFO]\e[0m $*"; }
 warn(){ echo -e "\e[33m[WARN]\e[0m $*" >&2; }
@@ -5077,6 +5078,20 @@ run_python(){
 }
 
 mkdir -p "$HOME/.xui/data" "$HOME/.xui/logs" "$ASSETS_DIR"
+
+# Avoid duplicate dashboard instances when desktop autostart + systemd start at the same login.
+if command -v flock >/dev/null 2>&1; then
+    exec 9>"$LOCK_FILE"
+    if ! flock -n 9; then
+        info "Dashboard already running in this session (lock active)"
+        exit 0
+    fi
+else
+    if pgrep -u "$(id -u)" -f 'pyqt_dashboard_improved.py' >/dev/null 2>&1; then
+        info "Dashboard already running in this session"
+        exit 0
+    fi
+fi
 
 # Run first setup wizard once (or force with XUI_FORCE_SETUP=1)
 if [ "${XUI_FORCE_SETUP:-0}" = "1" ] || [ ! -s "$SETUP_STATE" ]; then
@@ -5284,15 +5299,34 @@ Environment=XDG_RUNTIME_DIR=$RUNTIME_DIR
 WantedBy=default.target
 EOF
 
+OPENBOX_FILE="$HOME/.config/openbox/autostart"
+XPROFILE_FILE="$HOME/.xprofile"
+OB_LINE='[ -x "$HOME/.xui/bin/xui_startup_and_dashboard.sh" ] && "$HOME/.xui/bin/xui_startup_and_dashboard.sh" >/dev/null 2>&1 &'
+XP_LINE='[ -x "$HOME/.xui/bin/xui_startup_and_dashboard.sh" ] && "$HOME/.xui/bin/xui_startup_and_dashboard.sh" >/dev/null 2>&1 &'
+mkdir -p "$(dirname "$OPENBOX_FILE")"
+touch "$OPENBOX_FILE" "$XPROFILE_FILE"
+if ! grep -Fq 'xui_startup_and_dashboard.sh' "$OPENBOX_FILE" 2>/dev/null; then
+    printf '\n# XUI dashboard autostart\n%s\n' "$OB_LINE" >> "$OPENBOX_FILE"
+fi
+if ! grep -Fq 'xui_startup_and_dashboard.sh' "$XPROFILE_FILE" 2>/dev/null; then
+    printf '\n# XUI dashboard autostart\n%s\n' "$XP_LINE" >> "$XPROFILE_FILE"
+fi
+
 # Reload user systemd and enable service
-systemctl --user daemon-reload
-systemctl --user enable --now "$SERVICE_NAME" || {
-    echo "Failed to enable systemd user service; you can enable it with: systemctl --user enable --now $SERVICE_NAME"
-}
+if command -v systemctl >/dev/null 2>&1; then
+    systemctl --user daemon-reload || true
+    systemctl --user enable --now "$SERVICE_NAME" || {
+        echo "Failed to enable systemd user service; you can enable it with: systemctl --user enable --now $SERVICE_NAME"
+    }
+else
+    echo "systemctl not found; using desktop/openbox/xprofile autostart only."
+fi
 
 # Feedback
 echo "Installed autostart .desktop to $AUTOSTART_DIR/$DESKTOP_FILE_NAME"
 echo "Installed systemd user unit to $SYSTEMD_USER_DIR/$SERVICE_NAME (enabled)."
+echo "Installed Openbox autostart hook to $OPENBOX_FILE"
+echo "Installed X profile autostart hook to $XPROFILE_FILE"
 
 echo "Note: systemd user services run after you log in. If you want the GUI before login, configure auto-login or use a display-manager-level autostart."
 BASH
@@ -7838,6 +7872,21 @@ finish_setup(){
     info "Autostart desktop entry ready: $AUTOSTART_DIR/xui-dashboard.desktop"
   else
     warn "Autostart desktop entry missing: $AUTOSTART_DIR/xui-dashboard.desktop"
+  fi
+  local openbox_file xprofile_file ob_line xp_line
+  openbox_file="$HOME/.config/openbox/autostart"
+  xprofile_file="$HOME/.xprofile"
+  ob_line='[ -x "$HOME/.xui/bin/xui_startup_and_dashboard.sh" ] && "$HOME/.xui/bin/xui_startup_and_dashboard.sh" >/dev/null 2>&1 &'
+  xp_line='[ -x "$HOME/.xui/bin/xui_startup_and_dashboard.sh" ] && "$HOME/.xui/bin/xui_startup_and_dashboard.sh" >/dev/null 2>&1 &'
+  mkdir -p "$(dirname "$openbox_file")" || true
+  touch "$openbox_file" "$xprofile_file" || true
+  if ! grep -Fq 'xui_startup_and_dashboard.sh' "$openbox_file" 2>/dev/null; then
+    printf '\n# XUI dashboard autostart\n%s\n' "$ob_line" >> "$openbox_file"
+    info "Added Openbox autostart hook: $openbox_file"
+  fi
+  if ! grep -Fq 'xui_startup_and_dashboard.sh' "$xprofile_file" 2>/dev/null; then
+    printf '\n# XUI dashboard autostart\n%s\n' "$xp_line" >> "$xprofile_file"
+    info "Added X session autostart hook: $xprofile_file"
   fi
   if command -v systemctl >/dev/null 2>&1; then
     if systemctl --user daemon-reload >/dev/null 2>&1; then
