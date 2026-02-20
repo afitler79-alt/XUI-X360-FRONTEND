@@ -242,6 +242,7 @@ parse_args(){
     XUI_USE_EXTERNAL_DASHBOARD=0
     XUI_SKIP_APT_WAIT=0
     XUI_APT_WAIT_SECONDS="${XUI_APT_WAIT_SECONDS:-180}"
+    XUI_ONLY_REFRESH_STORE=0
     while [ "$#" -gt 0 ]; do
         case "$1" in
             --yes-install|-y)
@@ -271,15 +272,19 @@ parse_args(){
                     shift
                 fi
                 ;;
+            --refresh-store-ui|--fix-store-ui)
+                XUI_ONLY_REFRESH_STORE=1
+                shift
+                ;;
             --help|-h)
-                echo "Usage: $0 [--yes-install|-y] [--no-auto-install] [--use-external-dashboard] [--skip-apt-wait] [--apt-wait-seconds N]"; exit 0 ;;
+                echo "Usage: $0 [--yes-install|-y] [--no-auto-install] [--use-external-dashboard] [--skip-apt-wait] [--apt-wait-seconds N] [--refresh-store-ui]"; exit 0 ;;
             *)
                 # pass-through unknown args
                 shift
                 ;;
         esac
     done
-    export AUTO_INSTALL_TOOLS XUI_INSTALL_SYSTEM XUI_USE_EXTERNAL_DASHBOARD XUI_SKIP_APT_WAIT XUI_APT_WAIT_SECONDS
+    export AUTO_INSTALL_TOOLS XUI_INSTALL_SYSTEM XUI_USE_EXTERNAL_DASHBOARD XUI_SKIP_APT_WAIT XUI_APT_WAIT_SECONDS XUI_ONLY_REFRESH_STORE
 }
 
 ensure_dirs(){
@@ -10300,6 +10305,14 @@ finish_setup(){
 
 main(){
   parse_args "$@"
+  if [ "${XUI_ONLY_REFRESH_STORE:-0}" = "1" ]; then
+    info "Refreshing store UI only (fast mode)"
+    ensure_dirs
+    write_extras
+    info "Store UI refreshed at: $HOME/.xui/games/store.py"
+    info "Now restart dashboard and open Store again."
+    exit 0
+  fi
   info "Starting XUI Ultra Master installer"
   ensure_dirs
   install_dependencies
