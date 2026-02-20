@@ -1770,7 +1770,10 @@ class TopTabs(QtWidgets.QWidget):
         self.names = list(names)
         self.labels = []
         self.current = 0
+        self._scale = 1.0
+        self._compact = False
         h = QtWidgets.QHBoxLayout(self)
+        self._layout = h
         h.setContentsMargins(0, 0, 0, 0)
         h.setSpacing(28)
         for i, n in enumerate(self.names):
@@ -1780,15 +1783,25 @@ class TopTabs(QtWidgets.QWidget):
             self.labels.append(lbl)
             h.addWidget(lbl)
         h.addStretch(1)
+        self.apply_scale(1.0, False)
         self.set_current(0)
+
+    def apply_scale(self, scale=1.0, compact=False):
+        self._scale = max(0.62, float(scale))
+        self._compact = bool(compact)
+        spacing = int(28 * self._scale * (0.75 if self._compact else 1.0))
+        self._layout.setSpacing(max(8, spacing))
+        self.set_current(self.current)
 
     def set_current(self, idx):
         self.current = max(0, min(idx, len(self.labels)-1))
+        active_px = max(22, int((56 if not self._compact else 36) * self._scale))
+        idle_px = max(18, int((48 if not self._compact else 30) * self._scale))
         for i, lbl in enumerate(self.labels):
             if i == self.current:
-                lbl.setStyleSheet('color:#f3f7f7; font-size:56px; font-weight:700;')
+                lbl.setStyleSheet(f'color:#f3f7f7; font-size:{active_px}px; font-weight:700;')
             else:
-                lbl.setStyleSheet('color:rgba(243,247,247,0.78); font-size:48px; font-weight:600;')
+                lbl.setStyleSheet(f'color:rgba(243,247,247,0.78); font-size:{idle_px}px; font-weight:600;')
 
 
 def tile_icon(action, text=''):
@@ -1828,12 +1841,14 @@ class GreenTile(QtWidgets.QFrame):
         super().__init__(parent)
         self.action = action
         self.text = text
-        self.setFixedSize(*size)
+        self.base_size = (int(size[0]), int(size[1]))
         self.setObjectName('green_tile')
         self.setFocusPolicy(QtCore.Qt.StrongFocus)
         v = QtWidgets.QVBoxLayout(self)
+        self._layout = v
         v.setContentsMargins(16, 12, 16, 12)
         top = QtWidgets.QHBoxLayout()
+        self._top_layout = top
         top.setContentsMargins(0, 0, 0, 0)
         self.icon = QtWidgets.QLabel()
         self.icon.setObjectName('tile_icon')
@@ -1848,7 +1863,25 @@ class GreenTile(QtWidgets.QFrame):
         self.lbl = QtWidgets.QLabel(text)
         self.lbl.setStyleSheet('color:#efffee; font-size:30px; font-weight:700;')
         v.addWidget(self.lbl, alignment=QtCore.Qt.AlignLeft | QtCore.Qt.AlignBottom)
+        self.apply_scale(1.0, False)
         self.set_selected(False)
+
+    def apply_scale(self, scale=1.0, compact=False):
+        s = max(0.62, float(scale))
+        compact_factor = 0.85 if compact else 1.0
+        w = max(170, int(self.base_size[0] * s * compact_factor))
+        h = max(90, int(self.base_size[1] * s * compact_factor))
+        self.setFixedSize(w, h)
+        pad_x = max(8, int(16 * s * compact_factor))
+        pad_y = max(6, int(12 * s * compact_factor))
+        self._layout.setContentsMargins(pad_x, pad_y, pad_x, pad_y)
+        icon_sz = max(26, int(44 * s * compact_factor))
+        pix_sz = max(16, int(26 * s * compact_factor))
+        self.icon.setFixedSize(icon_sz, icon_sz)
+        icon = tile_icon(self.action, self.text)
+        self.icon.setPixmap(icon.pixmap(pix_sz, pix_sz))
+        font_px = max(14, int(30 * s * compact_factor))
+        self.lbl.setStyleSheet(f'color:#efffee; font-size:{font_px}px; font-weight:700;')
 
     def set_selected(self, on):
         border = '#c6ffff' if on else 'rgba(255,255,255,0.08)'
@@ -1880,18 +1913,35 @@ class HeroPanel(QtWidgets.QFrame):
         self.action = action
         self.title = title
         self.subtitle = subtitle
-        self.setFixedSize(900, 460)
+        self.base_size = (900, 460)
         self.setObjectName('hero_panel')
         v = QtWidgets.QVBoxLayout(self)
+        self._layout = v
         v.setContentsMargins(22, 18, 22, 16)
-        top = QtWidgets.QLabel(self.title)
-        top.setStyleSheet('color:#ecf3f5; font-size:38px; font-weight:700;')
-        v.addWidget(top, 0, alignment=QtCore.Qt.AlignLeft | QtCore.Qt.AlignTop)
+        self.top_label = QtWidgets.QLabel(self.title)
+        self.top_label.setStyleSheet('color:#ecf3f5; font-size:38px; font-weight:700;')
+        v.addWidget(self.top_label, 0, alignment=QtCore.Qt.AlignLeft | QtCore.Qt.AlignTop)
         v.addStretch(1)
-        sub = QtWidgets.QLabel(self.subtitle)
-        sub.setStyleSheet('color:rgba(235,242,244,0.78); font-size:24px; font-weight:600;')
-        v.addWidget(sub, 0, alignment=QtCore.Qt.AlignLeft | QtCore.Qt.AlignBottom)
+        self.sub_label = QtWidgets.QLabel(self.subtitle)
+        self.sub_label.setStyleSheet('color:rgba(235,242,244,0.78); font-size:24px; font-weight:600;')
+        v.addWidget(self.sub_label, 0, alignment=QtCore.Qt.AlignLeft | QtCore.Qt.AlignBottom)
+        self.apply_scale(1.0, False)
         self.set_selected(False)
+
+    def apply_scale(self, scale=1.0, compact=False):
+        s = max(0.62, float(scale))
+        compact_factor = 0.9 if compact else 1.0
+        w = max(460, int(self.base_size[0] * s * compact_factor))
+        h = max(250, int(self.base_size[1] * s * compact_factor))
+        self.setFixedSize(w, h)
+        mx = max(10, int(22 * s * compact_factor))
+        my = max(8, int(18 * s * compact_factor))
+        mb = max(8, int(16 * s * compact_factor))
+        self._layout.setContentsMargins(mx, my, mx, mb)
+        title_fs = max(20, int(38 * s * compact_factor))
+        sub_fs = max(14, int(24 * s * compact_factor))
+        self.top_label.setStyleSheet(f'color:#ecf3f5; font-size:{title_fs}px; font-weight:700;')
+        self.sub_label.setStyleSheet(f'color:rgba(235,242,244,0.78); font-size:{sub_fs}px; font-weight:600;')
 
     def set_selected(self, on):
         border = '#c6ffff' if on else 'rgba(255,255,255,0.08)'
@@ -2075,6 +2125,12 @@ class DashboardPage(QtWidgets.QWidget):
         self.left_tiles = []
         self.right_tiles = []
         self.hero = None
+        self._body_layout = None
+        self.left_col = None
+        self.left_layout = None
+        self.center_layout = None
+        self.right_col = None
+        self.right_layout = None
         self._build()
 
     def _build_tiles(self, defs, target, layout, alignment=QtCore.Qt.AlignLeft):
@@ -2086,13 +2142,16 @@ class DashboardPage(QtWidgets.QWidget):
 
     def _build(self):
         body = QtWidgets.QHBoxLayout(self)
+        self._body_layout = body
         body.setContentsMargins(0, 0, 0, 0)
         body.setSpacing(26)
         body.addStretch(1)
 
         left_col = QtWidgets.QWidget()
+        self.left_col = left_col
         left_col.setFixedWidth(320)
         left = QtWidgets.QVBoxLayout(left_col)
+        self.left_layout = left
         left.setContentsMargins(0, 0, 0, 0)
         left.setSpacing(14)
         self._build_tiles(self.spec.get('left', []), self.left_tiles, left, QtCore.Qt.AlignLeft)
@@ -2100,6 +2159,7 @@ class DashboardPage(QtWidgets.QWidget):
 
         center_col = QtWidgets.QWidget()
         center = QtWidgets.QVBoxLayout(center_col)
+        self.center_layout = center
         center.setContentsMargins(0, 0, 0, 0)
         center.setSpacing(14)
         self.hero = HeroPanel(
@@ -2112,8 +2172,10 @@ class DashboardPage(QtWidgets.QWidget):
         center.addStretch(1)
 
         right_col = QtWidgets.QWidget()
+        self.right_col = right_col
         right_col.setFixedWidth(320)
         right = QtWidgets.QVBoxLayout(right_col)
+        self.right_layout = right
         right.setContentsMargins(0, 0, 0, 0)
         right.setSpacing(14)
         self._build_tiles(self.spec.get('right', []), self.right_tiles, right, QtCore.Qt.AlignRight)
@@ -2124,13 +2186,41 @@ class DashboardPage(QtWidgets.QWidget):
         body.addWidget(right_col, 0, alignment=QtCore.Qt.AlignVCenter)
         body.addStretch(1)
 
+    def apply_scale(self, scale=1.0, compact=False):
+        s = max(0.62, float(scale))
+        compact_factor = 0.86 if compact else 1.0
+        col_w = max(170, int(320 * s * compact_factor))
+        gap = max(8, int(26 * s * compact_factor))
+        col_gap = max(6, int(14 * s * compact_factor))
+        if self._body_layout is not None:
+            self._body_layout.setSpacing(gap)
+        if self.left_col is not None:
+            self.left_col.setFixedWidth(col_w)
+        if self.right_col is not None:
+            self.right_col.setFixedWidth(col_w)
+        if self.left_layout is not None:
+            self.left_layout.setSpacing(col_gap)
+        if self.center_layout is not None:
+            self.center_layout.setSpacing(col_gap)
+        if self.right_layout is not None:
+            self.right_layout.setSpacing(col_gap)
+        for tile in self.left_tiles + self.right_tiles:
+            tile.apply_scale(s, compact)
+        if self.hero is not None:
+            self.hero.apply_scale(s, compact)
+
 
 class Dashboard(QtWidgets.QMainWindow):
     def __init__(self):
         super().__init__()
         ensure_data()
         self.setWindowTitle('XUI - Xbox 360 Style')
-        self.resize(1600, 900)
+        scr = QtWidgets.QApplication.primaryScreen()
+        if scr is not None:
+            g = scr.availableGeometry()
+            self.resize(min(1600, g.width()), min(900, g.height()))
+        else:
+            self.resize(1600, 900)
         self.tabs = ['home', 'social', 'games', 'tv & movies', 'music', 'apps', 'settings']
         self.page_specs = {
             'home': {
@@ -2263,6 +2353,9 @@ class Dashboard(QtWidgets.QMainWindow):
         self._tab_animating = False
         self._tab_anim_group = None
         self._web_windows = []
+        self._ui_scale = 1.0
+        self._compact_ui = False
+        self._stage_layout = None
         self.sfx = {
             'hover': 'hover.mp3',
             'open': 'open.mp3',
@@ -2280,6 +2373,7 @@ class Dashboard(QtWidgets.QMainWindow):
             'achievement': ['archievements.mp3', 'achievement.mp3', 'select.mp3'],
         }
         self._build()
+        self._apply_responsive_layout()
         self.update_focus()
 
     def _flatten_actions(self, spec):
@@ -2305,6 +2399,7 @@ class Dashboard(QtWidgets.QMainWindow):
         stage = QtWidgets.QFrame()
         stage.setObjectName('stage')
         stage_l = QtWidgets.QVBoxLayout(stage)
+        self._stage_layout = stage_l
         stage_l.setContentsMargins(150, 70, 150, 50)
         stage_l.setSpacing(18)
 
@@ -2340,6 +2435,55 @@ class Dashboard(QtWidgets.QMainWindow):
                 border-radius: 2px;
             }
         ''')
+
+    def _compute_ui_metrics(self):
+        w = max(800, self.width())
+        h = max(480, self.height())
+        sw = w
+        sh = h
+        scr = QtWidgets.QApplication.primaryScreen()
+        if scr is not None:
+            g = scr.availableGeometry()
+            sw = max(800, g.width())
+            sh = max(480, g.height())
+        rw = min(w, sw) / 1600.0
+        rh = min(h, sh) / 900.0
+        scale = max(0.62, min(1.0, min(rw, rh)))
+        force_compact = os.environ.get('XUI_COMPACT_UI', '0') == '1'
+        compact = force_compact or (min(w, sw) <= 1280) or (min(h, sh) <= 720)
+        if compact:
+            scale = min(scale, 0.8)
+        if force_compact:
+            scale = min(scale, 0.74)
+        return scale, compact
+
+    def _apply_responsive_layout(self):
+        scale, compact = self._compute_ui_metrics()
+        self._ui_scale = scale
+        self._compact_ui = compact
+        compact_factor = 0.72 if compact else 1.0
+        if self._stage_layout is not None:
+            side = max(22, int(150 * scale * compact_factor))
+            top = max(12, int(70 * scale * compact_factor))
+            bottom = max(12, int(50 * scale * compact_factor))
+            spacing = max(8, int(18 * scale * compact_factor))
+            self._stage_layout.setContentsMargins(side, top, side, bottom)
+            self._stage_layout.setSpacing(spacing)
+        if hasattr(self, 'top_tabs') and self.top_tabs is not None:
+            self.top_tabs.apply_scale(scale, compact)
+        if hasattr(self, 'desc') and self.desc is not None:
+            desc_px = max(12, int(28 * scale * (0.82 if compact else 1.0)))
+            self.desc.setStyleSheet(f'font-size:{desc_px}px; color:rgba(235,240,244,0.75);')
+        for p in self.pages:
+            p.apply_scale(scale, compact)
+
+    def showEvent(self, e):
+        super().showEvent(e)
+        QtCore.QTimer.singleShot(0, self._apply_responsive_layout)
+
+    def resizeEvent(self, e):
+        super().resizeEvent(e)
+        self._apply_responsive_layout()
 
     def _current_page(self):
         return self.pages[self.tab_idx]
@@ -3274,7 +3418,13 @@ def main():
     app = QtWidgets.QApplication(sys.argv)
     app.setApplicationName('XUI Xbox Style')
     f = app.font()
-    f.setPointSize(12)
+    scr = app.primaryScreen()
+    if scr is not None:
+        g = scr.availableGeometry()
+        base_pt = 10 if (g.width() <= 1280 or g.height() <= 720) else 12
+    else:
+        base_pt = 12
+    f.setPointSize(base_pt)
     app.setFont(f)
     play_startup_video()
     w = Dashboard()
