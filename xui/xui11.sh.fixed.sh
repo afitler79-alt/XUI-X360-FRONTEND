@@ -142,7 +142,8 @@ BASH
         # Optional tools (can fail without breaking dashboard runtime)
         apt_safe_install \
             ffmpeg mpv jq xdotool curl ca-certificates iproute2 bc \
-            xclip xsel rofi feh maim scrot udisks2 p7zip-full || warn "Some apt packages failed to install"
+            xclip xsel rofi feh maim scrot udisks2 p7zip-full \
+            retroarch lutris || warn "Some apt packages failed to install"
         # Windows compatibility (best effort): Wine + Winetricks + ARM helpers
         if [ "$arch_now" = "x86_64" ] || [ "$arch_now" = "amd64" ]; then
             apt_safe_install wine wine64 winetricks || warn "Wine/Winetricks install failed on x86_64"
@@ -152,27 +153,27 @@ BASH
             info "AArch64 detected: x86 Windows .exe may need box64 + x86 Wine build"
         fi
         # Optional gaming/compat packages (best effort one by one)
-        for pkg in flatpak steam-installer steamcmd box64 box86 qemu-user-static; do
+        for pkg in flatpak steam-installer steamcmd box64 box86 qemu-user-static retroarch lutris heroic heroic-games-launcher; do
             apt_safe_install "$pkg" || true
         done
     elif command -v dnf >/dev/null 2>&1; then
         run_as_root dnf install -y \
             python3 python3-pip python3-virtualenv python3-qt5 python3-pillow \
             ffmpeg mpv jq xdotool curl iproute bc \
-            xclip xsel rofi feh scrot udisks2 p7zip || warn "Some dnf packages failed to install"
+            xclip xsel rofi feh scrot udisks2 p7zip retroarch lutris || warn "Some dnf packages failed to install"
         run_as_root dnf install -y python3-qt5-webengine || true
         run_as_root dnf install -y wine winetricks || true
-        for pkg in flatpak steam box64 fex-emu qemu-user-static; do
+        for pkg in flatpak steam box64 fex-emu qemu-user-static retroarch lutris heroic-games-launcher; do
             run_as_root dnf install -y "$pkg" || true
         done
     elif command -v pacman >/dev/null 2>&1; then
         run_as_root pacman -Syu --noconfirm \
             python python-pip python-virtualenv pyqt5 python-pillow \
             ffmpeg mpv jq xdotool curl iproute2 bc \
-            xclip xsel rofi feh scrot maim udisks2 p7zip || warn "Some pacman packages failed to install"
+            xclip xsel rofi feh scrot maim udisks2 p7zip retroarch lutris || warn "Some pacman packages failed to install"
         run_as_root pacman -S --noconfirm python-pyqt5-webengine || true
         run_as_root pacman -S --noconfirm wine winetricks || true
-        for pkg in flatpak steam box64 qemu-user-static; do
+        for pkg in flatpak steam box64 qemu-user-static retroarch lutris heroic-games-launcher; do
             run_as_root pacman -S --noconfirm "$pkg" || true
         done
     else
@@ -328,13 +329,19 @@ install_compat_layer(){
     info "install_compat_layer: writing Steam/x86 compatibility helpers"
     mkdir -p "$BIN_DIR" "$DATA_DIR"
 
-    cat > "$BIN_DIR/xui_compat_status.sh" <<'BASH'
+cat > "$BIN_DIR/xui_compat_status.sh" <<'BASH'
 #!/usr/bin/env bash
 set -euo pipefail
 echo "=== XUI Compatibility Status ==="
 echo "Arch: $(uname -m)"
 echo "steam: $(command -v steam >/dev/null 2>&1 && echo yes || echo no)"
 echo "flatpak-steam: $(command -v flatpak >/dev/null 2>&1 && flatpak info com.valvesoftware.Steam >/dev/null 2>&1 && echo yes || echo no)"
+echo "retroarch: $(command -v retroarch >/dev/null 2>&1 && echo yes || echo no)"
+echo "flatpak-retroarch: $(command -v flatpak >/dev/null 2>&1 && flatpak info org.libretro.RetroArch >/dev/null 2>&1 && echo yes || echo no)"
+echo "lutris: $(command -v lutris >/dev/null 2>&1 && echo yes || echo no)"
+echo "flatpak-lutris: $(command -v flatpak >/dev/null 2>&1 && flatpak info net.lutris.Lutris >/dev/null 2>&1 && echo yes || echo no)"
+echo "heroic: $( (command -v heroic >/dev/null 2>&1 || command -v heroic-games-launcher >/dev/null 2>&1) && echo yes || echo no )"
+echo "flatpak-heroic: $(command -v flatpak >/dev/null 2>&1 && flatpak info com.heroicgameslauncher.hgl >/dev/null 2>&1 && echo yes || echo no)"
 echo "box64: $(command -v box64 >/dev/null 2>&1 && echo yes || echo no)"
 echo "box86: $(command -v box86 >/dev/null 2>&1 && echo yes || echo no)"
 echo "fex: $(command -v fex-emu >/dev/null 2>&1 && echo yes || echo no)"
@@ -433,6 +440,22 @@ wait_apt(){
     t=$((t+2))
   done
 }
+ensure_flatpak(){
+  if command -v flatpak >/dev/null 2>&1; then
+    return 0
+  fi
+  if command -v apt >/dev/null 2>&1; then
+    wait_apt
+    as_root apt update || true
+    wait_apt
+    as_root apt install -y flatpak || true
+  elif command -v dnf >/dev/null 2>&1; then
+    as_root dnf install -y flatpak || true
+  elif command -v pacman >/dev/null 2>&1; then
+    as_root pacman -S --noconfirm flatpak || true
+  fi
+  command -v flatpak >/dev/null 2>&1
+}
 ARCH=$(uname -m)
 if command -v steam >/dev/null 2>&1; then
   echo "Steam already installed."
@@ -453,12 +476,23 @@ if [ "$ARCH" = "x86_64" ] || [ "$ARCH" = "amd64" ]; then
 else
   # ARM64 path: install box64 and optionally Flatpak Steam.
   "$HOME/.xui/bin/xui_install_box64.sh" || true
+  ensure_flatpak || true
   if command -v flatpak >/dev/null 2>&1; then
     if ! flatpak remote-list | grep -q '^flathub'; then
       flatpak remote-add --if-not-exists flathub https://flathub.org/repo/flathub.flatpakrepo || true
     fi
     flatpak install -y flathub com.valvesoftware.Steam || true
   fi
+fi
+
+if ! command -v steam >/dev/null 2>&1; then
+  ensure_flatpak || true
+fi
+if ! command -v steam >/dev/null 2>&1 && command -v flatpak >/dev/null 2>&1; then
+  if ! flatpak remote-list | grep -q '^flathub'; then
+    flatpak remote-add --if-not-exists flathub https://flathub.org/repo/flathub.flatpakrepo || true
+  fi
+  flatpak install -y flathub com.valvesoftware.Steam || true
 fi
 
 if command -v steam >/dev/null 2>&1; then
@@ -475,10 +509,47 @@ exit 1
 BASH
     chmod +x "$BIN_DIR/xui_install_steam.sh"
 
-    cat > "$BIN_DIR/xui_steam.sh" <<'BASH'
+cat > "$BIN_DIR/xui_steam.sh" <<'BASH'
 #!/usr/bin/env bash
 set -euo pipefail
 ARCH=$(uname -m)
+CHECK_ONLY=0
+if [ "${1:-}" = "--check" ]; then
+  CHECK_ONLY=1
+  shift || true
+fi
+
+has_steam(){
+  if command -v steam >/dev/null 2>&1; then
+    return 0
+  fi
+  if command -v flatpak >/dev/null 2>&1 && flatpak info com.valvesoftware.Steam >/dev/null 2>&1; then
+    return 0
+  fi
+  if [ "$ARCH" = "aarch64" ] || [ "$ARCH" = "arm64" ]; then
+    if command -v box64 >/dev/null 2>&1; then
+      for c in \
+        "$HOME/.local/share/Steam/ubuntu12_64/steam" \
+        "$HOME/.steam/steam/ubuntu12_64/steam" \
+        "/usr/lib/steam/steam" \
+        "/usr/games/steam"; do
+        if [ -x "$c" ]; then
+          return 0
+        fi
+      done
+    fi
+  fi
+  return 1
+}
+
+if [ "$CHECK_ONLY" = "1" ]; then
+  if has_steam; then
+    echo "steam: available"
+    exit 0
+  fi
+  echo "steam: missing"
+  exit 1
+fi
 
 if command -v steam >/dev/null 2>&1; then
   exec steam "$@"
@@ -1051,6 +1122,23 @@ def local_ipv4_addresses():
     return sorted(ips) if ips else ['127.0.0.1']
 
 
+def local_ipv4_broadcasts():
+    targets = set()
+    try:
+        out = subprocess.getoutput('ip -o -4 addr show scope global 2>/dev/null')
+        for line in out.splitlines():
+            parts = line.split()
+            if 'brd' in parts:
+                idx = parts.index('brd')
+                if idx + 1 < len(parts):
+                    brd = parts[idx + 1].strip()
+                    if brd and not brd.startswith('127.'):
+                        targets.add(brd)
+    except Exception:
+        pass
+    return sorted(targets)
+
+
 def parse_peer_id(text):
     raw = str(text or '').strip()
     if not raw:
@@ -1087,6 +1175,7 @@ class InlineSocialEngine:
         self.threads = []
         self.peers = {}
         self.lock = threading.Lock()
+        self.local_ips = set(local_ipv4_addresses())
 
     def _find_open_port(self, base, span):
         for port in range(int(base), int(base) + int(span)):
@@ -1133,7 +1222,13 @@ class InlineSocialEngine:
     def _peer_key(self, host, port):
         return f'{host}:{int(port)}'
 
-    def _upsert_peer(self, name, host, port, source='LAN'):
+    def _is_local_host(self, host):
+        h = str(host or '').strip()
+        if not h:
+            return False
+        return h.startswith('127.') or h in self.local_ips
+
+    def _upsert_peer(self, name, host, port, source='LAN', node_id=''):
         if not host or not port:
             return
         key = self._peer_key(host, port)
@@ -1143,14 +1238,18 @@ class InlineSocialEngine:
             'host': str(host),
             'port': int(port),
             'source': source,
+            'node_id': str(node_id or ''),
             'last_seen': now,
         }
-        became_new = False
+        changed = False
         with self.lock:
-            if key not in self.peers:
-                became_new = True
+            prev = self.peers.get(key)
+            if prev is None:
+                changed = True
+            elif prev.get('name') != data['name'] or prev.get('node_id') != data['node_id']:
+                changed = True
             self.peers[key] = data
-        if became_new:
+        if changed:
             self.events.put(('peer_up', key, data))
 
     def _peer_gc_loop(self):
@@ -1166,22 +1265,57 @@ class InlineSocialEngine:
             for key in removed:
                 self.events.put(('peer_down', key))
 
+    def _discovery_targets(self):
+        out = [('255.255.255.255', self.discovery_port)]
+        seen = {out[0]}
+        for brd in local_ipv4_broadcasts():
+            target = (str(brd), self.discovery_port)
+            if target not in seen:
+                seen.add(target)
+                out.append(target)
+        return out
+
+    def _announce_packet(self):
+        return {
+            'type': 'announce',
+            'node_id': self.node_id,
+            'name': self.nickname,
+            'chat_port': int(self.chat_port or 0),
+            'reply_port': int(self.discovery_port),
+            'ts': time.time(),
+        }
+
+    def _probe_packet(self):
+        return {
+            'type': 'probe',
+            'node_id': self.node_id,
+            'name': self.nickname,
+            'chat_port': int(self.chat_port or 0),
+            'reply_port': int(self.discovery_port),
+            'ts': time.time(),
+        }
+
     def _udp_discovery_sender(self):
         sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
+        targets = self._discovery_targets()
+        ticks = 0
+        self.events.put(('status', f'LAN autodiscovery active on UDP {self.discovery_port}'))
         while self.running:
-            pkt = {
-                'type': 'announce',
-                'node_id': self.node_id,
-                'name': self.nickname,
-                'chat_port': int(self.chat_port or 0),
-                'ts': time.time(),
-            }
-            try:
-                sock.sendto(json.dumps(pkt).encode('utf-8', errors='ignore'), ('255.255.255.255', self.discovery_port))
-            except Exception:
-                pass
+            if ticks % 8 == 0:
+                targets = self._discovery_targets()
+            packets = [self._announce_packet()]
+            if ticks % 2 == 0:
+                packets.insert(0, self._probe_packet())
+            for pkt in packets:
+                raw = json.dumps(pkt).encode('utf-8', errors='ignore')
+                for target in targets:
+                    try:
+                        sock.sendto(raw, target)
+                    except Exception:
+                        pass
             time.sleep(2.5)
+            ticks += 1
         sock.close()
 
     def _udp_discovery_listener(self):
@@ -1202,22 +1336,35 @@ class InlineSocialEngine:
             except Exception:
                 continue
             host = addr[0]
+            if self._is_local_host(host):
+                continue
             try:
                 pkt = json.loads(raw.decode('utf-8', errors='ignore'))
             except Exception:
                 continue
-            if pkt.get('type') != 'announce':
+            remote_node = str(pkt.get('node_id') or '')
+            if remote_node == self.node_id:
                 continue
-            if pkt.get('node_id') == self.node_id:
-                continue
+            ptype = str(pkt.get('type') or '')
             try:
                 port = int(pkt.get('chat_port') or 0)
             except Exception:
                 port = 0
+            name = str(pkt.get('name') or host)
+            if ptype == 'probe':
+                reply = self._announce_packet()
+                try:
+                    sock.sendto(json.dumps(reply).encode('utf-8', errors='ignore'), (host, self.discovery_port))
+                except Exception:
+                    pass
+                if port > 0:
+                    self._upsert_peer(name, host, port, 'LAN', remote_node)
+                continue
+            if ptype != 'announce':
+                continue
             if port <= 0:
                 continue
-            name = str(pkt.get('name') or host)
-            self._upsert_peer(name, host, port, 'LAN')
+            self._upsert_peer(name, host, port, 'LAN', remote_node)
         sock.close()
 
     def _tcp_server_loop(self):
@@ -1230,6 +1377,7 @@ class InlineSocialEngine:
             srv.listen(16)
         except OSError:
             self.events.put(('status', f'Cannot bind TCP chat port {self.chat_port}'))
+            self.chat_port = 0
             srv.close()
             return
         srv.settimeout(1.0)
@@ -1260,12 +1408,13 @@ class InlineSocialEngine:
                     continue
                 sender = str(msg.get('from') or host)
                 text = str(msg.get('text') or '').strip()
+                sender_node = str(msg.get('node_id') or '')
                 try:
                     reply_port = int(msg.get('reply_port') or 0)
                 except Exception:
                     reply_port = 0
                 if reply_port > 0:
-                    self._upsert_peer(sender, host, reply_port, 'LAN')
+                    self._upsert_peer(sender, host, reply_port, 'LAN', sender_node)
                 if text:
                     self.events.put(('chat', sender, text))
         srv.close()
@@ -1287,7 +1436,7 @@ class SocialOverlay(QtWidgets.QDialog):
         self.timer = QtCore.QTimer(self)
         self.timer.timeout.connect(self._poll_events)
         self.timer.start(120)
-        self._append_system('LAN discovery enabled. Add peer for Internet P2P.')
+        self._append_system('LAN autodiscovery enabled (broadcast + probe). Add peer for Internet P2P.')
 
     def _build(self):
         self.setStyleSheet('''
@@ -1413,6 +1562,7 @@ class SocialOverlay(QtWidgets.QDialog):
             'host': str(peer.get('host')),
             'port': int(peer.get('port') or 0),
             'source': str(peer.get('source') or 'LAN'),
+            'node_id': str(peer.get('node_id') or ''),
         }
         if data['port'] <= 0 or not data['host']:
             return
@@ -1445,6 +1595,53 @@ class SocialOverlay(QtWidgets.QDialog):
             return None
         key = it.data(QtCore.Qt.UserRole)
         return self.peer_data.get(key)
+
+    def _host_priority(self, host):
+        h = str(host or '')
+        if h.startswith('127.'):
+            return 30
+        if h.startswith('10.0.2.'):
+            # VirtualBox NAT default, often not valid between different VMs.
+            return 20
+        return 0
+
+    def _send_candidates(self, peer):
+        selected_host = str(peer.get('host') or '')
+        selected_port = int(peer.get('port') or 0)
+        selected_name = str(peer.get('name') or '').strip().lower()
+        selected_node = str(peer.get('node_id') or '')
+        weighted = []
+        for key, p in self.peer_data.items():
+            host = str(p.get('host') or '')
+            try:
+                port = int(p.get('port') or 0)
+            except Exception:
+                port = 0
+            if not host or port <= 0:
+                continue
+            src = str(p.get('source') or '')
+            name = str(p.get('name') or '').strip().lower()
+            node = str(p.get('node_id') or '')
+            rank = 9
+            if host == selected_host and port == selected_port:
+                rank = 0
+            elif selected_node and node and node == selected_node:
+                rank = 1
+            elif host == selected_host:
+                rank = 2
+            elif src == 'LAN' and selected_name and name == selected_name:
+                rank = 3
+            weighted.append((rank, self._host_priority(host), host, port, key))
+        weighted.sort(key=lambda x: (x[0], x[1], x[2], x[3]))
+        out = []
+        seen = set()
+        for _rank, _hp, host, port, key in weighted:
+            endpoint = (host, int(port))
+            if endpoint in seen:
+                continue
+            seen.add(endpoint)
+            out.append((host, int(port), key))
+        return out
 
     def _save_manual_peers(self):
         arr = []
@@ -1481,7 +1678,12 @@ class SocialOverlay(QtWidgets.QDialog):
         self._append_system(f"Manual peer added: {parsed['host']}:{parsed['port']}")
 
     def _show_peer_ids(self):
-        lines = [f'{ip}:{self.engine.chat_port}' for ip in local_ipv4_addresses()]
+        ips = local_ipv4_addresses()
+        lines = [f'{ip}:{self.engine.chat_port}' for ip in ips]
+        if not self.engine.chat_port:
+            lines += ['', 'Warning: chat TCP server is not active on this dashboard.']
+        if ips and all(str(ip).startswith('10.0.2.') for ip in ips):
+            lines += ['', 'VirtualBox NAT detected (10.0.2.x only).', 'Use Bridged or Host-Only Adapter for VM-to-VM LAN chat.']
         QtWidgets.QMessageBox.information(self, 'My Peer IDs', '\n'.join(lines))
 
     def _show_lan_status(self):
@@ -1496,13 +1698,31 @@ class SocialOverlay(QtWidgets.QDialog):
         txt = self.input.text().strip()
         if not txt:
             return
-        try:
-            self.engine.send_chat(peer['host'], peer['port'], txt)
+        last_err = None
+        used = None
+        candidates = self._send_candidates(peer)
+        for host, port, key in candidates:
+            try:
+                self.engine.send_chat(host, port, txt)
+                used = (host, int(port), key)
+                break
+            except Exception as e:
+                last_err = e
+                continue
+        if used:
+            host, port, key = used
             self._append_chat(f"You -> {peer['name']}", txt)
-            self.status.setText(f"Sent to {peer['host']}:{peer['port']}")
+            if host == str(peer.get('host')) and int(port) == int(peer.get('port') or 0):
+                self.status.setText(f"Sent to {host}:{port}")
+            else:
+                self.status.setText(f"Sent via fallback {host}:{port}")
+                item = self.peer_items.get(key)
+                if item is not None:
+                    self.peers.setCurrentItem(item)
             self.input.clear()
-        except Exception as e:
-            self.status.setText(f'Cannot send: {e}')
+            return
+        err_txt = str(last_err) if last_err is not None else 'No reachable peer endpoint.'
+        self.status.setText(f'Cannot send: {err_txt}')
 
     def _poll_events(self):
         while True:
@@ -1582,7 +1802,7 @@ def tile_icon(action, text=''):
                 return icon
         return style.standardIcon(fallback)
 
-    if any(token in key for token in ('steam', 'retroarch', 'runner', 'casino', 'mission', 'game')):
+    if any(token in key for token in ('steam', 'retroarch', 'lutris', 'heroic', 'runner', 'casino', 'mission', 'game')):
         return themed(['steam', 'applications-games', 'input-gaming'], QtWidgets.QStyle.SP_MediaPlay)
     if any(token in key for token in ('store', 'avatar')):
         return themed(['folder-downloads', 'applications-other'], QtWidgets.QStyle.SP_DirIcon)
@@ -1959,6 +2179,7 @@ class Dashboard(QtWidgets.QMainWindow):
                     ('Steam', 'Steam', (270, 130)),
                     ('RetroArch', 'RetroArch', (270, 130)),
                     ('Store', 'Store', (270, 130)),
+                    ('Games Integrations', 'Integrations', (270, 130)),
                 ],
             },
             'tv & movies': {
@@ -2323,6 +2544,85 @@ class Dashboard(QtWidgets.QMainWindow):
         d.exec_()
         self._play_sfx('close')
 
+    def _platform_specs(self):
+        xui_bin = XUI_HOME / 'bin'
+        return {
+            'steam': {
+                'label': 'Steam',
+                'launch': xui_bin / 'xui_steam.sh',
+                'install': xui_bin / 'xui_install_steam.sh',
+            },
+            'retroarch': {
+                'label': 'RetroArch',
+                'launch': xui_bin / 'xui_retroarch.sh',
+                'install': xui_bin / 'xui_install_retroarch.sh',
+            },
+            'lutris': {
+                'label': 'Lutris',
+                'launch': xui_bin / 'xui_lutris.sh',
+                'install': xui_bin / 'xui_install_lutris.sh',
+            },
+            'heroic': {
+                'label': 'Heroic',
+                'launch': xui_bin / 'xui_heroic.sh',
+                'install': xui_bin / 'xui_install_heroic.sh',
+            },
+        }
+
+    def _platform_available(self, launch_script):
+        if not Path(launch_script).exists():
+            return False
+        rc = subprocess.call(
+            ['/bin/sh', '-c', f'"{launch_script}" --check'],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        return rc == 0
+
+    def _launch_platform(self, key):
+        specs = self._platform_specs()
+        spec = specs.get(str(key).lower())
+        if not spec:
+            self._msg('Platform', f'Unknown platform: {key}')
+            return
+        label = spec['label']
+        launch_script = spec['launch']
+        install_script = spec['install']
+        if self._platform_available(launch_script):
+            self._run('/bin/sh', ['-c', f'"{launch_script}"'])
+            return
+        ask = self._ask_yes_no(
+            label,
+            f'{label} is not installed yet.\n\nDo you want to run installer now?'
+        )
+        if ask:
+            if Path(install_script).exists():
+                self._run_terminal(f'"{install_script}"')
+            else:
+                self._msg(label, f'Installer not found: {install_script}')
+
+    def _install_platform(self, key):
+        specs = self._platform_specs()
+        spec = specs.get(str(key).lower())
+        if not spec:
+            self._msg('Platform', f'Unknown platform: {key}')
+            return
+        install_script = spec['install']
+        if Path(install_script).exists():
+            self._run_terminal(f'"{install_script}"')
+        else:
+            self._msg(spec['label'], f'Installer not found: {install_script}')
+
+    def _show_platform_status(self):
+        status_script = XUI_HOME / 'bin' / 'xui_platform_status.sh'
+        if status_script.exists():
+            out = subprocess.getoutput(f'/bin/sh -c "{status_script}"')
+            self._msg('Games Platforms', out or 'No platform status data.')
+            return
+        compat = XUI_HOME / 'bin' / 'xui_compat_status.sh'
+        out = subprocess.getoutput(f'/bin/sh -c "{compat}"') if compat.exists() else ''
+        self._msg('Games Platforms', out or 'No status script available.')
+
     def _msg(self, title, text):
         self._play_sfx('open')
         self._popup_message(title, text, QtWidgets.QMessageBox.Information, QtWidgets.QMessageBox.Ok)
@@ -2552,6 +2852,13 @@ class Dashboard(QtWidgets.QMainWindow):
             'Sign In': 'Toggle local sign-in state for gamer profile.',
             'Steam': 'Launch Steam/compat launcher.',
             'RetroArch': 'Launch RetroArch frontend.',
+            'Lutris': 'Launch Lutris game platform.',
+            'Heroic': 'Launch Heroic Games Launcher.',
+            'Games Integrations': 'Manage Steam/RetroArch/Lutris/Heroic from one place.',
+            'Platforms Status': 'Show installation/status of integrated game platforms.',
+            'Install RetroArch': 'Install RetroArch from package manager or Flatpak.',
+            'Install Lutris': 'Install Lutris from package manager or Flatpak.',
+            'Install Heroic': 'Install Heroic Games Launcher.',
             'Store': 'Open XUI store and inventory.',
             'Casino': 'Launch casino minigame.',
             'Runner': 'Launch runner minigame.',
@@ -2609,7 +2916,7 @@ class Dashboard(QtWidgets.QMainWindow):
         elif action == 'Runner':
             self._run('/bin/sh', ['-c', f'{xui}/bin/xui_python.sh {xui}/games/runner.py'])
         elif action == 'Steam':
-            self._run('/bin/sh', ['-c', f'{xui}/bin/xui_steam.sh'])
+            self._launch_platform('steam')
         elif action in ('Store', 'Avatar Store'):
             self._run('/bin/sh', ['-c', f'{xui}/bin/xui_store.sh'])
         elif action in ('Missions', 'Misiones'):
@@ -2666,7 +2973,16 @@ class Dashboard(QtWidgets.QMainWindow):
                 'Emoji Picker', 'Cron Manager', 'Backup Data', 'Restore Last Backup', 'Plugin Manager',
                 'Logs Viewer', 'JSON Browser', 'Archive Manager', 'Hash Tool', 'Ping Test',
                 'Docker Status', 'VM Status', 'Open Notes', 'App Launcher', 'Service Manager',
-                'Developer Tools', 'Scan Media Games', 'Install Wine Runtime'
+                'Developer Tools', 'Scan Media Games', 'Install Wine Runtime', 'Games Integrations'
+            ])
+        elif action == 'Games Integrations':
+            self._menu('Games Integrations', [
+                'Platforms Status',
+                'Steam', 'Install Steam',
+                'RetroArch', 'Install RetroArch',
+                'Lutris', 'Install Lutris',
+                'Heroic', 'Install Heroic',
+                'Compat X86'
             ])
         elif action == 'Developer Tools':
             self._menu('Developer Tools', [
@@ -2680,7 +2996,13 @@ class Dashboard(QtWidgets.QMainWindow):
         elif action == 'Service Status':
             self._run_terminal(f'"{xui}/bin/xui_service_status.sh"')
         elif action == 'Compat X86':
-            self._menu('Compat X86', ['Compatibility Status', 'Install Box64', 'Install Steam', 'Steam'])
+            self._menu('Compat X86', [
+                'Platforms Status',
+                'Compatibility Status',
+                'Install Box64',
+                'Install Steam', 'Install RetroArch', 'Install Lutris', 'Install Heroic',
+                'Steam', 'RetroArch', 'Lutris', 'Heroic'
+            ])
         elif action == 'Compatibility Status':
             subprocess.getoutput(f'/bin/sh -c "{xui}/bin/xui_mission_mark.sh m4"')
             out = subprocess.getoutput(f'/bin/sh -c "{xui}/bin/xui_compat_status.sh"')
@@ -2688,7 +3010,15 @@ class Dashboard(QtWidgets.QMainWindow):
         elif action == 'Install Box64':
             self._run_terminal(f'"{xui}/bin/xui_install_box64.sh"')
         elif action == 'Install Steam':
-            self._run_terminal(f'"{xui}/bin/xui_install_steam.sh"')
+            self._install_platform('steam')
+        elif action == 'Install RetroArch':
+            self._install_platform('retroarch')
+        elif action == 'Install Lutris':
+            self._install_platform('lutris')
+        elif action == 'Install Heroic':
+            self._install_platform('heroic')
+        elif action == 'Platforms Status':
+            self._show_platform_status()
         elif action == 'Game Details':
             self._msg('Games', 'Use Casino, Runner, Missions o Steam para jugar.')
         elif action in ('Media Player', 'Boot Video'):
@@ -2765,7 +3095,11 @@ class Dashboard(QtWidgets.QMainWindow):
             if ok:
                 self._run_terminal(f'"{xui}/bin/xui_http_server.sh" {p} "$HOME"')
         elif action == 'RetroArch':
-            self._run('/bin/sh', ['-c', f'{xui}/bin/xui_retroarch.sh'])
+            self._launch_platform('retroarch')
+        elif action == 'Lutris':
+            self._launch_platform('lutris')
+        elif action == 'Heroic':
+            self._launch_platform('heroic')
         elif action == 'Torrent':
             self._run('/bin/sh', ['-c', f'{xui}/bin/xui_torrent.sh'])
         elif action == 'Kodi':
@@ -5303,6 +5637,23 @@ def list_local_ips():
     return sorted(ips) if ips else ['127.0.0.1']
 
 
+def list_local_broadcasts():
+    targets = set()
+    try:
+        out = subprocess.getoutput('ip -o -4 addr show scope global 2>/dev/null')
+        for line in out.splitlines():
+            parts = line.split()
+            if 'brd' in parts:
+                idx = parts.index('brd')
+                if idx + 1 < len(parts):
+                    brd = parts[idx + 1].strip()
+                    if brd and not brd.startswith('127.'):
+                        targets.add(brd)
+    except Exception:
+        pass
+    return sorted(targets)
+
+
 def get_public_ip():
     try:
         with urllib.request.urlopen('https://api.ipify.org', timeout=2) as r:
@@ -5364,6 +5715,7 @@ class SocialNetworkEngine:
         self.threads = []
         self.peers = {}
         self.lock = threading.Lock()
+        self.local_ips = set(list_local_ips())
 
     def start(self):
         self.running = True
@@ -5394,7 +5746,13 @@ class SocialNetworkEngine:
         with socket.create_connection((host, int(port)), timeout=4) as s:
             s.sendall(body)
 
-    def _push_peer(self, name, host, port, source='LAN'):
+    def _is_local_host(self, host):
+        h = str(host or '').strip()
+        if not h:
+            return False
+        return h.startswith('127.') or h in self.local_ips
+
+    def _push_peer(self, name, host, port, source='LAN', node_id=''):
         if not host or not port:
             return
         key = f'{host}:{int(port)}'
@@ -5406,10 +5764,11 @@ class SocialNetworkEngine:
                 'host': host,
                 'port': int(port),
                 'source': source,
+                'node_id': str(node_id or ''),
                 'last_seen': now,
             }
-        if prev is None or prev.get('name') != name:
-            self.events.put(('peer_up', key, name or host, host, int(port), source))
+        if prev is None or prev.get('name') != name or prev.get('node_id') != str(node_id or ''):
+            self.events.put(('peer_up', key, name or host, host, int(port), source, str(node_id or '')))
 
     def _peer_gc_loop(self):
         while self.running:
@@ -5425,22 +5784,57 @@ class SocialNetworkEngine:
             for key in stale:
                 self.events.put(('peer_down', key))
 
-    def _discovery_sender_loop(self):
-        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
-        packet = {
+    def _discovery_targets(self):
+        targets = [('255.255.255.255', DISCOVERY_PORT)]
+        seen = {targets[0]}
+        for brd in list_local_broadcasts():
+            target = (str(brd), DISCOVERY_PORT)
+            if target not in seen:
+                seen.add(target)
+                targets.append(target)
+        return targets
+
+    def _announce_packet(self):
+        return {
             'type': 'announce',
             'node_id': self.node_id,
             'name': self.nickname,
             'chat_port': self.chat_port,
+            'reply_port': DISCOVERY_PORT,
+            'ts': time.time(),
         }
+
+    def _probe_packet(self):
+        return {
+            'type': 'probe',
+            'node_id': self.node_id,
+            'name': self.nickname,
+            'chat_port': self.chat_port,
+            'reply_port': DISCOVERY_PORT,
+            'ts': time.time(),
+        }
+
+    def _discovery_sender_loop(self):
+        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
+        targets = self._discovery_targets()
+        ticks = 0
+        self.events.put(('status', f'LAN autodiscovery active on UDP {DISCOVERY_PORT}'))
         while self.running:
-            packet['ts'] = time.time()
-            try:
-                sock.sendto(json.dumps(packet).encode('utf-8', errors='ignore'), ('255.255.255.255', DISCOVERY_PORT))
-            except Exception:
-                pass
+            if ticks % 8 == 0:
+                targets = self._discovery_targets()
+            packets = [self._announce_packet()]
+            if ticks % 2 == 0:
+                packets.insert(0, self._probe_packet())
+            for packet in packets:
+                raw = json.dumps(packet).encode('utf-8', errors='ignore')
+                for target in targets:
+                    try:
+                        sock.sendto(raw, target)
+                    except Exception:
+                        pass
             time.sleep(ANNOUNCE_INTERVAL)
+            ticks += 1
         sock.close()
 
     def _discovery_listener_loop(self):
@@ -5461,22 +5855,35 @@ class SocialNetworkEngine:
             except Exception:
                 continue
             host = addr[0]
+            if self._is_local_host(host):
+                continue
             try:
                 data = json.loads(raw.decode('utf-8', errors='ignore'))
             except Exception:
                 continue
-            if data.get('type') != 'announce':
+            remote_node = str(data.get('node_id') or '')
+            if remote_node == self.node_id:
                 continue
-            if data.get('node_id') == self.node_id:
-                continue
+            ptype = str(data.get('type') or '')
             try:
                 port = int(data.get('chat_port') or 0)
             except Exception:
                 port = 0
+            name = str(data.get('name') or host)
+            if ptype == 'probe':
+                reply = self._announce_packet()
+                try:
+                    sock.sendto(json.dumps(reply).encode('utf-8', errors='ignore'), (host, DISCOVERY_PORT))
+                except Exception:
+                    pass
+                if port > 0:
+                    self._push_peer(name, host, port, 'LAN', remote_node)
+                continue
+            if ptype != 'announce':
+                continue
             if port <= 0:
                 continue
-            name = str(data.get('name') or host)
-            self._push_peer(name, host, port, 'LAN')
+            self._push_peer(name, host, port, 'LAN', remote_node)
         sock.close()
 
     def _tcp_server_loop(self):
@@ -5489,6 +5896,7 @@ class SocialNetworkEngine:
             srv.listen(24)
         except OSError:
             self.events.put(('status', f'Cannot open TCP chat server on {self.chat_port}.'))
+            self.chat_port = 0
             srv.close()
             return
         srv.settimeout(1.0)
@@ -5519,12 +5927,13 @@ class SocialNetworkEngine:
                     continue
                 name = str(msg.get('from') or host)
                 text = str(msg.get('text') or '').strip()
+                sender_node = str(msg.get('node_id') or '')
                 try:
                     reply_port = int(msg.get('reply_port') or 0)
                 except Exception:
                     reply_port = 0
                 if reply_port > 0:
-                    self._push_peer(name, host, reply_port, 'LAN')
+                    self._push_peer(name, host, reply_port, 'LAN', sender_node)
                 if text:
                     self.events.put(('chat', name, host, reply_port, text, float(msg.get('ts') or time.time())))
         srv.close()
@@ -5546,7 +5955,7 @@ class SocialChatWindow(QtWidgets.QWidget):
         self.timer = QtCore.QTimer(self)
         self.timer.timeout.connect(self._poll_events)
         self.timer.start(120)
-        self._append_system('LAN discovery enabled. Add manual peer for Internet P2P.')
+        self._append_system('LAN autodiscovery enabled (broadcast + probe). Add manual peer for Internet P2P.')
 
     def _build_ui(self):
         self.setStyleSheet('''
@@ -5605,13 +6014,14 @@ class SocialChatWindow(QtWidgets.QWidget):
     def _peer_row_text(self, p):
         return f"{p['name']}  [{p['host']}:{p['port']}]  ({p['source']})"
 
-    def _upsert_peer(self, name, host, port, source='LAN', persist=False):
+    def _upsert_peer(self, name, host, port, source='LAN', node_id='', persist=False):
         key = f'{host}:{int(port)}'
         data = {
             'name': (name or host).strip() or host,
             'host': host,
             'port': int(port),
             'source': source,
+            'node_id': str(node_id or ''),
         }
         if key in self.peer_items:
             self.peer_data[key].update(data)
@@ -5656,6 +6066,52 @@ class SocialChatWindow(QtWidgets.QWidget):
         key = item.data(QtCore.Qt.UserRole)
         return self.peer_data.get(key)
 
+    def _host_priority(self, host):
+        h = str(host or '')
+        if h.startswith('127.'):
+            return 30
+        if h.startswith('10.0.2.'):
+            return 20
+        return 0
+
+    def _send_candidates(self, peer):
+        selected_host = str(peer.get('host') or '')
+        selected_port = int(peer.get('port') or 0)
+        selected_name = str(peer.get('name') or '').strip().lower()
+        selected_node = str(peer.get('node_id') or '')
+        weighted = []
+        for key, p in self.peer_data.items():
+            host = str(p.get('host') or '')
+            try:
+                port = int(p.get('port') or 0)
+            except Exception:
+                port = 0
+            if not host or port <= 0:
+                continue
+            src = str(p.get('source') or '')
+            name = str(p.get('name') or '').strip().lower()
+            node = str(p.get('node_id') or '')
+            rank = 9
+            if host == selected_host and port == selected_port:
+                rank = 0
+            elif selected_node and node and node == selected_node:
+                rank = 1
+            elif host == selected_host:
+                rank = 2
+            elif src == 'LAN' and selected_name and name == selected_name:
+                rank = 3
+            weighted.append((rank, self._host_priority(host), host, port, key))
+        weighted.sort(key=lambda x: (x[0], x[1], x[2], x[3]))
+        out = []
+        seen = set()
+        for _rank, _hp, host, port, key in weighted:
+            endpoint = (host, int(port))
+            if endpoint in seen:
+                continue
+            seen.add(endpoint)
+            out.append((host, int(port), key))
+        return out
+
     def _send_current(self):
         peer = self._current_peer()
         if not peer:
@@ -5664,20 +6120,38 @@ class SocialChatWindow(QtWidgets.QWidget):
         text = self.msg.text().strip()
         if not text:
             return
-        try:
-            self.engine.send_chat(peer['host'], peer['port'], text)
+        last_err = None
+        used = None
+        candidates = self._send_candidates(peer)
+        for host, port, key in candidates:
+            try:
+                self.engine.send_chat(host, port, text)
+                used = (host, int(port), key)
+                break
+            except Exception as e:
+                last_err = e
+                continue
+        if used:
+            host, port, key = used
             self._append_msg(f'You -> {peer["name"]}', text)
-            self.status.setText(f'Sent to {peer["host"]}:{peer["port"]}')
+            if host == str(peer.get('host')) and int(port) == int(peer.get('port') or 0):
+                self.status.setText(f'Sent to {host}:{port}')
+            else:
+                self.status.setText(f'Sent via fallback {host}:{port}')
+                item = self.peer_items.get(key)
+                if item is not None:
+                    self.peer_list.setCurrentItem(item)
             self.msg.clear()
-        except Exception as e:
-            self.status.setText(f'Cannot send: {e}')
-            QtWidgets.QMessageBox.warning(
-                self,
-                'Send failed',
-                f'Could not connect to {peer["host"]}:{peer["port"]}\n\n'
-                'If peer is on Internet, use Tailscale/ZeroTier or forward TCP 38600.\n'
-                f'Error: {e}'
-            )
+            return
+        err = str(last_err) if last_err is not None else 'No reachable peer endpoint.'
+        self.status.setText(f'Cannot send: {err}')
+        QtWidgets.QMessageBox.warning(
+            self,
+            'Send failed',
+            f'Could not connect to selected peer candidates.\n\n'
+            'If peer is on Internet, use Tailscale/ZeroTier or forward TCP 38600.\n'
+            f'Error: {err}'
+        )
 
     def _add_peer_dialog(self):
         txt, ok = QtWidgets.QInputDialog.getText(
@@ -5696,9 +6170,14 @@ class SocialChatWindow(QtWidgets.QWidget):
         self._append_system(f'Manual peer added: {parsed["host"]}:{parsed["port"]}')
 
     def _show_my_peer_ids(self):
-        ids = [f'{ip}:{self.engine.chat_port}' for ip in list_local_ips()]
+        ips = list_local_ips()
+        ids = [f'{ip}:{self.engine.chat_port}' for ip in ips]
         pub = get_public_ip()
         lines = ['LAN IDs:'] + [f'  {v}' for v in ids]
+        if not self.engine.chat_port:
+            lines += ['', 'Warning: chat TCP server is not active on this dashboard.']
+        if ips and all(str(ip).startswith('10.0.2.') for ip in ips):
+            lines += ['', 'VirtualBox NAT detected (10.0.2.x only).', 'Use Bridged or Host-Only Adapter for VM-to-VM LAN chat.']
         if pub:
             lines += ['', f'Public IP (approx): {pub}:{self.engine.chat_port}']
         lines += ['', 'Tip: for Internet P2P use Tailscale/ZeroTier or router port-forward TCP 38600.']
@@ -5744,8 +6223,8 @@ class SocialChatWindow(QtWidgets.QWidget):
                 self.status.setText(str(evt[1]))
                 continue
             if kind == 'peer_up':
-                _kind, key, name, host, port, source = evt
-                self._upsert_peer(name, host, port, source)
+                _kind, key, name, host, port, source, node_id = evt
+                self._upsert_peer(name, host, port, source, node_id)
                 continue
             if kind == 'peer_down':
                 _kind, key = evt
@@ -5805,6 +6284,26 @@ if ip -brief -4 addr show tailscale0 >/dev/null 2>&1; then
     [ -n "${TS_IP:-}" ] && echo "  $TS_IP:$CHAT_PORT (tailscale)"
 fi
 echo
+ALL_IPS="$(hostname -I 2>/dev/null | xargs -n1 echo 2>/dev/null || true)"
+if [ -n "${ALL_IPS:-}" ]; then
+    NON_NAT="$(echo "$ALL_IPS" | grep -Ev '^10\.0\.2\.' || true)"
+    if [ -z "${NON_NAT:-}" ]; then
+        echo "Warning: only VirtualBox NAT range (10.0.2.x) detected."
+        echo "LAN between VMs usually requires Bridged or Host-Only adapter."
+        echo
+    fi
+fi
+
+echo "=== Local listeners (chat/discovery) ==="
+if command -v ss >/dev/null 2>&1; then
+    ss -lun | awk -v p=":$DISC_PORT" '$0 ~ p' || true
+    ss -ltn | awk -v p=":$CHAT_PORT" '$0 ~ p' || true
+else
+    netstat -uln 2>/dev/null | grep ":$DISC_PORT" || true
+    netstat -ltn 2>/dev/null | grep ":$CHAT_PORT" || true
+fi
+echo
+
 if command -v curl >/dev/null 2>&1; then
     PUB_IP=$(curl -4 -fsS --max-time 2 https://api.ipify.org 2>/dev/null || true)
     if [ -n "${PUB_IP:-}" ]; then
@@ -6066,12 +6565,321 @@ fi
 BASH
         chmod +x "$BIN_DIR/xui_update_system.sh"
 
+        # RetroArch installer
+        cat > "$BIN_DIR/xui_install_retroarch.sh" <<'BASH'
+#!/usr/bin/env bash
+set -euo pipefail
+as_root(){
+  if [ "$(id -u)" -eq 0 ]; then "$@"; return $?; fi
+  if command -v sudo >/dev/null 2>&1; then sudo "$@"; return $?; fi
+  echo "sudo required: $*" >&2
+  return 1
+}
+wait_apt(){
+  local t=0
+  while pgrep -x apt >/dev/null 2>&1 || pgrep -x apt-get >/dev/null 2>&1 || pgrep -x dpkg >/dev/null 2>&1 || pgrep -f unattended-upgrade >/dev/null 2>&1; do
+    [ "$t" -ge 180 ] && break
+    sleep 2
+    t=$((t+2))
+  done
+}
+ensure_flatpak(){
+  if command -v flatpak >/dev/null 2>&1; then
+    return 0
+  fi
+  if command -v apt >/dev/null 2>&1; then
+    wait_apt
+    as_root apt update || true
+    wait_apt
+    as_root apt install -y flatpak || true
+  elif command -v dnf >/dev/null 2>&1; then
+    as_root dnf install -y flatpak || true
+  elif command -v pacman >/dev/null 2>&1; then
+    as_root pacman -S --noconfirm flatpak || true
+  fi
+  command -v flatpak >/dev/null 2>&1
+}
+if command -v retroarch >/dev/null 2>&1; then
+  echo "RetroArch already installed."
+  exit 0
+fi
+if command -v flatpak >/dev/null 2>&1 && flatpak info org.libretro.RetroArch >/dev/null 2>&1; then
+  echo "RetroArch (Flatpak) already installed."
+  exit 0
+fi
+if command -v apt >/dev/null 2>&1; then
+  wait_apt
+  as_root apt update || true
+  wait_apt
+  as_root apt install -y retroarch || true
+elif command -v dnf >/dev/null 2>&1; then
+  as_root dnf install -y retroarch || true
+elif command -v pacman >/dev/null 2>&1; then
+  as_root pacman -S --noconfirm retroarch || true
+fi
+if ! command -v retroarch >/dev/null 2>&1; then
+  ensure_flatpak || true
+fi
+if ! command -v retroarch >/dev/null 2>&1 && command -v flatpak >/dev/null 2>&1; then
+  if ! flatpak remote-list | grep -q '^flathub'; then
+    flatpak remote-add --if-not-exists flathub https://flathub.org/repo/flathub.flatpakrepo || true
+  fi
+  flatpak install -y flathub org.libretro.RetroArch || true
+fi
+if command -v retroarch >/dev/null 2>&1 || (command -v flatpak >/dev/null 2>&1 && flatpak info org.libretro.RetroArch >/dev/null 2>&1); then
+  echo "RetroArch installed successfully."
+  exit 0
+fi
+echo "RetroArch installation failed."
+exit 1
+BASH
+        chmod +x "$BIN_DIR/xui_install_retroarch.sh"
+
         # RetroArch launcher
         cat > "$BIN_DIR/xui_retroarch.sh" <<'BASH'
 #!/usr/bin/env bash
-if command -v retroarch >/dev/null 2>&1; then retroarch "$@"; else echo "retroarch not found"; exit 1; fi
+set -euo pipefail
+CHECK_ONLY=0
+if [ "${1:-}" = "--check" ]; then
+  CHECK_ONLY=1
+  shift || true
+fi
+has_retroarch(){
+  command -v retroarch >/dev/null 2>&1 && return 0
+  command -v flatpak >/dev/null 2>&1 && flatpak info org.libretro.RetroArch >/dev/null 2>&1 && return 0
+  return 1
+}
+if [ "$CHECK_ONLY" = "1" ]; then
+  has_retroarch && exit 0 || exit 1
+fi
+if command -v retroarch >/dev/null 2>&1; then
+  exec retroarch "$@"
+fi
+if command -v flatpak >/dev/null 2>&1 && flatpak info org.libretro.RetroArch >/dev/null 2>&1; then
+  exec flatpak run org.libretro.RetroArch "$@"
+fi
+echo "RetroArch not available."
+echo "Run: $HOME/.xui/bin/xui_install_retroarch.sh"
+exit 1
 BASH
         chmod +x "$BIN_DIR/xui_retroarch.sh"
+
+        # Lutris installer
+        cat > "$BIN_DIR/xui_install_lutris.sh" <<'BASH'
+#!/usr/bin/env bash
+set -euo pipefail
+as_root(){
+  if [ "$(id -u)" -eq 0 ]; then "$@"; return $?; fi
+  if command -v sudo >/dev/null 2>&1; then sudo "$@"; return $?; fi
+  echo "sudo required: $*" >&2
+  return 1
+}
+wait_apt(){
+  local t=0
+  while pgrep -x apt >/dev/null 2>&1 || pgrep -x apt-get >/dev/null 2>&1 || pgrep -x dpkg >/dev/null 2>&1 || pgrep -f unattended-upgrade >/dev/null 2>&1; do
+    [ "$t" -ge 180 ] && break
+    sleep 2
+    t=$((t+2))
+  done
+}
+ensure_flatpak(){
+  if command -v flatpak >/dev/null 2>&1; then
+    return 0
+  fi
+  if command -v apt >/dev/null 2>&1; then
+    wait_apt
+    as_root apt update || true
+    wait_apt
+    as_root apt install -y flatpak || true
+  elif command -v dnf >/dev/null 2>&1; then
+    as_root dnf install -y flatpak || true
+  elif command -v pacman >/dev/null 2>&1; then
+    as_root pacman -S --noconfirm flatpak || true
+  fi
+  command -v flatpak >/dev/null 2>&1
+}
+if command -v lutris >/dev/null 2>&1; then
+  echo "Lutris already installed."
+  exit 0
+fi
+if command -v flatpak >/dev/null 2>&1 && flatpak info net.lutris.Lutris >/dev/null 2>&1; then
+  echo "Lutris (Flatpak) already installed."
+  exit 0
+fi
+if command -v apt >/dev/null 2>&1; then
+  wait_apt
+  as_root apt update || true
+  wait_apt
+  as_root apt install -y lutris || true
+elif command -v dnf >/dev/null 2>&1; then
+  as_root dnf install -y lutris || true
+elif command -v pacman >/dev/null 2>&1; then
+  as_root pacman -S --noconfirm lutris || true
+fi
+if ! command -v lutris >/dev/null 2>&1; then
+  ensure_flatpak || true
+fi
+if ! command -v lutris >/dev/null 2>&1 && command -v flatpak >/dev/null 2>&1; then
+  if ! flatpak remote-list | grep -q '^flathub'; then
+    flatpak remote-add --if-not-exists flathub https://flathub.org/repo/flathub.flatpakrepo || true
+  fi
+  flatpak install -y flathub net.lutris.Lutris || true
+fi
+if command -v lutris >/dev/null 2>&1 || (command -v flatpak >/dev/null 2>&1 && flatpak info net.lutris.Lutris >/dev/null 2>&1); then
+  echo "Lutris installed successfully."
+  exit 0
+fi
+echo "Lutris installation failed."
+exit 1
+BASH
+        chmod +x "$BIN_DIR/xui_install_lutris.sh"
+
+        # Lutris launcher
+        cat > "$BIN_DIR/xui_lutris.sh" <<'BASH'
+#!/usr/bin/env bash
+set -euo pipefail
+CHECK_ONLY=0
+if [ "${1:-}" = "--check" ]; then
+  CHECK_ONLY=1
+  shift || true
+fi
+has_lutris(){
+  command -v lutris >/dev/null 2>&1 && return 0
+  command -v flatpak >/dev/null 2>&1 && flatpak info net.lutris.Lutris >/dev/null 2>&1 && return 0
+  return 1
+}
+if [ "$CHECK_ONLY" = "1" ]; then
+  has_lutris && exit 0 || exit 1
+fi
+if command -v lutris >/dev/null 2>&1; then
+  exec lutris "$@"
+fi
+if command -v flatpak >/dev/null 2>&1 && flatpak info net.lutris.Lutris >/dev/null 2>&1; then
+  exec flatpak run net.lutris.Lutris "$@"
+fi
+echo "Lutris not available."
+echo "Run: $HOME/.xui/bin/xui_install_lutris.sh"
+exit 1
+BASH
+        chmod +x "$BIN_DIR/xui_lutris.sh"
+
+        # Heroic installer
+        cat > "$BIN_DIR/xui_install_heroic.sh" <<'BASH'
+#!/usr/bin/env bash
+set -euo pipefail
+as_root(){
+  if [ "$(id -u)" -eq 0 ]; then "$@"; return $?; fi
+  if command -v sudo >/dev/null 2>&1; then sudo "$@"; return $?; fi
+  echo "sudo required: $*" >&2
+  return 1
+}
+wait_apt(){
+  local t=0
+  while pgrep -x apt >/dev/null 2>&1 || pgrep -x apt-get >/dev/null 2>&1 || pgrep -x dpkg >/dev/null 2>&1 || pgrep -f unattended-upgrade >/dev/null 2>&1; do
+    [ "$t" -ge 180 ] && break
+    sleep 2
+    t=$((t+2))
+  done
+}
+ensure_flatpak(){
+  if command -v flatpak >/dev/null 2>&1; then
+    return 0
+  fi
+  if command -v apt >/dev/null 2>&1; then
+    wait_apt
+    as_root apt update || true
+    wait_apt
+    as_root apt install -y flatpak || true
+  elif command -v dnf >/dev/null 2>&1; then
+    as_root dnf install -y flatpak || true
+  elif command -v pacman >/dev/null 2>&1; then
+    as_root pacman -S --noconfirm flatpak || true
+  fi
+  command -v flatpak >/dev/null 2>&1
+}
+if command -v heroic >/dev/null 2>&1 || command -v heroic-games-launcher >/dev/null 2>&1; then
+  echo "Heroic already installed."
+  exit 0
+fi
+if command -v flatpak >/dev/null 2>&1 && flatpak info com.heroicgameslauncher.hgl >/dev/null 2>&1; then
+  echo "Heroic (Flatpak) already installed."
+  exit 0
+fi
+if command -v apt >/dev/null 2>&1; then
+  wait_apt
+  as_root apt update || true
+  wait_apt
+  as_root apt install -y heroic heroic-games-launcher || true
+elif command -v dnf >/dev/null 2>&1; then
+  as_root dnf install -y heroic-games-launcher || true
+elif command -v pacman >/dev/null 2>&1; then
+  as_root pacman -S --noconfirm heroic-games-launcher || true
+fi
+if ! command -v heroic >/dev/null 2>&1 && ! command -v heroic-games-launcher >/dev/null 2>&1; then
+  ensure_flatpak || true
+fi
+if ! command -v heroic >/dev/null 2>&1 && ! command -v heroic-games-launcher >/dev/null 2>&1 && command -v flatpak >/dev/null 2>&1; then
+  if ! flatpak remote-list | grep -q '^flathub'; then
+    flatpak remote-add --if-not-exists flathub https://flathub.org/repo/flathub.flatpakrepo || true
+  fi
+  flatpak install -y flathub com.heroicgameslauncher.hgl || true
+fi
+if command -v heroic >/dev/null 2>&1 || command -v heroic-games-launcher >/dev/null 2>&1 || (command -v flatpak >/dev/null 2>&1 && flatpak info com.heroicgameslauncher.hgl >/dev/null 2>&1); then
+  echo "Heroic installed successfully."
+  exit 0
+fi
+echo "Heroic installation failed."
+exit 1
+BASH
+        chmod +x "$BIN_DIR/xui_install_heroic.sh"
+
+        # Heroic launcher
+        cat > "$BIN_DIR/xui_heroic.sh" <<'BASH'
+#!/usr/bin/env bash
+set -euo pipefail
+CHECK_ONLY=0
+if [ "${1:-}" = "--check" ]; then
+  CHECK_ONLY=1
+  shift || true
+fi
+has_heroic(){
+  command -v heroic >/dev/null 2>&1 && return 0
+  command -v heroic-games-launcher >/dev/null 2>&1 && return 0
+  command -v flatpak >/dev/null 2>&1 && flatpak info com.heroicgameslauncher.hgl >/dev/null 2>&1 && return 0
+  return 1
+}
+if [ "$CHECK_ONLY" = "1" ]; then
+  has_heroic && exit 0 || exit 1
+fi
+if command -v heroic >/dev/null 2>&1; then
+  exec heroic "$@"
+fi
+if command -v heroic-games-launcher >/dev/null 2>&1; then
+  exec heroic-games-launcher "$@"
+fi
+if command -v flatpak >/dev/null 2>&1 && flatpak info com.heroicgameslauncher.hgl >/dev/null 2>&1; then
+  exec flatpak run com.heroicgameslauncher.hgl "$@"
+fi
+echo "Heroic not available."
+echo "Run: $HOME/.xui/bin/xui_install_heroic.sh"
+exit 1
+BASH
+        chmod +x "$BIN_DIR/xui_heroic.sh"
+
+        # Games platform status
+        cat > "$BIN_DIR/xui_platform_status.sh" <<'BASH'
+#!/usr/bin/env bash
+set -euo pipefail
+echo "=== XUI Games Platforms ==="
+echo "steam: $("$HOME/.xui/bin/xui_steam.sh" --check >/dev/null 2>&1 && echo ready || echo missing)"
+echo "retroarch: $("$HOME/.xui/bin/xui_retroarch.sh" --check >/dev/null 2>&1 && echo ready || echo missing)"
+echo "lutris: $("$HOME/.xui/bin/xui_lutris.sh" --check >/dev/null 2>&1 && echo ready || echo missing)"
+echo "heroic: $("$HOME/.xui/bin/xui_heroic.sh" --check >/dev/null 2>&1 && echo ready || echo missing)"
+echo
+echo "Compatibility:"
+"$HOME/.xui/bin/xui_compat_status.sh" 2>/dev/null || true
+BASH
+        chmod +x "$BIN_DIR/xui_platform_status.sh"
 
         # Process monitor wrapper
         cat > "$BIN_DIR/xui_process_monitor.sh" <<'BASH'
