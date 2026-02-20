@@ -1,0 +1,35 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Clean minimal XUI installer (safe trial file)
+USER_HOME="${HOME:-/home/$(whoami)}"
+XUI_DIR="$USER_HOME/.xui"
+ASSETS_DIR="$XUI_DIR/assets"
+BIN_DIR="$XUI_DIR/bin"
+DASH_DIR="$XUI_DIR/dashboard"
+
+ensure_dirs(){ mkdir -p "$ASSETS_DIR" "$BIN_DIR" "$DASH_DIR"; }
+
+write_dashboard_py(){
+  cat > "$DASH_DIR/pyqt_dashboard_improved.py" <<'PY'
+#!/usr/bin/env python3
+import sys
+try:
+    from PyQt5 import QtWidgets
+except Exception:
+    print('PyQt5 not installed')
+    sys.exit(1)
+app = QtWidgets.QApplication([])
+win = QtWidgets.QWidget()
+win.setWindowTitle('XUI Dashboard')
+QtWidgets.QLabel('Placeholder', parent=win)
+win.show()
+sys.exit(app.exec_())
+PY
+  chmod +x "$DASH_DIR/pyqt_dashboard_improved.py" || true
+  echo "Wrote $DASH_DIR/pyqt_dashboard_improved.py"
+}
+
+main(){ ensure_dirs; write_dashboard_py; echo 'Done'; }
+
+if [ "${1:-}" = "--yes-install" ]; then main; else echo "Usage: $0 --yes-install"; fi
