@@ -929,6 +929,7 @@ import subprocess
 import shutil
 import os
 import time
+import shlex
 import queue
 import socket
 import threading
@@ -2400,8 +2401,139 @@ class Dashboard(QtWidgets.QMainWindow):
         else:
             self._play_sfx('back')
 
+    def _choose_from_menu(self, title, options, descriptions=None):
+        d = QuickMenu(title, options, descriptions or {}, self)
+        if d.exec_() == QtWidgets.QDialog.Accepted:
+            return d.selected()
+        return None
+
+    def _scan_media_candidates(self, tray_action='scan'):
+        if tray_action in ('toggle', 'open', 'close') and shutil.which('eject'):
+            if tray_action == 'toggle':
+                subprocess.getoutput('/bin/sh -c "eject -T >/dev/null 2>&1 || true"')
+            elif tray_action == 'open':
+                subprocess.getoutput('/bin/sh -c "eject >/dev/null 2>&1 || true"')
+            elif tray_action == 'close':
+                subprocess.getoutput('/bin/sh -c "eject -t >/dev/null 2>&1 || true"')
+            time.sleep(1.2)
+
+        scan_script = XUI_HOME / 'bin' / 'xui_scan_media_games.sh'
+        out = ''
+        if scan_script.exists():
+            out = subprocess.getoutput(f'/bin/sh -c {shlex.quote(str(scan_script))}')
+        else:
+            out = 'Scan script not found.'
+
+        list_file = XUI_HOME / 'data' / 'media_games.txt'
+        files = []
+        try:
+            if list_file.exists():
+                for line in list_file.read_text(encoding='utf-8', errors='ignore').splitlines():
+                    s = line.strip()
+                    if s.startswith('/'):
+                        files.append(s)
+        except Exception:
+            files = []
+        return files, out
+
+    def _launch_media_candidate(self, target):
+        xui = str(XUI_HOME)
+        q_target = shlex.quote(str(target))
+        ext = Path(target).suffix.lower().lstrip('.')
+        if ext in ('exe', 'msi', 'bat'):
+            self._run('/bin/sh', ['-c', f'"{xui}/bin/xui_wine_run.sh" {q_target}'])
+            return
+        if ext == 'appimage':
+            self._run('/bin/sh', ['-c', f'chmod +x {q_target} >/dev/null 2>&1 || true; {q_target}'])
+            return
+        if ext == 'sh':
+            self._run('/bin/sh', ['-c', f'bash {q_target}'])
+            return
+        if ext == 'desktop':
+            if shutil.which('gtk-launch'):
+                app_id = shlex.quote(Path(target).stem)
+                self._run('/bin/sh', ['-c', f'gtk-launch {app_id} || xdg-open {q_target}'])
+            else:
+                self._run('/bin/sh', ['-c', f'xdg-open {q_target}'])
+            return
+        if ext in ('iso', 'chd', 'cue'):
+            retro = XUI_HOME / 'bin' / 'xui_retroarch.sh'
+            if retro.exists():
+                self._run('/bin/sh', ['-c', f'"{retro}" {q_target}'])
+            else:
+                self._run('/bin/sh', ['-c', f'xdg-open {q_target}'])
+            return
+        self._run('/bin/sh', ['-c', f'xdg-open {q_target}'])
+
+    def _open_tray_dashboard_menu(self):
+        tray_action = 'toggle'
+        last_scan = ''
+        while True:
+            files, last_scan = self._scan_media_candidates(tray_action)
+            tray_action = 'scan'
+
+            options = ['Rescan Media']
+            if shutil.which('eject'):
+                options += ['Toggle Tray', 'Open Tray', 'Close Tray']
+
+            label_to_target = {}
+            seen = {}
+            for f in files[:40]:
+                name = Path(f).name or f
+                base = f'Launch: {name}'
+                n = seen.get(base, 0) + 1
+                seen[base] = n
+                label = base if n == 1 else f'{base} [{n}]'
+                options.append(label)
+                label_to_target[label] = f
+
+            if not label_to_target:
+                options.append('(No media candidates)')
+            options += ['Show Scan Log', 'Back']
+
+            descriptions = {
+                'Rescan Media': 'Refresh mounted media list and scan for launchable files.',
+                'Toggle Tray': 'Toggle DVD tray open/close and rescan.',
+                'Open Tray': 'Open optical tray and rescan.',
+                'Close Tray': 'Close optical tray and rescan.',
+                '(No media candidates)': 'No executable/game file found in mounted media.',
+                'Show Scan Log': 'View raw scanner output from the last scan.',
+                'Back': 'Return to dashboard.',
+            }
+            for label, target in label_to_target.items():
+                descriptions[label] = target
+
+            pick = self._choose_from_menu('Open Tray', options, descriptions)
+            if not pick or pick == 'Back':
+                return
+            if pick == 'Rescan Media':
+                tray_action = 'scan'
+                continue
+            if pick == 'Toggle Tray':
+                tray_action = 'toggle'
+                continue
+            if pick == 'Open Tray':
+                tray_action = 'open'
+                continue
+            if pick == 'Close Tray':
+                tray_action = 'close'
+                continue
+            if pick == 'Show Scan Log':
+                self._msg('Open Tray Scan', last_scan or 'No scan output.')
+                tray_action = 'scan'
+                continue
+            if pick == '(No media candidates)':
+                self._msg('Open Tray', 'No executable/game candidate found.')
+                tray_action = 'scan'
+                continue
+            target = label_to_target.get(pick)
+            if target:
+                self._launch_media_candidate(target)
+                return
+
     def _menu_descriptions(self, title, options):
         generic = {
+            'Open Tray': 'Open tray control menu inside dashboard (no external terminal).',
             'System Info': 'Shows OS, memory, storage and runtime info.',
             'Power Profile': 'Choose eco, balanced or performance power mode.',
             'Battery Saver': 'Toggles battery saver mode instantly.',
@@ -2463,7 +2595,7 @@ class Dashboard(QtWidgets.QMainWindow):
         if action in ('Hub', 'Social Hub', 'Games Hub', 'Media Hub', 'Music Hub', 'Apps Hub', 'Settings Hub'):
             self._open_current_tab_menu()
         elif action == 'Open Tray':
-            self._run_terminal(f'"{xui}/bin/xui_open_tray_scan.sh"')
+            self._open_tray_dashboard_menu()
         elif action == 'My Pins':
             self._menu('My Pins', ['Casino', 'Runner', 'Store', 'System Info', 'Web Control'])
         elif action == 'Recent':
