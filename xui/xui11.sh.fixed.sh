@@ -2244,6 +2244,7 @@ class Dashboard(QtWidgets.QMainWindow):
                     ('Family', 'Family', (270, 130)),
                     ('Theme Toggle', 'Account', (270, 130)),
                     ('Battery Info', 'Battery', (270, 130)),
+                    ('Setup Wizard', 'Setup', (270, 130)),
                     ('Turn Off', 'Turn Off', (270, 130)),
                 ],
             },
@@ -2839,6 +2840,7 @@ class Dashboard(QtWidgets.QMainWindow):
             'Battery Saver': 'Toggles battery saver mode instantly.',
             'Family': 'Manage family and local user profile settings.',
             'Theme Toggle': 'Switches dashboard theme quickly.',
+            'Setup Wizard': 'Run Xbox style first setup to configure gamertag and profile.',
             'Battery Info': 'Displays battery status and health values.',
             'Turn Off': 'Closes dashboard and returns to desktop.',
             'Friends': 'View friend list and online status.',
@@ -3060,6 +3062,16 @@ class Dashboard(QtWidgets.QMainWindow):
             self._run('/bin/sh', ['-c', f'{xui}/bin/xui_web_control.sh stop'])
         elif action == 'Theme Toggle':
             self._run('/bin/sh', ['-c', f'{xui}/bin/xui_theme.sh toggle'])
+        elif action == 'Setup Wizard':
+            setup = XUI_HOME / 'bin' / 'xui_first_setup.py'
+            runner = XUI_HOME / 'bin' / 'xui_python.sh'
+            if setup.exists():
+                if runner.exists():
+                    self._run('/bin/sh', ['-c', f'"{runner}" "{setup}"'])
+                else:
+                    self._run('/bin/sh', ['-c', f'python3 "{setup}"'])
+            else:
+                self._msg('Setup Wizard', 'Setup wizard not found.')
         elif action == 'File Manager':
             self._run('/bin/sh', ['-c', f'{xui}/bin/xui_filemgr.sh "$HOME"'])
         elif action == 'Gallery':
@@ -4524,7 +4536,7 @@ After=graphical-session.target
 
 [Service]
 Type=simple
-ExecStart=%h/.xui/bin/xui_python.sh %h/.xui/dashboard/pyqt_dashboard_improved.py
+ExecStart=%h/.xui/bin/xui_startup_and_dashboard.sh
 # Ensure a display and runtime dir are available for GUI startup under systemd --user
 Environment=DISPLAY=:0
 Environment=XDG_RUNTIME_DIR=/run/user/%U
@@ -4547,33 +4559,297 @@ Restart=on-failure
 WantedBy=default.target
 UNIT
 
+  cat > "$BIN_DIR/xui_first_setup.py" <<'PY'
+#!/usr/bin/env python3
+import json
+import re
+import time
+from pathlib import Path
+from PyQt5 import QtWidgets, QtCore
+
+XUI_HOME = Path.home() / '.xui'
+DATA_HOME = XUI_HOME / 'data'
+PROFILE_FILE = DATA_HOME / 'profile.json'
+SETUP_FILE = DATA_HOME / 'setup_state.json'
+UI_FILE = DATA_HOME / 'ui_settings.json'
+
+
+def safe_json_read(path, default):
+    try:
+        return json.loads(Path(path).read_text(encoding='utf-8'))
+    except Exception:
+        return default
+
+
+def safe_json_write(path, data):
+    p = Path(path)
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding='utf-8')
+
+
+class XboxSetup(QtWidgets.QDialog):
+    def __init__(self):
+        super().__init__()
+        self.setWindowTitle('XUI First Setup')
+        self.resize(1100, 680)
+        self._build()
+        self._load_existing()
+        self._sync_buttons()
+
+    def _build(self):
+        self.setStyleSheet('''
+            QDialog {
+                background:qlineargradient(x1:0,y1:0,x2:1,y2:1, stop:0 #1f2630, stop:0.45 #29323e, stop:1 #10161d);
+                color:#eef4f8;
+            }
+            QFrame#panel {
+                background:rgba(4,10,18,0.82);
+                border:2px solid rgba(130,190,255,0.3);
+                border-radius:10px;
+            }
+            QLabel#title {
+                font-size:40px;
+                font-weight:800;
+                color:#f4f8fb;
+            }
+            QLabel#hint {
+                font-size:18px;
+                color:rgba(236,243,247,0.78);
+            }
+            QLabel#section {
+                font-size:30px;
+                font-weight:760;
+                color:#f0f6fa;
+            }
+            QLineEdit, QComboBox {
+                background:#0f1a27;
+                border:1px solid #2f4258;
+                border-radius:4px;
+                color:#f1f8fc;
+                padding:8px;
+                font-size:18px;
+            }
+            QCheckBox {
+                font-size:18px;
+                color:#e8f0f5;
+            }
+            QPushButton {
+                background:qlineargradient(x1:0,y1:0,x2:1,y2:1, stop:0 #31d75a, stop:1 #23b545);
+                border:1px solid rgba(255,255,255,0.2);
+                color:#efffee;
+                padding:10px 18px;
+                font-size:18px;
+                font-weight:760;
+                min-width:120px;
+            }
+            QPushButton:disabled {
+                background:#40505f;
+                color:#9daab5;
+            }
+        ''')
+        outer = QtWidgets.QVBoxLayout(self)
+        outer.setContentsMargins(22, 22, 22, 22)
+
+        panel = QtWidgets.QFrame()
+        panel.setObjectName('panel')
+        outer.addWidget(panel, 1)
+        root = QtWidgets.QVBoxLayout(panel)
+        root.setContentsMargins(24, 20, 24, 18)
+        root.setSpacing(14)
+
+        top = QtWidgets.QVBoxLayout()
+        title = QtWidgets.QLabel('xbox 360 style setup')
+        title.setObjectName('title')
+        hint = QtWidgets.QLabel('Configure your gamertag and profile before entering dashboard')
+        hint.setObjectName('hint')
+        top.addWidget(title)
+        top.addWidget(hint)
+        root.addLayout(top)
+
+        self.stack = QtWidgets.QStackedWidget()
+        root.addWidget(self.stack, 1)
+
+        self._build_page_intro()
+        self._build_page_account()
+        self._build_page_prefs()
+
+        nav = QtWidgets.QHBoxLayout()
+        self.btn_back = QtWidgets.QPushButton('Back')
+        self.btn_next = QtWidgets.QPushButton('Next')
+        self.btn_finish = QtWidgets.QPushButton('Finish')
+        self.btn_cancel = QtWidgets.QPushButton('Skip')
+        self.btn_back.clicked.connect(self._go_back)
+        self.btn_next.clicked.connect(self._go_next)
+        self.btn_finish.clicked.connect(self._finish)
+        self.btn_cancel.clicked.connect(self.reject)
+        nav.addWidget(self.btn_cancel)
+        nav.addStretch(1)
+        nav.addWidget(self.btn_back)
+        nav.addWidget(self.btn_next)
+        nav.addWidget(self.btn_finish)
+        root.addLayout(nav)
+
+    def _build_page_intro(self):
+        w = QtWidgets.QWidget()
+        v = QtWidgets.QVBoxLayout(w)
+        v.setContentsMargins(0, 6, 0, 0)
+        v.setSpacing(14)
+        s = QtWidgets.QLabel('Welcome')
+        s.setObjectName('section')
+        t1 = QtWidgets.QLabel('This first setup prepares your profile and sign-in identity.')
+        t1.setObjectName('hint')
+        t2 = QtWidgets.QLabel('Press Next to configure gamertag, region and startup preferences.')
+        t2.setObjectName('hint')
+        t2.setWordWrap(True)
+        v.addWidget(s)
+        v.addWidget(t1)
+        v.addWidget(t2)
+        v.addStretch(1)
+        self.stack.addWidget(w)
+
+    def _build_page_account(self):
+        w = QtWidgets.QWidget()
+        f = QtWidgets.QFormLayout(w)
+        f.setContentsMargins(0, 6, 0, 0)
+        f.setVerticalSpacing(12)
+        f.setHorizontalSpacing(18)
+        s = QtWidgets.QLabel('Account')
+        s.setObjectName('section')
+        self.ed_gamertag = QtWidgets.QLineEdit()
+        self.ed_gamertag.setMaxLength(15)
+        self.ed_gamertag.setPlaceholderText('Player1')
+        self.ed_motto = QtWidgets.QLineEdit()
+        self.ed_motto.setMaxLength(40)
+        self.ed_motto.setPlaceholderText('Ready to play')
+        self.cb_region = QtWidgets.QComboBox()
+        self.cb_region.addItems(['LATAM', 'USA', 'EU', 'JP', 'OTHER'])
+        self.chk_signed = QtWidgets.QCheckBox('Sign in automatically')
+        self.chk_signed.setChecked(True)
+        f.addRow(s)
+        f.addRow('Gamertag', self.ed_gamertag)
+        f.addRow('Motto', self.ed_motto)
+        f.addRow('Region', self.cb_region)
+        f.addRow('', self.chk_signed)
+        self.stack.addWidget(w)
+
+    def _build_page_prefs(self):
+        w = QtWidgets.QWidget()
+        f = QtWidgets.QFormLayout(w)
+        f.setContentsMargins(0, 6, 0, 0)
+        f.setVerticalSpacing(12)
+        f.setHorizontalSpacing(18)
+        s = QtWidgets.QLabel('Preferences')
+        s.setObjectName('section')
+        self.cb_accent = QtWidgets.QComboBox()
+        self.cb_accent.addItems(['Green', 'Blue', 'Orange', 'White'])
+        self.chk_startup_media = QtWidgets.QCheckBox('Enable startup media (mp4/mp3)')
+        self.chk_startup_media.setChecked(True)
+        self.chk_autostart = QtWidgets.QCheckBox('Start dashboard automatically at login')
+        self.chk_autostart.setChecked(True)
+        self.chk_autostart.setEnabled(False)
+        self.lbl_note = QtWidgets.QLabel('Autostart is configured by installer for every login session.')
+        self.lbl_note.setObjectName('hint')
+        self.lbl_note.setWordWrap(True)
+        f.addRow(s)
+        f.addRow('Accent', self.cb_accent)
+        f.addRow('', self.chk_startup_media)
+        f.addRow('', self.chk_autostart)
+        f.addRow('', self.lbl_note)
+        self.stack.addWidget(w)
+
+    def _load_existing(self):
+        profile = safe_json_read(PROFILE_FILE, {})
+        ui = safe_json_read(UI_FILE, {})
+        self.ed_gamertag.setText(str(profile.get('gamertag', 'Player1')))
+        self.ed_motto.setText(str(profile.get('motto', '')))
+        region = str(profile.get('region', 'LATAM')).upper()
+        idx = self.cb_region.findText(region)
+        if idx >= 0:
+            self.cb_region.setCurrentIndex(idx)
+        accent = str(ui.get('accent', 'Green'))
+        idx = self.cb_accent.findText(accent)
+        if idx >= 0:
+            self.cb_accent.setCurrentIndex(idx)
+        self.chk_signed.setChecked(bool(profile.get('signed_in', False)))
+        self.chk_startup_media.setChecked(bool(ui.get('startup_media', True)))
+
+    def _sync_buttons(self):
+        idx = self.stack.currentIndex()
+        last = self.stack.count() - 1
+        self.btn_back.setEnabled(idx > 0)
+        self.btn_next.setVisible(idx < last)
+        self.btn_finish.setVisible(idx == last)
+
+    def _go_back(self):
+        self.stack.setCurrentIndex(max(0, self.stack.currentIndex() - 1))
+        self._sync_buttons()
+
+    def _go_next(self):
+        if self.stack.currentIndex() == 1 and not self._valid_gamertag():
+            QtWidgets.QMessageBox.warning(self, 'Gamertag', 'Use 3-15 chars: letters, numbers, space, _ or -')
+            return
+        self.stack.setCurrentIndex(min(self.stack.count() - 1, self.stack.currentIndex() + 1))
+        self._sync_buttons()
+
+    def _valid_gamertag(self):
+        gt = self.ed_gamertag.text().strip()
+        return bool(re.fullmatch(r'[A-Za-z0-9 _-]{3,15}', gt))
+
+    def _finish(self):
+        if not self._valid_gamertag():
+            QtWidgets.QMessageBox.warning(self, 'Gamertag', 'Use 3-15 chars: letters, numbers, space, _ or -')
+            self.stack.setCurrentIndex(1)
+            self._sync_buttons()
+            return
+        gamertag = self.ed_gamertag.text().strip()
+        profile = safe_json_read(PROFILE_FILE, {})
+        profile['gamertag'] = gamertag
+        profile['motto'] = self.ed_motto.text().strip()
+        profile['region'] = self.cb_region.currentText().strip()
+        profile['signed_in'] = bool(self.chk_signed.isChecked())
+        profile['updated_at'] = time.time()
+        safe_json_write(PROFILE_FILE, profile)
+
+        ui = safe_json_read(UI_FILE, {})
+        ui['accent'] = self.cb_accent.currentText().strip()
+        ui['startup_media'] = bool(self.chk_startup_media.isChecked())
+        ui['autostart'] = True
+        ui['updated_at'] = time.time()
+        safe_json_write(UI_FILE, ui)
+
+        state = {
+            'completed': True,
+            'completed_at': time.time(),
+            'gamertag': gamertag,
+            'version': 1,
+        }
+        safe_json_write(SETUP_FILE, state)
+        self.accept()
+
+
+def main():
+    DATA_HOME.mkdir(parents=True, exist_ok=True)
+    app = QtWidgets.QApplication([])
+    app.setApplicationName('XUI First Setup')
+    dlg = XboxSetup()
+    try:
+        dlg.showFullScreen()
+    except Exception:
+        dlg.show()
+    app.exec_()
+
+
+if __name__ == '__main__':
+    main()
+PY
+  chmod +x "$BIN_DIR/xui_first_setup.py"
+
   cat > "$BIN_DIR/xui_start.sh" <<'BASH'
 #!/usr/bin/env bash
-# Wrapper to start Dashboard only if graphical session present
-sleep 2
-# Determine runtime display variables for Wayland/X11
-if [ -n "${WAYLAND_DISPLAY:-}" ]; then
-    export WAYLAND_DISPLAY="${WAYLAND_DISPLAY}"
-    # Some Qt builds use WAYLAND_DISPLAY; also set DISPLAY if not set
-    export DISPLAY="${DISPLAY:-:0}"
-else
-    export DISPLAY="${DISPLAY:-:0}"
-fi
-# Ensure XDG_RUNTIME_DIR is set (typical for systemd --user)
+set -euo pipefail
+export DISPLAY="${DISPLAY:-:0}"
 export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
-
-SCRIPT="$HOME/.xui/dashboard/pyqt_dashboard_improved.py"
-PYRUN="$HOME/.xui/bin/xui_python.sh"
-# Try preferred terminals to launch fullscreen GUI, fallback to direct python
-if command -v konsole >/dev/null 2>&1; then
-    konsole --fullscreen --hide-menubar -e "$PYRUN" "$SCRIPT"
-elif command -v gnome-terminal >/dev/null 2>&1; then
-    gnome-terminal --full-screen -- "$PYRUN" "$SCRIPT"
-elif command -v xterm >/dev/null 2>&1; then
-    xterm -fullscreen -e "$PYRUN" "$SCRIPT"
-else
-    if [ -x "$PYRUN" ]; then "$PYRUN" "$SCRIPT"; else python3 "$SCRIPT"; fi
-fi
+exec "$HOME/.xui/bin/xui_startup_and_dashboard.sh"
 BASH
   chmod +x "$BIN_DIR/xui_start.sh"
 
@@ -4782,11 +5058,35 @@ cat > "$BIN_DIR/xui_startup_and_dashboard.sh" <<'SH'
 #!/usr/bin/env bash
 set -euo pipefail
 
-ASSETS_DIR="${ASSETS_DIR}"
-DASH_SCRIPT="${DASH_DIR}/pyqt_dashboard_improved.py"
+ASSETS_DIR="$HOME/.xui/assets"
+DASH_SCRIPT="$HOME/.xui/dashboard/pyqt_dashboard_improved.py"
+SETUP_SCRIPT="$HOME/.xui/bin/xui_first_setup.py"
+SETUP_STATE="$HOME/.xui/data/setup_state.json"
+PY_RUNNER="$HOME/.xui/bin/xui_python.sh"
 
 info(){ echo -e "\e[34m[INFO]\e[0m $*"; }
 warn(){ echo -e "\e[33m[WARN]\e[0m $*" >&2; }
+
+run_python(){
+    local target="$1"
+    if [ -x "$PY_RUNNER" ]; then
+        "$PY_RUNNER" "$target"
+    else
+        python3 "$target"
+    fi
+}
+
+mkdir -p "$HOME/.xui/data" "$HOME/.xui/logs" "$ASSETS_DIR"
+
+# Run first setup wizard once (or force with XUI_FORCE_SETUP=1)
+if [ "${XUI_FORCE_SETUP:-0}" = "1" ] || [ ! -s "$SETUP_STATE" ]; then
+    if [ -f "$SETUP_SCRIPT" ]; then
+        info "Running first setup wizard"
+        run_python "$SETUP_SCRIPT" || warn "First setup ended with non-zero status"
+    else
+        warn "Setup wizard not found: $SETUP_SCRIPT"
+    fi
+fi
 
 # Helper to start audio in background using available players
 start_audio_bg(){
@@ -4906,11 +5206,14 @@ fi
 
 # Finally start the dashboard
 info "Launching dashboard"
-if command -v "$ASSETS_DIR/launcher" >/dev/null 2>&1; then
-    exec "$ASSETS_DIR/launcher"
-else
-    exec /usr/bin/python3 "$DASH_SCRIPT"
+if [ ! -f "$DASH_SCRIPT" ]; then
+    warn "Dashboard script not found: $DASH_SCRIPT"
+    exit 1
 fi
+if [ -x "$PY_RUNNER" ]; then
+    exec "$PY_RUNNER" "$DASH_SCRIPT"
+fi
+exec python3 "$DASH_SCRIPT"
 SH
 chmod +x "$BIN_DIR/xui_startup_and_dashboard.sh"
 
@@ -4943,19 +5246,20 @@ XUI_HOME="$HOME/.xui"
 AUTOSTART_DIR="$HOME/.config/autostart"
 SYSTEMD_USER_DIR="$HOME/.config/systemd/user"
 DESKTOP_FILE_NAME="xui-dashboard.desktop"
-SERVICE_NAME="xui-gui.service"
-PYQT_SCRIPT="$XUI_HOME/dashboard/pyqt_dashboard_improved.py"
+SERVICE_NAME="xui-dashboard.service"
+START_WRAPPER="$XUI_HOME/bin/xui_startup_and_dashboard.sh"
+RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
 
 mkdir -p "$AUTOSTART_DIR"
 mkdir -p "$SYSTEMD_USER_DIR"
 
 # Write .desktop (safe overwrite)
-cat > "$AUTOSTART_DIR/$DESKTOP_FILE_NAME" <<'EOF'
+cat > "$AUTOSTART_DIR/$DESKTOP_FILE_NAME" <<EOF
 [Desktop Entry]
 Type=Application
 Name=XUI Dashboard
 Comment=Start XUI fullscreen dashboard
-Exec=python3 /home/$USER/.xui/dashboard/pyqt_dashboard_improved.py
+Exec=$START_WRAPPER
 Terminal=false
 X-GNOME-Autostart-enabled=true
 Hidden=false
@@ -4971,10 +5275,10 @@ After=graphical-session.target
 
 [Service]
 Type=simple
-ExecStart=/usr/bin/python3 $PYQT_SCRIPT
+ExecStart=$START_WRAPPER
 Restart=on-failure
 Environment=DISPLAY=:0
-Environment=XDG_RUNTIME_DIR=$XDG_RUNTIME_DIR
+Environment=XDG_RUNTIME_DIR=$RUNTIME_DIR
 
 [Install]
 WantedBy=default.target
@@ -7528,15 +7832,23 @@ finish_setup(){
   chmod +x "$DASH_DIR/pyqt_dashboard.py" || true
   chmod +x "$BIN_DIR/xui_joy_listener.py" || true
   touch "$XUI_DIR/.xui_4_0xv_setup_done"
-  info "Installation complete. To enable services run:"
-    echo "  systemctl --user daemon-reload && systemctl --user enable --now xui-dashboard.service xui-joy.service"
-    # try to enable battery monitor service automatically if systemctl --user available
-    if command -v systemctl >/dev/null 2>&1; then
-        if systemctl --user daemon-reload >/dev/null 2>&1; then
-            systemctl --user enable --now xui-battery-monitor.service || true
-            info "Attempted to enable xui-battery-monitor.service (user)"
-        fi
+  info "Configuring autostart for each login"
+  mkdir -p "$AUTOSTART_DIR" "$SYSTEMD_USER_DIR" || true
+  if [ -f "$AUTOSTART_DIR/xui-dashboard.desktop" ]; then
+    info "Autostart desktop entry ready: $AUTOSTART_DIR/xui-dashboard.desktop"
+  else
+    warn "Autostart desktop entry missing: $AUTOSTART_DIR/xui-dashboard.desktop"
+  fi
+  if command -v systemctl >/dev/null 2>&1; then
+    if systemctl --user daemon-reload >/dev/null 2>&1; then
+      systemctl --user enable --now xui-dashboard.service xui-joy.service || true
+      systemctl --user enable --now xui-battery-monitor.service || true
+      info "Attempted to enable user services: xui-dashboard, xui-joy, xui-battery-monitor"
+    else
+      warn "systemctl --user daemon-reload failed; using desktop autostart only"
     fi
+  fi
+  info "Installation complete."
 }
 
 main(){
@@ -7554,6 +7866,7 @@ main(){
   write_joy_py
   write_extras
   write_systemd_and_autostart
+  write_enable_autostart_script
     # Additional utilities
     write_logger_and_helpers
     write_backup_restore
