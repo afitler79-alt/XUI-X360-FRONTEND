@@ -137,12 +137,12 @@ BASH
         apt_safe_update || warn "apt update failed"
         # Install critical runtime first (must succeed for dashboard)
         apt_safe_install \
-            python3 python3-pip python3-venv python3-pyqt5 python3-pyqt5.qtmultimedia python3-pil || warn "Core apt dependencies failed"
+            python3 python3-pip python3-venv python3-pyqt5 python3-pyqt5.qtmultimedia python3-pil python3-evdev || warn "Core apt dependencies failed"
         apt_safe_install python3-pyqt5.qtwebengine || warn "Optional apt package missing: python3-pyqt5.qtwebengine"
         # Optional tools (can fail without breaking dashboard runtime)
         apt_safe_install \
             ffmpeg mpv jq xdotool curl ca-certificates iproute2 bc \
-            xclip xsel rofi feh maim scrot udisks2 p7zip-full \
+            xclip xsel rofi feh maim scrot udisks2 p7zip-full joystick joycond \
             retroarch lutris || warn "Some apt packages failed to install"
         # Windows compatibility (best effort): Wine + Winetricks + ARM helpers
         if [ "$arch_now" = "x86_64" ] || [ "$arch_now" = "amd64" ]; then
@@ -153,27 +153,27 @@ BASH
             info "AArch64 detected: x86 Windows .exe may need box64 + x86 Wine build"
         fi
         # Optional gaming/compat packages (best effort one by one)
-        for pkg in flatpak steam-installer steamcmd box64 box86 qemu-user-static retroarch lutris heroic heroic-games-launcher; do
+        for pkg in flatpak steam-installer steamcmd box64 box86 qemu-user-static retroarch lutris heroic heroic-games-launcher joycond; do
             apt_safe_install "$pkg" || true
         done
     elif command -v dnf >/dev/null 2>&1; then
         run_as_root dnf install -y \
-            python3 python3-pip python3-virtualenv python3-qt5 python3-pillow \
+            python3 python3-pip python3-virtualenv python3-qt5 python3-pillow python3-evdev \
             ffmpeg mpv jq xdotool curl iproute bc \
-            xclip xsel rofi feh scrot udisks2 p7zip retroarch lutris || warn "Some dnf packages failed to install"
+            xclip xsel rofi feh scrot udisks2 p7zip joystick joycond retroarch lutris || warn "Some dnf packages failed to install"
         run_as_root dnf install -y python3-qt5-webengine || true
         run_as_root dnf install -y wine winetricks || true
-        for pkg in flatpak steam box64 fex-emu qemu-user-static retroarch lutris heroic-games-launcher; do
+        for pkg in flatpak steam box64 fex-emu qemu-user-static retroarch lutris heroic-games-launcher joycond; do
             run_as_root dnf install -y "$pkg" || true
         done
     elif command -v pacman >/dev/null 2>&1; then
         run_as_root pacman -Syu --noconfirm \
-            python python-pip python-virtualenv pyqt5 python-pillow \
+            python python-pip python-virtualenv pyqt5 python-pillow python-evdev \
             ffmpeg mpv jq xdotool curl iproute2 bc \
-            xclip xsel rofi feh scrot maim udisks2 p7zip retroarch lutris || warn "Some pacman packages failed to install"
+            xclip xsel rofi feh scrot maim udisks2 p7zip joystick joycond retroarch lutris || warn "Some pacman packages failed to install"
         run_as_root pacman -S --noconfirm python-pyqt5-webengine || true
         run_as_root pacman -S --noconfirm wine winetricks || true
-        for pkg in flatpak steam box64 qemu-user-static retroarch lutris heroic-games-launcher; do
+        for pkg in flatpak steam box64 qemu-user-static retroarch lutris heroic-games-launcher joycond; do
             run_as_root pacman -S --noconfirm "$pkg" || true
         done
     else
@@ -1966,6 +1966,7 @@ class QuickMenu(QtWidgets.QDialog):
         self.setWindowFlags(QtCore.Qt.Dialog | QtCore.Qt.FramelessWindowHint)
         self.setAttribute(QtCore.Qt.WA_TranslucentBackground, True)
         self.setModal(True)
+        self._open_anim = None
         self.descriptions = descriptions or {}
         self.resize(760, 500)
         self.setStyleSheet('''
@@ -2068,6 +2069,30 @@ class QuickMenu(QtWidgets.QDialog):
         x = parent.x() + (parent.width() - w) // 2
         y = parent.y() + (parent.height() - h) // 2
         self.move(max(0, x), max(0, y))
+        self._animate_open()
+
+    def _animate_open(self):
+        effect = QtWidgets.QGraphicsOpacityEffect(self)
+        self.setGraphicsEffect(effect)
+        effect.setOpacity(0.0)
+        end_rect = self.geometry()
+        start_rect = QtCore.QRect(end_rect.x(), end_rect.y() + max(18, end_rect.height() // 22), end_rect.width(), end_rect.height())
+        self.setGeometry(start_rect)
+        self._open_anim = QtCore.QParallelAnimationGroup(self)
+        fade = QtCore.QPropertyAnimation(effect, b'opacity', self)
+        fade.setDuration(180)
+        fade.setStartValue(0.0)
+        fade.setEndValue(1.0)
+        fade.setEasingCurve(QtCore.QEasingCurve.OutCubic)
+        slide = QtCore.QPropertyAnimation(self, b'geometry', self)
+        slide.setDuration(220)
+        slide.setStartValue(start_rect)
+        slide.setEndValue(end_rect)
+        slide.setEasingCurve(QtCore.QEasingCurve.OutCubic)
+        self._open_anim.addAnimation(fade)
+        self._open_anim.addAnimation(slide)
+        self._open_anim.finished.connect(lambda: self.setGraphicsEffect(None))
+        self._open_anim.start(QtCore.QAbstractAnimation.DeleteWhenStopped)
 
     def selected(self):
         it = self.listw.currentItem()
@@ -2082,6 +2107,200 @@ class QuickMenu(QtWidgets.QDialog):
     def keyPressEvent(self, e):
         if e.key() in (QtCore.Qt.Key_Escape, QtCore.Qt.Key_Back):
             self.reject()
+            return
+        super().keyPressEvent(e)
+
+
+class XboxGuideMenu(QtWidgets.QDialog):
+    def __init__(self, gamertag='Player1', parent=None):
+        super().__init__(parent)
+        self.gamertag = str(gamertag or 'Player1')
+        self._selection = None
+        self._open_anim = None
+        self.setWindowTitle('Guia Xbox')
+        self.setWindowFlags(QtCore.Qt.Dialog | QtCore.Qt.FramelessWindowHint)
+        self.setAttribute(QtCore.Qt.WA_TranslucentBackground, True)
+        self.setModal(True)
+        self.resize(860, 500)
+        self.setStyleSheet('''
+            QFrame#xguide_panel {
+                background:qlineargradient(x1:0,y1:0,x2:1,y2:1, stop:0 #3a3f46, stop:1 #1e242b);
+                border:2px solid rgba(214,223,235,0.52);
+                border-radius:7px;
+            }
+            QLabel#xguide_title {
+                color:#eef4f8;
+                font-size:28px;
+                font-weight:800;
+            }
+            QLabel#xguide_meta {
+                color:rgba(235,242,248,0.78);
+                font-size:17px;
+                font-weight:600;
+            }
+            QListWidget#xguide_list {
+                background:rgba(236,239,242,0.92);
+                color:#20252b;
+                border:1px solid rgba(0,0,0,0.26);
+                font-size:32px;
+                outline:none;
+            }
+            QListWidget#xguide_list::item {
+                padding:6px 10px;
+                border:1px solid transparent;
+            }
+            QListWidget#xguide_list::item:selected {
+                color:#f3fff2;
+                background:qlineargradient(x1:0,y1:0,x2:1,y2:0, stop:0 #4ea93f, stop:1 #2f8832);
+                border:1px solid rgba(255,255,255,0.25);
+            }
+            QFrame#xguide_blades {
+                background:rgba(65,74,84,0.95);
+                border:1px solid rgba(194,206,222,0.25);
+            }
+            QPushButton#xguide_blade_btn {
+                text-align:left;
+                padding:8px 10px;
+                color:#e9f1f8;
+                font-size:20px;
+                font-weight:700;
+                background:rgba(34,43,54,0.92);
+                border:1px solid rgba(186,205,224,0.24);
+            }
+            QPushButton#xguide_blade_btn:focus,
+            QPushButton#xguide_blade_btn:hover {
+                background:rgba(58,80,106,0.95);
+                border:1px solid rgba(218,233,246,0.52);
+            }
+            QLabel#xguide_hint {
+                color:rgba(238,245,250,0.84);
+                font-size:15px;
+                font-weight:600;
+            }
+        ''')
+        outer = QtWidgets.QVBoxLayout(self)
+        outer.setContentsMargins(0, 0, 0, 0)
+        panel = QtWidgets.QFrame()
+        panel.setObjectName('xguide_panel')
+        outer.addWidget(panel)
+
+        root = QtWidgets.QVBoxLayout(panel)
+        root.setContentsMargins(12, 10, 12, 10)
+        root.setSpacing(8)
+
+        top = QtWidgets.QHBoxLayout()
+        title = QtWidgets.QLabel('Guia Xbox')
+        title.setObjectName('xguide_title')
+        self.meta = QtWidgets.QLabel('')
+        self.meta.setObjectName('xguide_meta')
+        top.addWidget(title)
+        top.addStretch(1)
+        top.addWidget(self.meta)
+        root.addLayout(top)
+
+        body = QtWidgets.QHBoxLayout()
+        body.setSpacing(10)
+        self.listw = QtWidgets.QListWidget()
+        self.listw.setObjectName('xguide_list')
+        self.listw.addItems([
+            'Logros',
+            'Premios',
+            'Reciente',
+            'Mis juegos',
+            'Descargas activas',
+            'Canjear codigo',
+        ])
+        self.listw.setCurrentRow(0)
+        self.listw.itemActivated.connect(self._accept_current)
+        self.listw.itemDoubleClicked.connect(self._accept_current)
+        body.addWidget(self.listw, 4)
+
+        blades = QtWidgets.QFrame()
+        blades.setObjectName('xguide_blades')
+        blades_l = QtWidgets.QVBoxLayout(blades)
+        blades_l.setContentsMargins(8, 8, 8, 8)
+        blades_l.setSpacing(6)
+        for opt in ('Configuracion', 'Inicio de Xbox', 'Cerrar app actual', 'Cerrar sesion'):
+            b = QtWidgets.QPushButton(opt)
+            b.setObjectName('xguide_blade_btn')
+            b.clicked.connect(lambda _=False, opt=opt: self._accept_action(opt))
+            blades_l.addWidget(b)
+        blades_l.addStretch(1)
+        body.addWidget(blades, 2)
+        root.addLayout(body, 1)
+
+        hint = QtWidgets.QLabel('A/ENTER = Select | B/ESC = Back | Xbox Guide = F1 o HOME')
+        hint.setObjectName('xguide_hint')
+        root.addWidget(hint)
+
+        self._clock = QtCore.QTimer(self)
+        self._clock.timeout.connect(self._refresh_meta)
+        self._clock.start(1000)
+        self._refresh_meta()
+
+    def _refresh_meta(self):
+        now = QtCore.QDateTime.currentDateTime().toString('HH:mm')
+        self.meta.setText(f'{self.gamertag}    {now}')
+
+    def _accept_current(self, *_):
+        it = self.listw.currentItem()
+        if it is None:
+            return
+        self._selection = it.text()
+        self.accept()
+
+    def _accept_action(self, action):
+        self._selection = str(action)
+        self.accept()
+
+    def selected(self):
+        if self._selection:
+            return self._selection
+        it = self.listw.currentItem()
+        return it.text() if it else None
+
+    def showEvent(self, e):
+        super().showEvent(e)
+        parent = self.parentWidget()
+        if parent is not None:
+            w = min(max(760, int(parent.width() * 0.56)), max(760, parent.width() - 120))
+            h = min(max(420, int(parent.height() * 0.56)), max(420, parent.height() - 120))
+            self.resize(w, h)
+            x = parent.x() + max(20, int(parent.width() * 0.18))
+            y = parent.y() + max(20, int(parent.height() * 0.12))
+            self.move(max(0, x), max(0, y))
+        self._refresh_meta()
+        self._animate_open()
+
+    def _animate_open(self):
+        effect = QtWidgets.QGraphicsOpacityEffect(self)
+        self.setGraphicsEffect(effect)
+        effect.setOpacity(0.0)
+        end_rect = self.geometry()
+        start_rect = QtCore.QRect(end_rect.x() - max(24, end_rect.width() // 18), end_rect.y(), end_rect.width(), end_rect.height())
+        self.setGeometry(start_rect)
+        self._open_anim = QtCore.QParallelAnimationGroup(self)
+        fade = QtCore.QPropertyAnimation(effect, b'opacity', self)
+        fade.setDuration(190)
+        fade.setStartValue(0.0)
+        fade.setEndValue(1.0)
+        fade.setEasingCurve(QtCore.QEasingCurve.OutCubic)
+        slide = QtCore.QPropertyAnimation(self, b'geometry', self)
+        slide.setDuration(230)
+        slide.setStartValue(start_rect)
+        slide.setEndValue(end_rect)
+        slide.setEasingCurve(QtCore.QEasingCurve.OutCubic)
+        self._open_anim.addAnimation(fade)
+        self._open_anim.addAnimation(slide)
+        self._open_anim.finished.connect(lambda: self.setGraphicsEffect(None))
+        self._open_anim.start(QtCore.QAbstractAnimation.DeleteWhenStopped)
+
+    def keyPressEvent(self, e):
+        if e.key() in (QtCore.Qt.Key_Escape, QtCore.Qt.Key_Back):
+            self.reject()
+            return
+        if e.key() in (QtCore.Qt.Key_Return, QtCore.Qt.Key_Enter):
+            self._accept_current()
             return
         super().keyPressEvent(e)
 
@@ -2268,6 +2487,8 @@ class Dashboard(QtWidgets.QMainWindow):
                 'right': [
                     ('Steam', 'Steam', (270, 130)),
                     ('RetroArch', 'RetroArch', (270, 130)),
+                    ('FNAE', 'FNAE', (270, 130)),
+                    ('Gem Match', 'Gem Match', (270, 130)),
                     ('Store', 'Store', (270, 130)),
                     ('Games Integrations', 'Integrations', (270, 130)),
                 ],
@@ -2315,6 +2536,7 @@ class Dashboard(QtWidgets.QMainWindow):
                     ('Utilities', 'Utilities', (320, 205)),
                 ],
                 'right': [
+                    ('Web Browser', 'Web Browser', (270, 130)),
                     ('App Launcher', 'App Launcher', (270, 130)),
                     ('Service Manager', 'Services', (270, 130)),
                     ('Developer Tools', 'Developer', (270, 130)),
@@ -2506,6 +2728,8 @@ class Dashboard(QtWidgets.QMainWindow):
         to_w = self.page_stack.widget(to_idx)
         rect = self.page_stack.rect()
         shift = rect.width() if to_idx > from_idx else -rect.width()
+        from_end_x = -int(shift * 0.58)
+        to_start_x = int(shift * 0.42)
 
         for i, page in enumerate(self.pages):
             if i not in (from_idx, to_idx):
@@ -2513,33 +2737,57 @@ class Dashboard(QtWidgets.QMainWindow):
         from_w.setGeometry(rect)
         to_w.setGeometry(rect)
         from_w.move(0, 0)
-        to_w.move(shift, 0)
+        to_w.move(to_start_x, 0)
         from_w.show()
         to_w.show()
         to_w.raise_()
+
+        from_fx = QtWidgets.QGraphicsOpacityEffect(from_w)
+        to_fx = QtWidgets.QGraphicsOpacityEffect(to_w)
+        from_fx.setOpacity(1.0)
+        to_fx.setOpacity(0.0)
+        from_w.setGraphicsEffect(from_fx)
+        to_w.setGraphicsEffect(to_fx)
 
         self._tab_animating = True
         self._tab_anim_group = QtCore.QParallelAnimationGroup(self)
 
         anim_from = QtCore.QPropertyAnimation(from_w, b'pos')
-        anim_from.setDuration(280)
+        anim_from.setDuration(320)
         anim_from.setStartValue(QtCore.QPoint(0, 0))
-        anim_from.setEndValue(QtCore.QPoint(-shift, 0))
-        anim_from.setEasingCurve(QtCore.QEasingCurve.OutCubic)
+        anim_from.setEndValue(QtCore.QPoint(from_end_x, 0))
+        anim_from.setEasingCurve(QtCore.QEasingCurve.InOutCubic)
 
         anim_to = QtCore.QPropertyAnimation(to_w, b'pos')
-        anim_to.setDuration(280)
-        anim_to.setStartValue(QtCore.QPoint(shift, 0))
+        anim_to.setDuration(320)
+        anim_to.setStartValue(QtCore.QPoint(to_start_x, 0))
         anim_to.setEndValue(QtCore.QPoint(0, 0))
-        anim_to.setEasingCurve(QtCore.QEasingCurve.OutCubic)
+        anim_to.setEasingCurve(QtCore.QEasingCurve.InOutCubic)
+
+        fade_from = QtCore.QPropertyAnimation(from_fx, b'opacity')
+        fade_from.setDuration(280)
+        fade_from.setStartValue(1.0)
+        fade_from.setEndValue(0.08)
+        fade_from.setEasingCurve(QtCore.QEasingCurve.OutCubic)
+
+        fade_to = QtCore.QPropertyAnimation(to_fx, b'opacity')
+        fade_to.setDuration(300)
+        fade_to.setStartValue(0.0)
+        fade_to.setEndValue(1.0)
+        fade_to.setEasingCurve(QtCore.QEasingCurve.OutCubic)
 
         self._tab_anim_group.addAnimation(anim_from)
         self._tab_anim_group.addAnimation(anim_to)
+        self._tab_anim_group.addAnimation(fade_from)
+        self._tab_anim_group.addAnimation(fade_to)
 
         def done():
             self.page_stack.setCurrentIndex(to_idx)
             self._normalize_page_visibility(to_idx)
+            from_w.setGraphicsEffect(None)
+            to_w.setGraphicsEffect(None)
             self._tab_animating = False
+            self._tab_anim_group = None
             self.update_focus()
 
         self._tab_anim_group.finished.connect(done)
@@ -2852,6 +3100,97 @@ class Dashboard(QtWidgets.QMainWindow):
             return d.selected()
         return None
 
+    def _xbox_guide_recent_text(self):
+        arr = safe_json_read(RECENT_FILE, [])
+        if not isinstance(arr, list) or not arr:
+            return 'No hay actividad reciente todavia.'
+        lines = []
+        for i, item in enumerate(arr[:12], 1):
+            lines.append(f'{i:02d}. {item}')
+        return '\n'.join(lines)
+
+    def _xbox_guide_downloads_text(self):
+        cmd = (
+            "/bin/sh -c \"ps -eo comm,args 2>/dev/null | "
+            "egrep -i 'steam|flatpak|apt|dnf|pacman|aria2c|transmission|qbittorrent|wget|curl' "
+            "| grep -v egrep | head -n 12\""
+        )
+        out = subprocess.getoutput(cmd).strip()
+        if out:
+            return f'Procesos de descarga detectados:\n{out}'
+        return 'No se detectan descargas activas.'
+
+    def _show_xbox_guide(self):
+        self._play_sfx('open')
+        d = XboxGuideMenu(current_gamertag(), self)
+        if d.exec_() == QtWidgets.QDialog.Accepted:
+            opt = d.selected()
+            if opt:
+                self._play_sfx('select')
+                self._handle_xbox_guide_action(opt)
+        else:
+            self._play_sfx('back')
+
+    def _handle_xbox_guide_action(self, action):
+        name = str(action or '').strip()
+        if not name:
+            return
+        if name == 'Logros':
+            self.handle_action('Missions')
+            return
+        if name == 'Premios':
+            self.handle_action('Store')
+            return
+        if name == 'Reciente':
+            self._msg('Reciente', self._xbox_guide_recent_text())
+            return
+        if name == 'Mis juegos':
+            if 'games' in self.tabs:
+                self._switch_tab(self.tabs.index('games'), animate=True, keep_tabs_focus=True)
+            return
+        if name == 'Descargas activas':
+            self._msg('Descargas activas', self._xbox_guide_downloads_text())
+            return
+        if name == 'Canjear codigo':
+            code, ok = self._input_text('Canjear codigo', 'Introduce tu codigo:', '')
+            if not ok:
+                return
+            code = ''.join(ch for ch in str(code).upper() if ch.isalnum() or ch == '-')
+            if not code:
+                self._msg('Canjear codigo', 'Codigo no valido.')
+                return
+            store_file = DATA_HOME / 'redeemed_codes.json'
+            redeemed = safe_json_read(store_file, [])
+            if not isinstance(redeemed, list):
+                redeemed = []
+            if code in redeemed:
+                self._msg('Canjear codigo', f'El codigo {code} ya fue usado en este perfil.')
+                return
+            redeemed.append(code)
+            safe_json_write(store_file, redeemed)
+            self._msg('Canjear codigo', f'Codigo {code} guardado correctamente.')
+            return
+        if name == 'Configuracion':
+            if 'settings' in self.tabs:
+                self._switch_tab(self.tabs.index('settings'), animate=True, keep_tabs_focus=True)
+            return
+        if name == 'Inicio de Xbox':
+            if 'home' in self.tabs:
+                self._switch_tab(self.tabs.index('home'), animate=True, keep_tabs_focus=True)
+            return
+        if name == 'Cerrar app actual':
+            self.handle_action('Close Active App')
+            return
+        if name == 'Cerrar sesion':
+            prof = safe_json_read(PROFILE_FILE, {})
+            if not isinstance(prof, dict):
+                prof = {}
+            prof['signed_in'] = False
+            safe_json_write(PROFILE_FILE, prof)
+            self._msg('Sesion', 'Sesion cerrada.')
+            return
+        self._msg('Guia Xbox', f'Opcion no implementada: {name}')
+
     def _scan_media_candidates(self, tray_action='scan'):
         if tray_action in ('toggle', 'open', 'close') and shutil.which('eject'):
             if tray_action == 'toggle':
@@ -3006,6 +3345,10 @@ class Dashboard(QtWidgets.QMainWindow):
             'Install Lutris': 'Install Lutris from package manager or Flatpak.',
             'Install Heroic': 'Install Heroic Games Launcher.',
             'Store': 'Open XUI store and inventory.',
+            'Web Browser': 'Open XUI Web Hub browser (Chromium based via Qt WebEngine).',
+            'FNAE': "Launch Five Night's At Epstein's from local store package.",
+            'Gem Match': 'Launch Gem Match minigame (Bejeweled style).',
+            'Close Active App': 'Try to close the currently active external window/app.',
             'Casino': 'Launch casino minigame.',
             'Runner': 'Launch runner minigame.',
             'Missions': 'Open missions and rewards.',
@@ -3050,7 +3393,7 @@ class Dashboard(QtWidgets.QMainWindow):
         elif action == 'Open Tray':
             self._open_tray_dashboard_menu()
         elif action == 'My Pins':
-            self._menu('My Pins', ['Casino', 'Runner', 'Store', 'System Info', 'Web Control'])
+            self._menu('My Pins', ['Casino', 'Runner', 'Gem Match', 'FNAE', 'Store', 'Web Browser', 'System Info', 'Web Control'])
         elif action == 'Recent':
             try:
                 arr = json.loads(RECENT_FILE.read_text()) if RECENT_FILE.exists() else []
@@ -3061,10 +3404,19 @@ class Dashboard(QtWidgets.QMainWindow):
             self._run('/bin/sh', ['-c', f'{xui}/bin/xui_python.sh {xui}/casino/casino.py'])
         elif action == 'Runner':
             self._run('/bin/sh', ['-c', f'{xui}/bin/xui_python.sh {xui}/games/runner.py'])
+        elif action in ('Gem Match', 'Bejeweled'):
+            self._run('/bin/sh', ['-c', f'{xui}/bin/xui_gem_match.sh'])
+        elif action in ('FNAE', "Five Night's At Epstein's", "Five Nights At Epstein's"):
+            self._run('/bin/sh', ['-c', f'{xui}/bin/xui_run_fnae.sh'])
         elif action == 'Steam':
             self._launch_platform('steam')
         elif action in ('Store', 'Avatar Store'):
             self._run('/bin/sh', ['-c', f'{xui}/bin/xui_store.sh'])
+        elif action == 'Web Browser':
+            self._run('/bin/sh', ['-c', f'{xui}/bin/xui_browser.sh --hub https://www.xbox.com'])
+        elif action == 'Close Active App':
+            out = subprocess.getoutput(f'/bin/sh -c "{xui}/bin/xui_close_active_app.sh"')
+            self._msg('Close Active App', out or 'No output')
         elif action in ('Missions', 'Misiones'):
             self._play_sfx('achievement')
             self._run('/bin/sh', ['-c', f'{xui}/bin/xui_missions.sh'])
@@ -3119,7 +3471,8 @@ class Dashboard(QtWidgets.QMainWindow):
                 'Emoji Picker', 'Cron Manager', 'Backup Data', 'Restore Last Backup', 'Plugin Manager',
                 'Logs Viewer', 'JSON Browser', 'Archive Manager', 'Hash Tool', 'Ping Test',
                 'Docker Status', 'VM Status', 'Open Notes', 'App Launcher', 'Service Manager',
-                'Developer Tools', 'Scan Media Games', 'Install Wine Runtime', 'Games Integrations'
+                'Developer Tools', 'Scan Media Games', 'Install Wine Runtime', 'Games Integrations',
+                'Web Browser', 'FNAE', 'Gem Match', 'Close Active App'
             ])
         elif action == 'Games Integrations':
             self._menu('Games Integrations', [
@@ -3128,6 +3481,8 @@ class Dashboard(QtWidgets.QMainWindow):
                 'RetroArch', 'Install RetroArch',
                 'Lutris', 'Install Lutris',
                 'Heroic', 'Install Heroic',
+                'FNAE',
+                'Gem Match',
                 'Compat X86'
             ])
         elif action == 'Developer Tools':
@@ -3408,8 +3763,15 @@ class Dashboard(QtWidgets.QMainWindow):
                 if page.right_tiles:
                     self.handle_action(page.right_tiles[self.focus_idx].action)
             return
-        if k == QtCore.Qt.Key_F1:
-            self._menu('Guide', ['home', 'social', 'games', 'tv & movies', 'music', 'apps', 'settings', 'Exit'])
+        guide_keys = {QtCore.Qt.Key_F1, QtCore.Qt.Key_Home, QtCore.Qt.Key_Meta}
+        key_super_l = getattr(QtCore.Qt, 'Key_Super_L', None)
+        key_super_r = getattr(QtCore.Qt, 'Key_Super_R', None)
+        if key_super_l is not None:
+            guide_keys.add(key_super_l)
+        if key_super_r is not None:
+            guide_keys.add(key_super_r)
+        if k in guide_keys:
+            self._show_xbox_guide()
             return
         super().keyPressEvent(e)
 
@@ -3759,40 +4121,352 @@ write_joy_py(){
   info "Writing joy listener to $BIN_DIR/xui_joy_listener.py"
   cat > "$BIN_DIR/xui_joy_listener.py" <<'PY'
 #!/usr/bin/env python3
-"""Simple Joy listener: map event codes to xdotool keys
-Runs as user service. Keeps minimal logic so dashboard can also run its own listener.
-"""
-import time, os, subprocess
-try:
-    from evdev import list_devices, InputDevice
-except Exception:
-    # evdev missing
-    list_devices = lambda: []
+"""XUI controller bridge: Xbox and Joy-Con -> dashboard keyboard navigation."""
+import logging
+import os
+import select
+import shutil
+import subprocess
+import time
 
-KEYMAP = {
-    # example mapping; device-specific codes vary
-    '304':'Return', '305':'Escape', '16':'Left', '17':'Right', '103':'Up', '108':'Down'
+try:
+    from evdev import InputDevice, ecodes, list_devices
+except Exception as exc:
+    print(f'evdev not available: {exc}')
+    time.sleep(30)
+    raise SystemExit(0)
+
+LOG_FILE = os.path.expanduser('~/.xui/logs/joy_listener.log')
+DEADZONE = int(os.environ.get('XUI_JOY_DEADZONE', '12000'))
+REPEAT_SEC = float(os.environ.get('XUI_JOY_REPEAT_SEC', '0.22'))
+RESCAN_SEC = float(os.environ.get('XUI_JOY_RESCAN_SEC', '2.5'))
+NINTENDO_AB_SWAP = os.environ.get('XUI_JOY_NINTENDO_AB_SWAP', '1').lower() not in ('0', 'false', 'no')
+XDOTOOL = shutil.which('xdotool')
+
+
+def _c(name, default):
+    return getattr(ecodes, name, default)
+
+
+FACE_BUTTON_CODES = {
+    _c('BTN_SOUTH', 304), _c('BTN_EAST', 305), _c('BTN_NORTH', 307), _c('BTN_WEST', 308)
+}
+DPAD_BUTTON_CODES = {
+    _c('BTN_DPAD_UP', 544), _c('BTN_DPAD_DOWN', 545), _c('BTN_DPAD_LEFT', 546), _c('BTN_DPAD_RIGHT', 547)
+}
+ANALOG_AXIS_CODES = {
+    _c('ABS_X', 0), _c('ABS_Y', 1), _c('ABS_RX', 3), _c('ABS_RY', 4)
+}
+HAT_CODES = {_c('ABS_HAT0X', 16), _c('ABS_HAT0Y', 17)}
+
+COMMON_BUTTON_MAP = {
+    _c('BTN_DPAD_UP', 544): 'Up',
+    _c('BTN_DPAD_DOWN', 545): 'Down',
+    _c('BTN_DPAD_LEFT', 546): 'Left',
+    _c('BTN_DPAD_RIGHT', 547): 'Right',
+    _c('BTN_START', 315): 'Return',
+    _c('BTN_SELECT', 314): 'Escape',
+    _c('BTN_MODE', 316): 'F1',
+    _c('BTN_SOUTH', 304): 'Return',
+    _c('BTN_EAST', 305): 'Escape',
+    _c('BTN_NORTH', 307): 'space',
+    _c('BTN_WEST', 308): 'Tab',
+    _c('BTN_TL', 310): 'Tab',
+    _c('BTN_TR', 311): 'Tab',
+    _c('BTN_TL2', 312): 'Tab',
+    _c('BTN_TR2', 313): 'Tab',
+    _c('BTN_THUMBL', 317): 'F1',
+    _c('BTN_THUMBR', 318): 'F1',
+}
+NINTENDO_BUTTON_MAP = {
+    _c('BTN_EAST', 305): 'Return',
+    _c('BTN_SOUTH', 304): 'Escape',
+}
+TRIGGER_HAPPY_MAP = {
+    _c('BTN_TRIGGER_HAPPY1', 704): 'Left',
+    _c('BTN_TRIGGER_HAPPY2', 705): 'Right',
+    _c('BTN_TRIGGER_HAPPY3', 706): 'Up',
+    _c('BTN_TRIGGER_HAPPY4', 707): 'Down',
 }
 
-def find_and_listen():
-    for p in list_devices():
+ABS_MAP = {
+    _c('ABS_X', 0): ('Left', 'Right'),
+    _c('ABS_Y', 1): ('Up', 'Down'),
+    _c('ABS_RX', 3): ('Left', 'Right'),
+    _c('ABS_RY', 4): ('Up', 'Down'),
+    _c('ABS_HAT0X', 16): ('Left', 'Right'),
+    _c('ABS_HAT0Y', 17): ('Up', 'Down'),
+}
+
+
+def emit_key(key):
+    if not XDOTOOL:
+        return False
+    subprocess.run(
+        [XDOTOOL, 'key', '--clearmodifiers', str(key)],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        check=False,
+    )
+    return True
+
+
+def classify_controller(dev):
+    name = (dev.name or '').lower()
+    if any(token in name for token in ('joy-con', 'joycon', 'nintendo switch', 'pro controller', 'switch')):
+        return 'nintendo'
+    if any(token in name for token in ('xbox', 'x-input', 'xinput', 'x-pad')):
+        return 'xbox'
+    return 'generic'
+
+
+def is_controller_device(dev):
+    name = (dev.name or '').lower()
+    try:
+        caps = dev.capabilities(absinfo=False)
+    except Exception:
+        return False
+    key_caps = set(caps.get(ecodes.EV_KEY, []))
+    abs_caps = set(caps.get(ecodes.EV_ABS, []))
+    has_face = bool(key_caps & FACE_BUTTON_CODES)
+    has_dpad = bool(key_caps & DPAD_BUTTON_CODES) or bool(abs_caps & HAT_CODES) or bool(key_caps & set(TRIGGER_HAPPY_MAP))
+    has_axis = bool(abs_caps & ANALOG_AXIS_CODES)
+    named_as_pad = any(token in name for token in (
+        'xbox', 'x-input', 'xinput', 'x-pad', 'joy-con', 'joycon',
+        'nintendo switch', 'pro controller', 'gamepad', 'joystick'
+    ))
+    if named_as_pad and (has_face or has_dpad or has_axis):
+        return True
+    if has_face and (has_axis or has_dpad):
+        return True
+    return has_dpad and has_axis
+
+
+def device_signature(dev):
+    info = getattr(dev, 'info', None)
+    bustype = int(getattr(info, 'bustype', 0) or 0)
+    vendor = int(getattr(info, 'vendor', 0) or 0)
+    product = int(getattr(info, 'product', 0) or 0)
+    version = int(getattr(info, 'version', 0) or 0)
+    phys = (getattr(dev, 'phys', '') or '').strip().lower()
+    uniq = (getattr(dev, 'uniq', '') or '').strip().lower()
+    name = (dev.name or '').strip().lower()
+    return (phys, uniq, name, bustype, vendor, product, version)
+
+
+def score_device(dev):
+    try:
+        caps = dev.capabilities(absinfo=False)
+    except Exception:
+        return 0
+    key_caps = set(caps.get(ecodes.EV_KEY, []))
+    abs_caps = set(caps.get(ecodes.EV_ABS, []))
+    score = len(abs_caps) * 5 + len(key_caps)
+    if key_caps & FACE_BUTTON_CODES:
+        score += 30
+    if key_caps & DPAD_BUTTON_CODES or abs_caps & HAT_CODES:
+        score += 20
+    if abs_caps & ANALOG_AXIS_CODES:
+        score += 20
+    return score
+
+
+class ControllerBridge:
+    def __init__(self):
+        self.devices = {}
+        self.device_kind = {}
+        self.device_map = {}
+        self.device_sig = {}
+        self.axis_state = {}
+        self.axis_last_emit = {}
+        self.key_last_emit = {}
+
+    def _mapping_for_kind(self, kind):
+        mapping = dict(COMMON_BUTTON_MAP)
+        mapping.update(TRIGGER_HAPPY_MAP)
+        if kind == 'nintendo' and NINTENDO_AB_SWAP:
+            mapping.update(NINTENDO_BUTTON_MAP)
+        return mapping
+
+    def _open_device(self, path):
         try:
-            d = InputDevice(p)
-            if 'joystick' in d.name.lower() or 'gamepad' in d.name.lower() or 'joy' in d.name.lower():
-                for ev in d.read_loop():
-                    if ev.type == 1 and ev.value == 1:
-                        k = KEYMAP.get(str(ev.code))
-                        if k:
-                            subprocess.run(['xdotool','key',k])
+            dev = InputDevice(path)
         except Exception:
-            continue
+            return None
+        if not is_controller_device(dev):
+            return None
+        try:
+            dev.set_nonblocking(True)
+        except Exception:
+            pass
+        return dev
+
+    def scan(self):
+        current = set(list_devices())
+        known = set(self.devices.keys())
+        for path in sorted(known - current):
+            dev = self.devices.pop(path, None)
+            if dev is not None:
+                try:
+                    dev.close()
+                except Exception:
+                    pass
+                self.device_kind.pop(path, None)
+                self.device_map.pop(path, None)
+                self.device_sig.pop(path, None)
+                logging.info('controller disconnected: %s', path)
+        signature_paths = {}
+        for path, sig in self.device_sig.items():
+            signature_paths[sig] = path
+        for path in sorted(current - known):
+            dev = self._open_device(path)
+            if dev is None:
+                continue
+            sig = device_signature(dev)
+            kind = classify_controller(dev)
+            prev_path = signature_paths.get(sig)
+            if prev_path and prev_path in self.devices:
+                prev_dev = self.devices.get(prev_path)
+                keep_prev = False
+                if prev_dev is not None:
+                    keep_prev = score_device(prev_dev) >= score_device(dev)
+                if keep_prev:
+                    try:
+                        dev.close()
+                    except Exception:
+                        pass
+                    continue
+                if prev_dev is not None:
+                    try:
+                        prev_dev.close()
+                    except Exception:
+                        pass
+                self.devices.pop(prev_path, None)
+                self.device_kind.pop(prev_path, None)
+                self.device_map.pop(prev_path, None)
+                self.device_sig.pop(prev_path, None)
+            self.devices[path] = dev
+            self.device_kind[path] = kind
+            self.device_map[path] = self._mapping_for_kind(kind)
+            self.device_sig[path] = sig
+            signature_paths[sig] = path
+            logging.info('controller connected: %s (%s) kind=%s', path, dev.name, kind)
+        active = set(self.devices.keys())
+        self.axis_state = {k: v for k, v in self.axis_state.items() if k[0] in active}
+        self.axis_last_emit = {k: v for k, v in self.axis_last_emit.items() if k[0] in active}
+        self.key_last_emit = {k: v for k, v in self.key_last_emit.items() if k[0] in active}
+
+    def _axis_direction(self, dev, code, value):
+        if code in HAT_CODES:
+            if value < 0:
+                return -1
+            if value > 0:
+                return 1
+            return 0
+        try:
+            info = dev.absinfo(code)
+        except Exception:
+            info = None
+        if info is None:
+            center = 0
+            threshold = max(8000, DEADZONE)
+        else:
+            rng = max(1, int(info.max) - int(info.min))
+            center = int(info.min) + (rng // 2)
+            threshold = max(int(rng * 0.22), int(DEADZONE * (rng / 65535.0)), 8)
+        delta = int(value) - int(center)
+        if abs(delta) <= threshold:
+            return 0
+        return -1 if delta < 0 else 1
+
+    def _handle_key(self, dev, ev):
+        if ev.value not in (1, 2):
+            return
+        mapping = self.device_map.get(dev.path) or COMMON_BUTTON_MAP
+        mapped = mapping.get(int(ev.code))
+        if not mapped:
+            return
+        now = time.monotonic()
+        key = (dev.path, int(ev.code))
+        last = self.key_last_emit.get(key, 0.0)
+        if ev.value == 2 and (now - last) < REPEAT_SEC:
+            return
+        emit_key(mapped)
+        self.key_last_emit[key] = now
+
+    def _handle_abs(self, dev, ev):
+        pair = ABS_MAP.get(int(ev.code))
+        if not pair:
+            return
+        direction = self._axis_direction(dev, int(ev.code), int(ev.value))
+        akey = (dev.path, int(ev.code))
+        prev = self.axis_state.get(akey, 0)
+        now = time.monotonic()
+        if direction == 0:
+            self.axis_state[akey] = 0
+            return
+        last = self.axis_last_emit.get(akey, 0.0)
+        if direction != prev or (now - last) >= REPEAT_SEC:
+            emit_key(pair[0] if direction < 0 else pair[1])
+            self.axis_last_emit[akey] = now
+        self.axis_state[akey] = direction
+
+    def poll(self):
+        last_scan = 0.0
+        while True:
+            now = time.monotonic()
+            if (now - last_scan) >= RESCAN_SEC:
+                self.scan()
+                last_scan = now
+            if not self.devices:
+                time.sleep(0.35)
+                continue
+            fd_to_dev = {dev.fd: dev for dev in self.devices.values()}
+            try:
+                ready, _, _ = select.select(list(fd_to_dev.keys()), [], [], 0.35)
+            except Exception:
+                time.sleep(0.2)
+                continue
+            for fd in ready:
+                dev = fd_to_dev.get(fd)
+                if dev is None:
+                    continue
+                try:
+                    for ev in dev.read():
+                        if ev.type == ecodes.EV_KEY:
+                            self._handle_key(dev, ev)
+                        elif ev.type == ecodes.EV_ABS:
+                            self._handle_abs(dev, ev)
+                except OSError:
+                    path = dev.path
+                    try:
+                        dev.close()
+                    except Exception:
+                        pass
+                    self.devices.pop(path, None)
+                    logging.info('controller read failed, removed: %s', path)
+                except Exception:
+                    continue
 
 if __name__ == '__main__':
+    os.makedirs(os.path.dirname(LOG_FILE), exist_ok=True)
+    logging.basicConfig(
+        filename=LOG_FILE,
+        level=logging.INFO,
+        format='%(asctime)s %(levelname)s %(message)s'
+    )
+    logging.info('xui joy bridge starting')
+    if not XDOTOOL:
+        logging.warning('xdotool not found, controller input cannot be injected')
+    bridge = ControllerBridge()
     while True:
         try:
-            find_and_listen()
-        except Exception:
-            time.sleep(2)
+            bridge.poll()
+        except KeyboardInterrupt:
+            break
+        except Exception as exc:
+            logging.exception('joy bridge error: %s', exc)
+            time.sleep(1.0)
 PY
   chmod +x "$BIN_DIR/xui_joy_listener.py"
 }
@@ -4471,21 +5145,436 @@ PY
 
   cat > "$GAMES_DIR/store.py" <<'PY'
 #!/usr/bin/env python3
+import json
+import random
+import shutil
 import sys
+from datetime import date
 from pathlib import Path
-from PyQt5 import QtWidgets
+from PyQt5 import QtCore, QtGui, QtWidgets
 
 sys.path.insert(0, str(Path.home() / '.xui' / 'bin'))
 from xui_game_lib import load_store, load_inventory, save_inventory, get_balance, change_balance, complete_mission
 
+DATA_HOME = Path.home() / '.xui' / 'data'
+STORE_FILE = DATA_HOME / 'store.json'
+XUI_BIN = Path.home() / '.xui' / 'bin'
+DAILY_ACTIVE_COUNT = 280
+ALWAYS_VISIBLE_IDS = {
+    'game_fnae_fangame',
+    'minigame_bejeweled_xui',
+    'game_casino',
+    'game_runner',
+    'browser_xui_webhub',
+    'platform_steam',
+    'platform_retroarch',
+}
+
+
+def _safe_write(path, data):
+    p = Path(path)
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding='utf-8')
+
+
+def _norm_item(raw):
+    it = dict(raw or {})
+    iid = str(it.get('id', '')).strip()
+    if not iid:
+        return None
+    name = str(it.get('name', iid)).strip() or iid
+    try:
+        price = float(it.get('price', 0))
+    except Exception:
+        price = 0.0
+    it['id'] = iid
+    it['name'] = name
+    it['price'] = round(max(0.0, price), 2)
+    it['desc'] = str(it.get('desc', '')).strip()
+    it['category'] = str(it.get('category', 'Apps')).strip() or 'Apps'
+    it['launch'] = str(it.get('launch', '')).strip()
+    it['install'] = str(it.get('install', '')).strip()
+    return it
+
+
+def _curated_items():
+    return [
+        {
+            'id': 'browser_xui_webhub',
+            'name': 'XUI Web Browser',
+            'price': 0,
+            'category': 'Browser',
+            'desc': 'Custom Chromium-based browser with Xbox style web hub.',
+            'launch': str(XUI_BIN / 'xui_browser.sh') + ' --hub https://www.xbox.com',
+        },
+        {
+            'id': 'game_fnae_fangame',
+            'name': "Five Night's At Epstein's",
+            'price': 85,
+            'category': 'Games',
+            'desc': 'Fangame package with Linux/Windows detection and launcher.',
+            'install': str(XUI_BIN / 'xui_install_fnae.sh'),
+            'launch': str(XUI_BIN / 'xui_run_fnae.sh'),
+        },
+        {
+            'id': 'minigame_bejeweled_xui',
+            'name': 'Bejeweled XUI (Gem Match)',
+            'price': 20,
+            'category': 'MiniGames',
+            'desc': 'Match-3 style minigame integrated in dashboard.',
+            'launch': str(XUI_BIN / 'xui_gem_match.sh'),
+        },
+        {
+            'id': 'game_casino',
+            'name': 'Casino',
+            'price': 0,
+            'category': 'Games',
+            'desc': 'Casino minigame.',
+            'launch': str(XUI_BIN / 'xui_python.sh') + ' ' + str(Path.home() / '.xui' / 'casino' / 'casino.py'),
+        },
+        {
+            'id': 'game_runner',
+            'name': 'Runner',
+            'price': 0,
+            'category': 'MiniGames',
+            'desc': 'Runner arcade minigame.',
+            'launch': str(XUI_BIN / 'xui_python.sh') + ' ' + str(Path.home() / '.xui' / 'games' / 'runner.py'),
+        },
+        {
+            'id': 'game_missions',
+            'name': 'Missions',
+            'price': 0,
+            'category': 'Apps',
+            'desc': 'Mission and rewards panel.',
+            'launch': str(XUI_BIN / 'xui_missions.sh'),
+        },
+        {
+            'id': 'platform_steam',
+            'name': 'Steam Integration',
+            'price': 10,
+            'category': 'Apps',
+            'desc': 'Launch and integrate Steam.',
+            'install': str(XUI_BIN / 'xui_install_steam.sh'),
+            'launch': str(XUI_BIN / 'xui_steam.sh'),
+        },
+        {
+            'id': 'platform_retroarch',
+            'name': 'RetroArch Integration',
+            'price': 10,
+            'category': 'Apps',
+            'desc': 'Install and launch RetroArch.',
+            'install': str(XUI_BIN / 'xui_install_retroarch.sh'),
+            'launch': str(XUI_BIN / 'xui_retroarch.sh'),
+        },
+        {
+            'id': 'platform_lutris',
+            'name': 'Lutris Integration',
+            'price': 10,
+            'category': 'Apps',
+            'desc': 'Install and launch Lutris.',
+            'install': str(XUI_BIN / 'xui_install_lutris.sh'),
+            'launch': str(XUI_BIN / 'xui_lutris.sh'),
+        },
+        {
+            'id': 'platform_heroic',
+            'name': 'Heroic Integration',
+            'price': 10,
+            'category': 'Apps',
+            'desc': 'Install and launch Heroic Games Launcher.',
+            'install': str(XUI_BIN / 'xui_install_heroic.sh'),
+            'launch': str(XUI_BIN / 'xui_heroic.sh'),
+        },
+        {
+            'id': 'acc_avatar_pack',
+            'name': 'Avatar Pack Premium',
+            'price': 35,
+            'category': 'Accessories',
+            'desc': 'Xbox style avatar accessory bundle.',
+        },
+        {
+            'id': 'acc_theme_live_legacy',
+            'name': 'Theme Live Legacy',
+            'price': 15,
+            'category': 'Themes',
+            'desc': 'Classic Xbox Live green theme tweaks.',
+        },
+    ]
+
+
+def _filler_items(current_ids, target_count=520):
+    categories = ['Games', 'MiniGames', 'Accessories', 'Apps', 'Browser', 'Themes']
+    prefixes = {
+        'Games': ['Arcade', 'Galaxy', 'Battle', 'Turbo', 'Retro', 'Dungeon', 'Quest', 'Rally'],
+        'MiniGames': ['Puzzle', 'Match', 'Brick', 'Rhythm', 'Dash', 'Ninja', 'Jump', 'Pop'],
+        'Accessories': ['Avatar', 'Gamerpic', 'Skin', 'Badge', 'Title', 'Emote', 'Voice', 'HUD'],
+        'Apps': ['Utility', 'Toolkit', 'Manager', 'Studio', 'Service', 'Monitor', 'Companion', 'Hub'],
+        'Browser': ['Tab', 'Favorite', 'Feed', 'Portal', 'Web Card', 'Live Tile', 'Channel', 'Bookmark'],
+        'Themes': ['Neon', 'Carbon', 'Aero', 'Live', 'Emerald', 'Metro', 'Classic', 'Pulse'],
+    }
+    suffixes = ['Pack', 'Edition', 'Suite', 'Bundle', 'Pro', 'Lite', 'Plus', 'Ultra']
+    out = []
+    idx = 1
+    while len(current_ids) + len(out) < target_count:
+        cat = categories[(idx - 1) % len(categories)]
+        pref = prefixes[cat][(idx * 3) % len(prefixes[cat])]
+        suf = suffixes[(idx * 5) % len(suffixes)]
+        rid = f"auto_{cat.lower()}_{idx:04d}"
+        if rid in current_ids:
+            idx += 1
+            continue
+        base_price = {
+            'Games': 30,
+            'MiniGames': 18,
+            'Accessories': 8,
+            'Apps': 12,
+            'Browser': 9,
+            'Themes': 6,
+        }[cat]
+        price = float(base_price + (idx % 17))
+        out.append({
+            'id': rid,
+            'name': f'{pref} {suf} {idx:03d}',
+            'price': price,
+            'category': cat,
+            'desc': f'{cat} item auto-generated for XUI store catalog.',
+        })
+        idx += 1
+    return out
+
+
+def _rotation_key():
+    return date.today().isoformat()
+
+
+def _stable_seed(text):
+    seed = 0
+    for b in str(text).encode('utf-8', errors='ignore'):
+        seed = ((seed * 131) + int(b)) & 0xFFFFFFFF
+    return seed
+
+
+def _daily_rotated_items(all_items, keep_ids=None, active_count=DAILY_ACTIVE_COUNT):
+    keep_ids = set(keep_ids or [])
+    day_key = _rotation_key()
+    keep = []
+    pool = []
+    for item in all_items:
+        iid = str(item.get('id', '')).strip()
+        if iid and iid in keep_ids:
+            keep.append(item)
+        else:
+            pool.append(item)
+    rnd = random.Random(_stable_seed(day_key))
+    rnd.shuffle(pool)
+    target = max(int(active_count), len(keep))
+    take = max(0, target - len(keep))
+    active = keep + pool[:take]
+    return active, day_key
+
+
+def ensure_catalog_minimum(min_count=520):
+    data = load_store()
+    if not isinstance(data, dict):
+        data = {}
+    raw_items = data.get('all_items', data.get('items', []))
+    if not isinstance(raw_items, list):
+        raw_items = []
+    items = []
+    seen = set()
+    for raw in raw_items:
+        item = _norm_item(raw)
+        if item is None:
+            continue
+        iid = item['id']
+        if iid in seen:
+            continue
+        seen.add(iid)
+        items.append(item)
+    for raw in _curated_items():
+        item = _norm_item(raw)
+        if item is None:
+            continue
+        if item['id'] in seen:
+            continue
+        seen.add(item['id'])
+        items.append(item)
+    if len(items) < min_count:
+        for raw in _filler_items(seen, min_count):
+            item = _norm_item(raw)
+            if item is None or item['id'] in seen:
+                continue
+            seen.add(item['id'])
+            items.append(item)
+    active_items, day_key = _daily_rotated_items(items, ALWAYS_VISIBLE_IDS, DAILY_ACTIVE_COUNT)
+    out = {
+        'catalog_version': 'xui-500',
+        'rotation_day': day_key,
+        'rotation_active_count': len(active_items),
+        'rotation_total_count': len(items),
+        'all_items': items,
+        'items': active_items,
+    }
+    _safe_write(STORE_FILE, out)
+    return out
+
+
+class StoreTile(QtWidgets.QFrame):
+    clicked = QtCore.pyqtSignal(object)
+
+    def __init__(self, item, owned=False):
+        super().__init__()
+        self.item = dict(item or {})
+        self.owned = bool(owned)
+        self.selected = False
+        self.setObjectName('store_tile')
+        self.setCursor(QtCore.Qt.PointingHandCursor)
+        self.setFixedSize(248, 188)
+        self._build()
+        self._apply_style()
+
+    def _tile_colors(self):
+        seed = _stable_seed(str(self.item.get('id', '')))
+        h1 = seed % 360
+        h2 = (h1 + 26) % 360
+        c1 = QtGui.QColor.fromHsv(h1, 165, 180).name()
+        c2 = QtGui.QColor.fromHsv(h2, 190, 122).name()
+        return c1, c2
+
+    def _short_desc(self, text, limit=52):
+        txt = str(text or '').strip()
+        if len(txt) <= limit:
+            return txt
+        return txt[: max(0, limit - 3)] + '...'
+
+    def _price_text(self):
+        price = float(self.item.get('price', 0))
+        return 'FREE' if price <= 0 else f'EUR {price:.2f}'
+
+    def _build(self):
+        c1, c2 = self._tile_colors()
+        root = QtWidgets.QVBoxLayout(self)
+        root.setContentsMargins(0, 0, 0, 0)
+        root.setSpacing(0)
+
+        self.hero = QtWidgets.QLabel(str(self.item.get('category', 'Apps')).upper())
+        self.hero.setObjectName('tile_hero')
+        self.hero.setAlignment(QtCore.Qt.AlignLeft | QtCore.Qt.AlignTop)
+        self.hero.setMargin(10)
+        self.hero.setMinimumHeight(122)
+        self.hero.setStyleSheet(
+            'QLabel#tile_hero {'
+            f'background:qlineargradient(x1:0,y1:0,x2:1,y2:1, stop:0 {c1}, stop:1 {c2});'
+            'color:rgba(255,255,255,0.86);'
+            'font-size:12px;font-weight:700;letter-spacing:1px;border:none;}'
+        )
+        root.addWidget(self.hero, 1)
+
+        meta = QtWidgets.QFrame()
+        meta.setObjectName('tile_meta')
+        m = QtWidgets.QVBoxLayout(meta)
+        m.setContentsMargins(10, 8, 10, 8)
+        m.setSpacing(4)
+
+        top = QtWidgets.QHBoxLayout()
+        top.setContentsMargins(0, 0, 0, 0)
+        top.setSpacing(6)
+        self.owned_lbl = QtWidgets.QLabel('OWNED' if self.owned else '')
+        self.owned_lbl.setObjectName('tile_owned')
+        self.price_lbl = QtWidgets.QLabel(self._price_text())
+        self.price_lbl.setObjectName('tile_price')
+        top.addWidget(self.owned_lbl, 0)
+        top.addStretch(1)
+        top.addWidget(self.price_lbl, 0)
+
+        self.title_lbl = QtWidgets.QLabel(str(self.item.get('name', 'Item')))
+        self.title_lbl.setObjectName('tile_title')
+        self.title_lbl.setWordWrap(True)
+        self.desc_lbl = QtWidgets.QLabel(self._short_desc(self.item.get('desc', '')))
+        self.desc_lbl.setObjectName('tile_desc')
+
+        m.addLayout(top)
+        m.addWidget(self.title_lbl, 0)
+        m.addWidget(self.desc_lbl, 0)
+        root.addWidget(meta, 0)
+
+    def _apply_style(self):
+        border = '#7fbe32' if self.selected else '#d2d9df'
+        self.setStyleSheet(
+            f'''
+            QFrame#store_tile {{
+                background:#ffffff;
+                border:2px solid {border};
+                border-radius:2px;
+            }}
+            QFrame#store_tile:hover {{
+                border:2px solid #6db429;
+            }}
+            QFrame#tile_meta {{
+                background:#0f1218;
+                border:none;
+                border-top:1px solid #222a34;
+                border-radius:0px;
+            }}
+            QLabel#tile_owned {{
+                color:#b8ff80;
+                font-size:11px;
+                font-weight:700;
+            }}
+            QLabel#tile_price {{
+                color:#9ad26a;
+                font-size:11px;
+                font-weight:700;
+            }}
+            QLabel#tile_title {{
+                color:#ffffff;
+                font-size:14px;
+                font-weight:800;
+            }}
+            QLabel#tile_desc {{
+                color:#b8c2cf;
+                font-size:11px;
+            }}
+            '''
+        )
+
+    def set_owned(self, owned):
+        self.owned = bool(owned)
+        self.owned_lbl.setText('OWNED' if self.owned else '')
+
+    def set_selected(self, selected):
+        self.selected = bool(selected)
+        self._apply_style()
+
+    def mousePressEvent(self, event):
+        self.clicked.emit(self.item)
+        super().mousePressEvent(event)
+
 
 class StoreWindow(QtWidgets.QMainWindow):
+    FILTER_MAP = {
+        'All': None,
+        'Xbox One': {'Games'},
+        'Xbox 360': {'MiniGames'},
+        'Windows 8': {'Apps', 'Themes'},
+        'Windows Phone': {'Accessories', 'MiniGames'},
+        'Web': {'Browser'},
+    }
+
     def __init__(self):
         super().__init__()
-        self.setWindowTitle('XUI Store')
-        self.resize(840, 560)
+        self.setWindowTitle('XUI Marketplace')
+        self.resize(1280, 780)
         self.store_data = {'items': []}
         self.inventory = {'items': []}
+        self.category = 'All'
+        self.search_text = ''
+        self.filtered_rows = []
+        self.selected_item_id = ''
+        self.cat_buttons = {}
+        self.tile_widgets = []
+        self.reflow_timer = QtCore.QTimer(self)
+        self.reflow_timer.setSingleShot(True)
+        self.reflow_timer.timeout.connect(self._rebuild_tile_grid)
         self._build()
         self.reload()
 
@@ -4493,95 +5582,580 @@ class StoreWindow(QtWidgets.QMainWindow):
         root = QtWidgets.QWidget()
         self.setCentralWidget(root)
         v = QtWidgets.QVBoxLayout(root)
-        v.setContentsMargins(16, 16, 16, 16)
-        v.setSpacing(10)
+        v.setContentsMargins(0, 0, 0, 0)
+        v.setSpacing(0)
 
-        self.balance_lbl = QtWidgets.QLabel()
-        self.balance_lbl.setStyleSheet('font-size:22px; font-weight:700;')
-        self.table = QtWidgets.QTableWidget(0, 3)
-        self.table.setHorizontalHeaderLabels(['Item', 'Price', 'Description'])
-        self.table.horizontalHeader().setStretchLastSection(True)
-        self.table.setSelectionBehavior(QtWidgets.QAbstractItemView.SelectRows)
-        self.table.setSelectionMode(QtWidgets.QAbstractItemView.SingleSelection)
-        self.table.setEditTriggers(QtWidgets.QAbstractItemView.NoEditTriggers)
-        self.table.setStyleSheet('font-size:16px;')
-        self.info_lbl = QtWidgets.QLabel()
-        self.info_lbl.setStyleSheet('font-size:16px; color:#d7f0d7;')
+        header = QtWidgets.QFrame()
+        header.setObjectName('header_white')
+        hl = QtWidgets.QHBoxLayout(header)
+        hl.setContentsMargins(20, 12, 20, 12)
+        hl.setSpacing(12)
 
-        row = QtWidgets.QHBoxLayout()
-        buy_btn = QtWidgets.QPushButton('Buy Selected')
-        inv_btn = QtWidgets.QPushButton('Show Inventory')
+        mark = QtWidgets.QLabel('X')
+        mark.setObjectName('logo_mark')
+        mark.setAlignment(QtCore.Qt.AlignCenter)
+        mark.setFixedSize(38, 38)
+        logo = QtWidgets.QLabel('XBOX')
+        logo.setObjectName('logo_word')
+        hl.addWidget(mark, 0)
+        hl.addWidget(logo, 0)
+        hl.addStretch(1)
+
+        self.balance_lbl = QtWidgets.QLabel('Balance: EUR 0.00')
+        self.balance_lbl.setObjectName('balance')
+        acc = QtWidgets.QLabel('My Account  |  Join Now  |  Sign In')
+        acc.setObjectName('account_links')
+        hl.addWidget(self.balance_lbl, 0)
+        hl.addSpacing(16)
+        hl.addWidget(acc, 0)
+        v.addWidget(header, 0)
+
+        nav = QtWidgets.QFrame()
+        nav.setObjectName('green_nav')
+        nav_l = QtWidgets.QHBoxLayout(nav)
+        nav_l.setContentsMargins(16, 8, 16, 8)
+        nav_l.setSpacing(2)
+        for name in ['Xbox One', 'Xbox 360', 'Xbox Live Gold', 'Social', 'Games', 'Video', 'Music', 'Support']:
+            b = QtWidgets.QPushButton(name)
+            b.setObjectName('global_nav_btn')
+            b.setProperty('active', str(name == 'Games').lower())
+            b.clicked.connect(lambda _=False, name=name: self._on_global_nav(name))
+            nav_l.addWidget(b, 0)
+        nav_l.addStretch(1)
+        self.search = QtWidgets.QLineEdit()
+        self.search.setObjectName('search')
+        self.search.setPlaceholderText('Search Games')
+        self.search.textChanged.connect(self.set_search)
+        search_btn = QtWidgets.QPushButton('Search')
+        search_btn.setObjectName('search_btn')
+        search_btn.clicked.connect(lambda: self.set_search(self.search.text()))
+        nav_l.addWidget(self.search, 0)
+        nav_l.addWidget(search_btn, 0)
+        v.addWidget(nav, 0)
+
+        page = QtWidgets.QWidget()
+        page_l = QtWidgets.QVBoxLayout(page)
+        page_l.setContentsMargins(16, 14, 16, 12)
+        page_l.setSpacing(10)
+
+        title_row = QtWidgets.QHBoxLayout()
+        title_row.setContentsMargins(0, 0, 0, 0)
+        self.page_title = QtWidgets.QLabel('Xbox Games')
+        self.page_title.setObjectName('page_title')
+        self.rotation_lbl = QtWidgets.QLabel('Rotation: -')
+        self.rotation_lbl.setObjectName('rotation_lbl')
+        title_row.addWidget(self.page_title, 0)
+        title_row.addStretch(1)
+        title_row.addWidget(self.rotation_lbl, 0)
+        page_l.addLayout(title_row)
+
+        filters = QtWidgets.QHBoxLayout()
+        filters.setContentsMargins(0, 0, 0, 0)
+        filters.setSpacing(2)
+        for name in ['Xbox One', 'Xbox 360', 'Windows 8', 'Windows Phone', 'Web', 'All']:
+            b = QtWidgets.QPushButton(name)
+            b.setObjectName('platform_btn')
+            b.clicked.connect(lambda _=False, name=name: self.set_category(name))
+            filters.addWidget(b, 0)
+            self.cat_buttons[name] = b
+        filters.addStretch(1)
+        page_l.addLayout(filters)
+
+        self.scroll = QtWidgets.QScrollArea()
+        self.scroll.setWidgetResizable(True)
+        self.scroll.setObjectName('tiles_scroll')
+        self.tile_host = QtWidgets.QWidget()
+        self.tile_grid = QtWidgets.QGridLayout(self.tile_host)
+        self.tile_grid.setContentsMargins(0, 0, 0, 0)
+        self.tile_grid.setHorizontalSpacing(12)
+        self.tile_grid.setVerticalSpacing(12)
+        self.scroll.setWidget(self.tile_host)
+        page_l.addWidget(self.scroll, 1)
+
+        details = QtWidgets.QFrame()
+        details.setObjectName('details_panel')
+        dl = QtWidgets.QVBoxLayout(details)
+        dl.setContentsMargins(12, 10, 12, 10)
+        dl.setSpacing(8)
+
+        self.sel_name = QtWidgets.QLabel('Select an item')
+        self.sel_name.setObjectName('sel_name')
+        self.sel_meta = QtWidgets.QLabel('Category | Price | State')
+        self.sel_meta.setObjectName('sel_meta')
+        self.sel_desc = QtWidgets.QLabel('Choose a tile to view details.')
+        self.sel_desc.setWordWrap(True)
+        self.sel_desc.setObjectName('sel_desc')
+
+        actions = QtWidgets.QHBoxLayout()
+        actions.setContentsMargins(0, 0, 0, 0)
+        actions.setSpacing(6)
+        self.buy_btn = QtWidgets.QPushButton('Buy')
+        self.install_btn = QtWidgets.QPushButton('Install')
+        self.launch_btn = QtWidgets.QPushButton('Launch')
+        inv_btn = QtWidgets.QPushButton('Inventory')
+        refresh_btn = QtWidgets.QPushButton('Refresh')
         close_btn = QtWidgets.QPushButton('Close')
-        buy_btn.clicked.connect(self.buy_selected)
+        self.buy_btn.clicked.connect(self.buy_selected)
+        self.install_btn.clicked.connect(self.install_selected)
+        self.launch_btn.clicked.connect(self.launch_selected)
         inv_btn.clicked.connect(self.show_inventory)
+        refresh_btn.clicked.connect(self.reload)
         close_btn.clicked.connect(self.close)
-        row.addWidget(buy_btn)
-        row.addWidget(inv_btn)
-        row.addStretch(1)
-        row.addWidget(close_btn)
+        actions.addWidget(self.buy_btn)
+        actions.addWidget(self.install_btn)
+        actions.addWidget(self.launch_btn)
+        actions.addWidget(inv_btn)
+        actions.addWidget(refresh_btn)
+        actions.addStretch(1)
+        actions.addWidget(close_btn)
 
-        v.addWidget(self.balance_lbl)
-        v.addWidget(self.table, 1)
-        v.addLayout(row)
-        v.addWidget(self.info_lbl)
+        self.info_lbl = QtWidgets.QLabel('Marketplace ready.')
+        self.info_lbl.setObjectName('info_lbl')
+
+        dl.addWidget(self.sel_name, 0)
+        dl.addWidget(self.sel_meta, 0)
+        dl.addWidget(self.sel_desc, 0)
+        dl.addLayout(actions)
+        dl.addWidget(self.info_lbl, 0)
+        page_l.addWidget(details, 0)
+
+        v.addWidget(page, 1)
 
         self.setStyleSheet('''
-            QMainWindow { background:#10181f; color:#f0f6f0; }
-            QPushButton { background:#2ea84a; color:white; border:none; padding:7px 12px; border-radius:4px; }
-            QPushButton:hover { background:#39bc57; }
+            QMainWindow { background:#f4f4f4; color:#1f2b37; }
+            QFrame#header_white {
+                background:#ffffff;
+                border-bottom:1px solid #d8d8d8;
+            }
+            QLabel#logo_mark {
+                background:qradialgradient(cx:0.3, cy:0.3, radius:0.9, fx:0.35, fy:0.35, stop:0 #f6f6f6, stop:1 #9fa5aa);
+                color:#4da125;
+                font-size:23px;
+                font-weight:900;
+                border-radius:19px;
+                border:1px solid #b7bcc0;
+            }
+            QLabel#logo_word {
+                color:#4b4b4b;
+                font-size:40px;
+                font-weight:700;
+                letter-spacing:1px;
+            }
+            QLabel#balance {
+                color:#3f5c1f;
+                font-size:19px;
+                font-weight:800;
+            }
+            QLabel#account_links {
+                color:#70a639;
+                font-size:14px;
+                font-weight:600;
+            }
+            QFrame#green_nav { background:#75b93b; border-top:1px solid #679f35; border-bottom:1px solid #5f9630; }
+            QPushButton#global_nav_btn {
+                background:transparent;
+                color:#f4ffe9;
+                border:none;
+                padding:7px 10px;
+                font-size:16px;
+                font-weight:700;
+                text-align:left;
+            }
+            QPushButton#global_nav_btn[active="true"] {
+                color:#ffffff;
+                background:rgba(0,0,0,0.12);
+            }
+            QPushButton#global_nav_btn:hover {
+                background:rgba(0,0,0,0.18);
+            }
+            QLineEdit#search {
+                background:#ffffff;
+                color:#273220;
+                border:1px solid #4f7f24;
+                min-width:230px;
+                padding:6px 8px;
+                font-size:15px;
+                font-weight:600;
+            }
+            QPushButton#search_btn {
+                background:#4f8e26;
+                color:#ffffff;
+                border:1px solid #3f7420;
+                padding:6px 10px;
+                font-size:14px;
+                font-weight:700;
+            }
+            QPushButton#search_btn:hover { background:#417e1f; }
+            QLabel#page_title {
+                color:#4f5865;
+                font-size:54px;
+                font-weight:700;
+            }
+            QLabel#rotation_lbl {
+                color:#6a7784;
+                font-size:16px;
+                font-weight:600;
+            }
+            QPushButton#platform_btn {
+                background:transparent;
+                border:none;
+                color:#76ad37;
+                font-size:33px;
+                font-weight:700;
+                padding:2px 10px 6px 0px;
+                text-align:left;
+            }
+            QPushButton#platform_btn:hover {
+                color:#5f9328;
+            }
+            QScrollArea#tiles_scroll {
+                background:#ffffff;
+                border:1px solid #d4d8dc;
+            }
+            QFrame#details_panel {
+                background:#ffffff;
+                border:1px solid #ced4da;
+            }
+            QLabel#sel_name {
+                color:#26333f;
+                font-size:22px;
+                font-weight:800;
+            }
+            QLabel#sel_meta {
+                color:#547038;
+                font-size:15px;
+                font-weight:700;
+            }
+            QLabel#sel_desc {
+                color:#506171;
+                font-size:14px;
+                font-weight:600;
+            }
+            QLabel#info_lbl {
+                color:#2b4a6b;
+                font-size:14px;
+                font-weight:700;
+            }
+            QPushButton {
+                background:#4ea42a;
+                color:#ffffff;
+                border:1px solid #3b7f1f;
+                padding:6px 12px;
+                font-size:14px;
+                font-weight:800;
+            }
+            QPushButton:hover {
+                background:#3f9120;
+            }
+            QPushButton:disabled {
+                color:#ccddbf;
+                background:#8db380;
+                border:1px solid #80a474;
+            }
         ''')
+        self._update_cat_styles()
+
+    def _on_global_nav(self, name):
+        key = str(name or '').strip()
+        if key in ('Xbox One', 'Xbox 360'):
+            self.set_category(key)
+            return
+        if key == 'Games':
+            self.set_category('All')
+            return
+        self.info_lbl.setText(f'{key} section is visual-only in this build.')
+
+    def _run_terminal(self, cmd):
+        term = None
+        args = []
+        if shutil.which('x-terminal-emulator'):
+            term = 'x-terminal-emulator'
+            args = ['-e', '/bin/bash', '-lc', cmd]
+        elif shutil.which('gnome-terminal'):
+            term = 'gnome-terminal'
+            args = ['--', '/bin/bash', '-lc', cmd]
+        elif shutil.which('konsole'):
+            term = 'konsole'
+            args = ['-e', '/bin/bash', '-lc', cmd]
+        elif shutil.which('xterm'):
+            term = 'xterm'
+            args = ['-e', '/bin/bash', '-lc', cmd]
+        if term:
+            QtCore.QProcess.startDetached(term, args)
+            return True
+        return QtCore.QProcess.startDetached('/bin/bash', ['-lc', cmd])
+
+    def _run_detached(self, cmd):
+        return QtCore.QProcess.startDetached('/bin/sh', ['-c', cmd])
+
+    def _inventory_ids(self):
+        inv = self.inventory.get('items', [])
+        ids = set()
+        for x in inv:
+            try:
+                ids.add(str(x.get('id', '')).strip())
+            except Exception:
+                continue
+        return ids
+
+    def _item_matches(self, item):
+        cat = str(item.get('category', 'Apps'))
+        allowed = self.FILTER_MAP.get(self.category)
+        if allowed and cat not in allowed:
+            return False
+        q = self.search_text.strip().lower()
+        if not q:
+            return True
+        blob = ' '.join([
+            str(item.get('name', '')),
+            str(item.get('desc', '')),
+            str(item.get('id', '')),
+            cat,
+        ]).lower()
+        return q in blob
+
+    def _update_cat_styles(self):
+        for cat, btn in self.cat_buttons.items():
+            if cat == self.category:
+                btn.setStyleSheet(
+                    'color:#1f1f1f; border-bottom:4px solid #75b93b;'
+                    'font-size:36px; font-weight:800;'
+                )
+            else:
+                btn.setStyleSheet('')
+
+    def set_category(self, cat):
+        self.category = str(cat or 'All')
+        if self.category not in self.FILTER_MAP:
+            self.category = 'All'
+        self._update_cat_styles()
+        self._refresh_tiles()
+
+    def set_search(self, text):
+        self.search_text = str(text or '')
+        self._refresh_tiles()
+
+    def _tile_columns(self):
+        viewport_w = max(1, self.scroll.viewport().width())
+        return max(1, min(6, viewport_w // 260))
+
+    def _clear_tile_grid(self):
+        while self.tile_grid.count():
+            child = self.tile_grid.takeAt(0)
+            w = child.widget()
+            if w is not None:
+                w.deleteLater()
+        self.tile_widgets = []
+
+    def _rebuild_tile_grid(self):
+        self._clear_tile_grid()
+        if not self.filtered_rows:
+            empty = QtWidgets.QLabel('No items available for this filter.')
+            empty.setStyleSheet('color:#5d6d7d; font-size:18px; font-weight:700; padding:18px;')
+            self.tile_grid.addWidget(empty, 0, 0)
+            self.selected_item_id = ''
+            self._update_selected_panel()
+            return
+
+        inv_ids = self._inventory_ids()
+        cols = self._tile_columns()
+        for i, item in enumerate(self.filtered_rows):
+            iid = str(item.get('id', ''))
+            tile = StoreTile(item, iid in inv_ids)
+            tile.clicked.connect(self._on_tile_clicked)
+            self.tile_widgets.append(tile)
+            r = i // cols
+            c = i % cols
+            self.tile_grid.addWidget(tile, r, c)
+        self.tile_grid.setColumnStretch(cols, 1)
+
+        visible_ids = {str(x.get('id', '')) for x in self.filtered_rows}
+        if self.selected_item_id not in visible_ids:
+            self.selected_item_id = str(self.filtered_rows[0].get('id', ''))
+        self._apply_selection()
+
+    def _on_tile_clicked(self, item):
+        self.selected_item_id = str((item or {}).get('id', '')).strip()
+        self._apply_selection()
+
+    def _selected_item(self):
+        sid = str(self.selected_item_id or '').strip()
+        if not sid and self.filtered_rows:
+            sid = str(self.filtered_rows[0].get('id', '')).strip()
+            self.selected_item_id = sid
+        for item in self.filtered_rows:
+            if str(item.get('id', '')).strip() == sid:
+                return item
+        return None
+
+    def _apply_selection(self):
+        sid = str(self.selected_item_id or '').strip()
+        for tile in self.tile_widgets:
+            tid = str(tile.item.get('id', '')).strip()
+            tile.set_selected(bool(sid and tid == sid))
+        self._update_selected_panel()
+
+    def _update_selected_panel(self):
+        item = self._selected_item()
+        if item is None:
+            self.sel_name.setText('Select an item')
+            self.sel_meta.setText('Category | Price | State')
+            self.sel_desc.setText('Choose a tile to view details.')
+            self.buy_btn.setEnabled(False)
+            self.install_btn.setEnabled(False)
+            self.launch_btn.setEnabled(False)
+            return
+        iid = str(item.get('id', ''))
+        name = str(item.get('name', iid))
+        cat = str(item.get('category', 'Apps'))
+        desc = str(item.get('desc', 'No description available.'))
+        price = float(item.get('price', 0))
+        price_txt = 'FREE' if price <= 0 else f'EUR {price:.2f}'
+        owned = iid in self._inventory_ids()
+        state = 'OWNED' if owned else 'NOT OWNED'
+
+        self.sel_name.setText(name)
+        self.sel_meta.setText(f'{cat} | {price_txt} | {state}')
+        self.sel_desc.setText(desc)
+        self.buy_btn.setEnabled(not owned)
+        self.install_btn.setEnabled(bool(str(item.get('install', '')).strip()))
+        can_launch = bool(str(item.get('launch', '')).strip()) and (owned or price <= 0)
+        self.launch_btn.setEnabled(can_launch)
 
     def reload(self, msg=''):
-        self.store_data = load_store()
+        self.store_data = ensure_catalog_minimum(520)
         self.inventory = load_inventory()
-        items = self.store_data.get('items', [])
-        self.table.setRowCount(len(items))
-        for i, item in enumerate(items):
-            name = str(item.get('name', item.get('id', 'Item')))
-            price = float(item.get('price', 0))
-            desc = str(item.get('desc', ''))
-            self.table.setItem(i, 0, QtWidgets.QTableWidgetItem(name))
-            self.table.setItem(i, 1, QtWidgets.QTableWidgetItem(f'EUR {price:.2f}'))
-            self.table.setItem(i, 2, QtWidgets.QTableWidgetItem(desc))
+        self._refresh_tiles()
+        active_n = len(self.store_data.get('items', []))
+        total_n = int(self.store_data.get('rotation_total_count', active_n))
+        rot_day = str(self.store_data.get('rotation_day', '-'))
         self.balance_lbl.setText(f'Balance: EUR {get_balance():.2f}')
-        self.info_lbl.setText(msg)
+        self.rotation_lbl.setText(f'Catalog today {active_n}/{total_n} | Rotation {rot_day}')
+        self.info_lbl.setText(msg or f'Showing {len(self.filtered_rows)} items in {self.category}.')
+
+    def _refresh_tiles(self):
+        items = self.store_data.get('items', [])
+        self.filtered_rows = [it for it in items if self._item_matches(it)]
+        self._rebuild_tile_grid()
+        active_n = len(items)
+        total_n = int(self.store_data.get('rotation_total_count', active_n))
+        rot_day = str(self.store_data.get('rotation_day', '-'))
+        self.rotation_lbl.setText(f'Catalog today {active_n}/{total_n} | Rotation {rot_day}')
+        self.balance_lbl.setText(f'Balance: EUR {get_balance():.2f}')
+        self.info_lbl.setText(f'Showing {len(self.filtered_rows)} items in {self.category}.')
 
     def buy_selected(self):
-        row = self.table.currentRow()
-        items = self.store_data.get('items', [])
-        if row < 0 or row >= len(items):
-            self.reload('Selecciona un item para comprar.')
+        item = self._selected_item()
+        if item is None:
+            self.reload('Select an item to buy first.')
             return
-        item = items[row]
         name = str(item.get('name', item.get('id', 'Item')))
         price = float(item.get('price', 0))
+        iid = str(item.get('id', name))
+        inv_ids = self._inventory_ids()
+        if iid in inv_ids:
+            self.reload(f'You already own: {name}')
+            return
         bal = get_balance()
         if bal < price:
-            self.reload('Saldo insuficiente.')
+            self.reload('Not enough balance.')
             return
-        bal = change_balance(-price)
+        if price > 0:
+            bal = change_balance(-price)
+
         inv = self.inventory.get('items', [])
-        inv.append({'id': item.get('id', name), 'name': name, 'price': price})
+        inv.append({
+            'id': iid,
+            'name': name,
+            'price': price,
+            'category': str(item.get('category', 'Apps')),
+            'launch': str(item.get('launch', '')),
+            'install': str(item.get('install', '')),
+        })
         self.inventory['items'] = inv
         save_inventory(self.inventory)
-        m = complete_mission(mission_id='m3')
-        if m.get('completed'):
-            bal = m.get('balance', bal)
-            self.reload(f'Compra OK: {name} por EUR {price:.2f} | Mission +EUR {float(m.get("reward",0)):.2f} | Saldo EUR {bal:.2f}')
+
+        mission = complete_mission(mission_id='m3')
+        install_cmd = str(item.get('install', '')).strip()
+        extra = ''
+        if install_cmd:
+            q = QtWidgets.QMessageBox.question(
+                self,
+                'Install',
+                f'Install "{name}" now?',
+                QtWidgets.QMessageBox.Yes | QtWidgets.QMessageBox.No,
+                QtWidgets.QMessageBox.Yes
+            )
+            if q == QtWidgets.QMessageBox.Yes:
+                self._run_terminal(install_cmd)
+                extra = ' | installer started'
+        if mission.get('completed'):
+            bal = float(mission.get('balance', bal))
+            reward = float(mission.get('reward', 0))
+            self.reload(f'Purchase OK: {name} (EUR {price:.2f}) | Mission +EUR {reward:.2f} | Balance EUR {bal:.2f}{extra}')
         else:
-            self.reload(f'Compra OK: {name} por EUR {price:.2f} | Nuevo saldo EUR {bal:.2f}')
+            self.reload(f'Purchase OK: {name} (EUR {price:.2f}) | Balance EUR {bal:.2f}{extra}')
+
+    def install_selected(self):
+        item = self._selected_item()
+        if item is None:
+            self.reload('Select an item to install first.')
+            return
+        iid = str(item.get('id', ''))
+        inv_ids = self._inventory_ids()
+        if iid not in inv_ids and float(item.get('price', 0)) > 0:
+            self.reload('Buy this item before running install.')
+            return
+        cmd = str(item.get('install', '')).strip()
+        if not cmd:
+            self.reload('This item does not need installation.')
+            return
+        self._run_terminal(cmd)
+        self.reload(f'Installer started: {item.get("name", "item")}')
+
+    def launch_selected(self):
+        item = self._selected_item()
+        if item is None:
+            self.reload('Select an item to launch first.')
+            return
+        iid = str(item.get('id', ''))
+        inv_ids = self._inventory_ids()
+        if iid not in inv_ids and float(item.get('price', 0)) > 0:
+            self.reload('Buy this item before launching.')
+            return
+        cmd = str(item.get('launch', '')).strip()
+        if not cmd:
+            self.reload('No launcher defined for this item.')
+            return
+        self._run_detached(cmd)
+        self.reload(f'Launched: {item.get("name", "item")}')
 
     def show_inventory(self):
         inv = self.inventory.get('items', [])
         if not inv:
-            QtWidgets.QMessageBox.information(self, 'Inventory', 'No hay items comprados.')
+            QtWidgets.QMessageBox.information(self, 'Inventory', 'No purchased items.')
             return
-        lines = [f"{i+1}. {x.get('name','Item')} (EUR {float(x.get('price',0)):.2f})" for i, x in enumerate(inv)]
+        lines = []
+        for i, x in enumerate(inv[:400], 1):
+            lines.append(
+                f"{i}. {x.get('name', 'Item')} [{x.get('category', 'Apps')}] "
+                f"(EUR {float(x.get('price', 0)):.2f})"
+            )
         QtWidgets.QMessageBox.information(self, 'Inventory', '\n'.join(lines))
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self.reflow_timer.start(90)
 
     def keyPressEvent(self, e):
         if e.key() in (QtCore.Qt.Key_Escape, QtCore.Qt.Key_Back):
             self.close()
+            return
+        if e.key() == QtCore.Qt.Key_F5:
+            self.reload('Marketplace refreshed.')
+            return
+        if e.key() in (QtCore.Qt.Key_Return, QtCore.Qt.Key_Enter):
+            self.launch_selected()
             return
         super().keyPressEvent(e)
 
@@ -4614,6 +6188,335 @@ set -euo pipefail
 exec "$HOME/.xui/bin/xui_python.sh" "$HOME/.xui/games/store.py" "$@"
 BASH
   chmod +x "$BIN_DIR/xui_store.sh"
+
+  cat > "$GAMES_DIR/gem_match.py" <<'PY'
+#!/usr/bin/env python3
+import random
+import sys
+from PyQt5 import QtCore, QtGui, QtWidgets
+
+COLORS = [
+    QtGui.QColor('#e74c3c'),
+    QtGui.QColor('#3498db'),
+    QtGui.QColor('#2ecc71'),
+    QtGui.QColor('#f1c40f'),
+    QtGui.QColor('#9b59b6'),
+    QtGui.QColor('#e67e22'),
+]
+
+
+class GemMatch(QtWidgets.QWidget):
+    def __init__(self):
+        super().__init__()
+        self.setWindowTitle('Gem Match - XUI')
+        self.setFocusPolicy(QtCore.Qt.StrongFocus)
+        self.rows = 8
+        self.cols = 8
+        self.cell = 74
+        self.pad = 20
+        self.score = 0
+        self.selected = None
+        self.board = [[0] * self.cols for _ in range(self.rows)]
+        self._generate_board()
+        self.resize(self.pad * 2 + self.cols * self.cell, self.pad * 2 + self.rows * self.cell + 70)
+
+    def _generate_board(self):
+        for r in range(self.rows):
+            for c in range(self.cols):
+                self.board[r][c] = random.randrange(len(COLORS))
+        while self._find_matches():
+            self._collapse_matches(self._find_matches())
+
+    def _find_matches(self):
+        matches = set()
+        for r in range(self.rows):
+            streak = 1
+            for c in range(1, self.cols + 1):
+                prev = self.board[r][c - 1]
+                cur = self.board[r][c] if c < self.cols else None
+                if cur == prev:
+                    streak += 1
+                else:
+                    if streak >= 3:
+                        for k in range(c - streak, c):
+                            matches.add((r, k))
+                    streak = 1
+        for c in range(self.cols):
+            streak = 1
+            for r in range(1, self.rows + 1):
+                prev = self.board[r - 1][c]
+                cur = self.board[r][c] if r < self.rows else None
+                if cur == prev:
+                    streak += 1
+                else:
+                    if streak >= 3:
+                        for k in range(r - streak, r):
+                            matches.add((k, c))
+                    streak = 1
+        return matches
+
+    def _collapse_matches(self, matches):
+        if not matches:
+            return 0
+        for (r, c) in matches:
+            self.board[r][c] = -1
+        removed = len(matches)
+        for c in range(self.cols):
+            col_vals = [self.board[r][c] for r in range(self.rows) if self.board[r][c] >= 0]
+            missing = self.rows - len(col_vals)
+            new_vals = [random.randrange(len(COLORS)) for _ in range(missing)] + col_vals
+            for r in range(self.rows):
+                self.board[r][c] = new_vals[r]
+        return removed
+
+    def _cell_at(self, pos):
+        x = pos.x() - self.pad
+        y = pos.y() - self.pad
+        if x < 0 or y < 0:
+            return None
+        c = x // self.cell
+        r = y // self.cell
+        if 0 <= r < self.rows and 0 <= c < self.cols:
+            return int(r), int(c)
+        return None
+
+    def _adjacent(self, a, b):
+        return abs(a[0] - b[0]) + abs(a[1] - b[1]) == 1
+
+    def mousePressEvent(self, e):
+        cell = self._cell_at(e.pos())
+        if cell is None:
+            self.selected = None
+            self.update()
+            return
+        if self.selected is None:
+            self.selected = cell
+            self.update()
+            return
+        if cell == self.selected:
+            self.selected = None
+            self.update()
+            return
+        if not self._adjacent(self.selected, cell):
+            self.selected = cell
+            self.update()
+            return
+        (r1, c1), (r2, c2) = self.selected, cell
+        self.board[r1][c1], self.board[r2][c2] = self.board[r2][c2], self.board[r1][c1]
+        matches = self._find_matches()
+        if not matches:
+            self.board[r1][c1], self.board[r2][c2] = self.board[r2][c2], self.board[r1][c1]
+        else:
+            while matches:
+                removed = self._collapse_matches(matches)
+                self.score += removed * 10
+                matches = self._find_matches()
+        self.selected = None
+        self.update()
+
+    def keyPressEvent(self, e):
+        if e.key() in (QtCore.Qt.Key_Escape, QtCore.Qt.Key_Back):
+            self.close()
+            return
+        super().keyPressEvent(e)
+
+    def paintEvent(self, _e):
+        p = QtGui.QPainter(self)
+        p.fillRect(self.rect(), QtGui.QColor('#0f1720'))
+        p.setRenderHint(QtGui.QPainter.Antialiasing, True)
+        p.setPen(QtGui.QColor('#26384a'))
+        for r in range(self.rows):
+            for c in range(self.cols):
+                x = self.pad + c * self.cell
+                y = self.pad + r * self.cell
+                rect = QtCore.QRect(x + 4, y + 4, self.cell - 8, self.cell - 8)
+                idx = self.board[r][c]
+                color = COLORS[idx % len(COLORS)]
+                p.setBrush(color)
+                p.setPen(QtGui.QPen(QtGui.QColor('#0a1118'), 2))
+                p.drawRoundedRect(rect, 12, 12)
+                if self.selected == (r, c):
+                    p.setBrush(QtCore.Qt.NoBrush)
+                    p.setPen(QtGui.QPen(QtGui.QColor('#d5f7d5'), 4))
+                    p.drawRoundedRect(rect.adjusted(-2, -2, 2, 2), 12, 12)
+        p.setPen(QtGui.QColor('#e8f3ff'))
+        p.setFont(QtGui.QFont('Sans Serif', 14, QtGui.QFont.Bold))
+        p.drawText(16, self.height() - 34, f'Score: {self.score}')
+        p.drawText(190, self.height() - 34, 'Click 2 adjacent gems to swap')
+        p.drawText(self.width() - 210, self.height() - 34, 'ESC = exit')
+        p.end()
+
+
+def main():
+    app = QtWidgets.QApplication(sys.argv)
+    w = GemMatch()
+    try:
+        w.showFullScreen()
+    except Exception:
+        w.show()
+    sys.exit(app.exec_())
+
+
+if __name__ == '__main__':
+    main()
+PY
+  chmod +x "$GAMES_DIR/gem_match.py"
+
+  cat > "$BIN_DIR/xui_gem_match.sh" <<'BASH'
+#!/usr/bin/env bash
+set -euo pipefail
+exec "$HOME/.xui/bin/xui_python.sh" "$HOME/.xui/games/gem_match.py" "$@"
+BASH
+  chmod +x "$BIN_DIR/xui_gem_match.sh"
+
+  cat > "$BIN_DIR/xui_install_fnae.sh" <<'BASH'
+#!/usr/bin/env bash
+set -euo pipefail
+XUI_HOME="$HOME/.xui"
+APP_HOME="$XUI_HOME/apps/fnae"
+DATA_FILE="$XUI_HOME/data/fnae_paths.json"
+mkdir -p "$APP_HOME/linux" "$APP_HOME/windows" "$XUI_HOME/data"
+
+find_first_existing(){
+  for p in "$@"; do
+    [ -f "$p" ] && { echo "$p"; return 0; }
+  done
+  return 1
+}
+
+tar_candidates=(
+  "$HOME/Downloads/Five Nights At Epsteins Linux.tar"
+  "$HOME/Desktop/Five Nights At Epsteins Linux.tar"
+  "/mnt/c/Users/Usuario/Downloads/Five Nights At Epsteins Linux.tar"
+  "/mnt/c/Users/$USER/Downloads/Five Nights At Epsteins Linux.tar"
+)
+zip_candidates=(
+  "$HOME/Downloads/Five Nights At Epstein's.zip"
+  "$HOME/Desktop/Five Nights At Epstein's.zip"
+  "/mnt/c/Users/Usuario/Downloads/Five Nights At Epstein's.zip"
+  "/mnt/c/Users/$USER/Downloads/Five Nights At Epstein's.zip"
+)
+
+TAR_SRC="$(find_first_existing "${tar_candidates[@]}" || true)"
+ZIP_SRC="$(find_first_existing "${zip_candidates[@]}" || true)"
+
+if [ -z "$TAR_SRC" ] && [ -z "$ZIP_SRC" ]; then
+  echo "FNAE archives not found."
+  echo "Expected: Five Nights At Epsteins Linux.tar and/or Five Nights At Epstein's.zip"
+  exit 1
+fi
+
+if [ -n "$TAR_SRC" ]; then
+  rm -rf "$APP_HOME/linux"
+  mkdir -p "$APP_HOME/linux"
+  tar -xf "$TAR_SRC" -C "$APP_HOME/linux"
+fi
+
+if [ -n "$ZIP_SRC" ]; then
+  rm -rf "$APP_HOME/windows"
+  mkdir -p "$APP_HOME/windows"
+  if command -v unzip >/dev/null 2>&1; then
+    unzip -oq "$ZIP_SRC" -d "$APP_HOME/windows"
+  elif command -v python3 >/dev/null 2>&1; then
+    python3 - "$ZIP_SRC" "$APP_HOME/windows" <<'PY'
+import sys, zipfile
+src = sys.argv[1]
+dst = sys.argv[2]
+with zipfile.ZipFile(src, 'r') as zf:
+    zf.extractall(dst)
+PY
+  else
+    tar -xf "$ZIP_SRC" -C "$APP_HOME/windows"
+  fi
+fi
+
+LINUX_EXE="$(find "$APP_HOME/linux" -maxdepth 6 -type f -name '*.x86_64' | head -n1 || true)"
+WIN_EXE="$(find "$APP_HOME/windows" -maxdepth 5 -type f -iname 'Five Nights At Epstein*.exe' | head -n1 || true)"
+if [ -z "$WIN_EXE" ]; then
+  WIN_EXE="$(find "$APP_HOME/windows" -maxdepth 5 -type f -iname '*.exe' ! -iname 'UnityCrashHandler*.exe' | head -n1 || true)"
+fi
+if [ -n "$LINUX_EXE" ]; then
+  chmod +x "$LINUX_EXE" || true
+fi
+
+cat > "$DATA_FILE" <<JSON
+{
+  "linux_exe": "$(printf '%s' "$LINUX_EXE")",
+  "windows_exe": "$(printf '%s' "$WIN_EXE")",
+  "installed_from_tar": $( [ -n "$TAR_SRC" ] && echo true || echo false ),
+  "installed_from_zip": $( [ -n "$ZIP_SRC" ] && echo true || echo false )
+}
+JSON
+
+echo "FNAE installed."
+echo "Linux executable: ${LINUX_EXE:-not found}"
+echo "Windows executable: ${WIN_EXE:-not found}"
+BASH
+  chmod +x "$BIN_DIR/xui_install_fnae.sh"
+
+  cat > "$BIN_DIR/xui_run_fnae.sh" <<'BASH'
+#!/usr/bin/env bash
+set -euo pipefail
+XUI_HOME="$HOME/.xui"
+DATA_FILE="$XUI_HOME/data/fnae_paths.json"
+BIN_DIR="$XUI_HOME/bin"
+PID_FILE="$XUI_HOME/data/active_game.pid"
+
+read_json_field(){
+  local field="$1"
+  python3 - "$DATA_FILE" "$field" <<'PY'
+import json, sys
+path = sys.argv[1]
+field = sys.argv[2]
+try:
+    data = json.load(open(path, 'r', encoding='utf-8'))
+except Exception:
+    print('')
+    raise SystemExit(0)
+print(str(data.get(field, '')))
+PY
+}
+
+if [ ! -f "$DATA_FILE" ]; then
+  "$BIN_DIR/xui_install_fnae.sh" || true
+fi
+
+LINUX_EXE=""
+WIN_EXE=""
+if [ -f "$DATA_FILE" ]; then
+  LINUX_EXE="$(read_json_field linux_exe)"
+  WIN_EXE="$(read_json_field windows_exe)"
+fi
+
+launch_and_wait(){
+  "$@" &
+  local pid=$!
+  mkdir -p "$(dirname "$PID_FILE")"
+  printf '%s\n' "$pid" > "$PID_FILE"
+  local rc=0
+  wait "$pid" || rc=$?
+  if [ -f "$PID_FILE" ] && [ "$(cat "$PID_FILE" 2>/dev/null || true)" = "$pid" ]; then
+    rm -f "$PID_FILE"
+  fi
+  return $rc
+}
+
+if [ -n "$LINUX_EXE" ] && [ -f "$LINUX_EXE" ]; then
+  chmod +x "$LINUX_EXE" || true
+  launch_and_wait "$LINUX_EXE" "$@"
+  exit $?
+fi
+
+if [ -n "$WIN_EXE" ] && [ -f "$WIN_EXE" ]; then
+  launch_and_wait "$BIN_DIR/xui_wine_run.sh" "$WIN_EXE" "$@"
+  exit $?
+fi
+
+echo "FNAE executable not found. Run installer:"
+echo "  $BIN_DIR/xui_install_fnae.sh"
+exit 1
+BASH
+  chmod +x "$BIN_DIR/xui_run_fnae.sh"
 
   cat > "$BIN_DIR/xui_balance.sh" <<'BASH'
 #!/usr/bin/env bash
@@ -4702,7 +6605,7 @@ Description=XUI Joy Listener (user)
 
 [Service]
 Type=simple
-ExecStart=%h/.xui/bin/xui_joy_listener.py
+ExecStart=%h/.xui/bin/xui_python.sh %h/.xui/bin/xui_joy_listener.py
 Restart=on-failure
 
 [Install]
@@ -5980,70 +7883,415 @@ htop || top -b -n1 | head -n 20
 BASH
     chmod +x "$BIN_DIR/xui_sysmon.sh"
 
-    # Quick browser launcher
-cat > "$BIN_DIR/xui_browser.sh" <<'BASH'
-#!/usr/bin/env bash
-# xui_browser.sh - launcher with kiosk support and fallback to text browser
-MODE=normal
-URL=${1:-}
-if [ "$1" = "--kiosk" ]; then MODE=kiosk; shift; URL=${1:-}
-fi
-if [ -z "$URL" ]; then URL="about:blank"; fi
-
-# Preferred kiosk path: Qt WebEngine wrapper with ESC close.
-if [ "$MODE" = "kiosk" ] && command -v python3 >/dev/null 2>&1; then
-    if python3 - <<'PY' >/dev/null 2>&1
-from PyQt5 import QtWebEngineWidgets
-PY
-    then
-        python3 - "$URL" <<'PY'
+    # Custom Chromium-based web hub + launcher
+    cat > "$BIN_DIR/xui_webhub.py" <<'PY'
+#!/usr/bin/env python3
+import argparse
+import json
 import sys
-from PyQt5 import QtWidgets, QtCore, QtGui, QtWebEngineWidgets
-url = sys.argv[1] if len(sys.argv) > 1 else 'about:blank'
-app = QtWidgets.QApplication([])
-w = QtWidgets.QMainWindow()
-w.setWindowTitle(url)
-view = QtWebEngineWidgets.QWebEngineView()
-view.load(QtCore.QUrl(url))
-w.setCentralWidget(view)
-QtWidgets.QShortcut(QtGui.QKeySequence(QtCore.Qt.Key_Escape), w, activated=w.close)
-QtWidgets.QShortcut(QtGui.QKeySequence(QtCore.Qt.Key_Back), w, activated=w.close)
-w.showFullScreen()
-sys.exit(app.exec_())
+from pathlib import Path
+from PyQt5 import QtCore, QtGui, QtWidgets
+try:
+    from PyQt5 import QtWebEngineWidgets
+except Exception:
+    QtWebEngineWidgets = None
+
+DATA_HOME = Path.home() / '.xui' / 'data'
+RECENT_FILE = DATA_HOME / 'webhub_recent.json'
+FAV_FILE = DATA_HOME / 'webhub_favorites.json'
+MAX_RECENT = 24
+
+
+def safe_read(path, default):
+    try:
+        return json.loads(Path(path).read_text(encoding='utf-8'))
+    except Exception:
+        return default
+
+
+def safe_write(path, data):
+    p = Path(path)
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding='utf-8')
+
+
+def normalize_url(text):
+    raw = str(text or '').strip()
+    if not raw:
+        return 'https://www.xbox.com'
+    if '://' not in raw and not raw.startswith('about:'):
+        raw = 'https://' + raw
+    return raw
+
+
+class WebHub(QtWidgets.QMainWindow):
+    def __init__(self, url='https://www.xbox.com', kiosk=False):
+        super().__init__()
+        self.kiosk = bool(kiosk)
+        self.pending_url = normalize_url(url)
+        self.setWindowTitle('XUI Web Hub')
+        self.resize(1366, 768)
+        self._build()
+        self._load_hub_lists()
+        self.open_url(self.pending_url)
+
+    def _build(self):
+        self.setStyleSheet('''
+            QMainWindow { background:#0b1017; color:#e6edf5; }
+            QFrame#topbar {
+                background:qlineargradient(x1:0,y1:0,x2:1,y2:0, stop:0 #111820, stop:1 #1b2530);
+                border-bottom:1px solid rgba(146,164,184,0.35);
+            }
+            QLineEdit#addr {
+                background:#0f1a24;
+                border:1px solid rgba(98,214,92,0.55);
+                border-radius:3px;
+                padding:6px 8px;
+                color:#e8f1f8;
+                font-size:16px;
+            }
+            QPushButton#navbtn {
+                background:#182230;
+                border:1px solid rgba(125,148,172,0.42);
+                color:#f2f7fa;
+                border-radius:16px;
+                min-width:34px;
+                min-height:34px;
+                font-size:16px;
+                font-weight:700;
+            }
+            QPushButton#navbtn:hover, QPushButton#navbtn:focus {
+                background:#2f8540;
+                border:1px solid rgba(184,232,178,0.72);
+            }
+            QProgressBar#loadbar {
+                background:#2a3039;
+                border:1px solid rgba(180,190,203,0.22);
+                border-radius:2px;
+                max-height:8px;
+            }
+            QProgressBar#loadbar::chunk { background:#50c443; }
+            QWidget#hub {
+                background:qlineargradient(x1:0,y1:0,x2:0,y2:1, stop:0 #101722, stop:1 #0c1119);
+            }
+            QLabel#hubtitle { color:#edf3f9; font-size:32px; font-weight:800; }
+            QLabel#sec { color:#e6edf4; font-size:23px; font-weight:760; }
+            QListWidget#cards {
+                background:#18202b;
+                border:1px solid rgba(147,162,181,0.24);
+                color:#e9f1f7;
+                font-size:18px;
+            }
+            QListWidget#cards::item { padding:9px 10px; border:1px solid transparent; }
+            QListWidget#cards::item:selected {
+                background:qlineargradient(x1:0,y1:0,x2:1,y2:0, stop:0 #46ba3e, stop:1 #2e8d34);
+                border:1px solid rgba(216,243,212,0.50);
+                color:#f6fff6;
+            }
+            QLabel#hint { color:rgba(226,236,247,0.85); font-size:15px; }
+        ''')
+        root = QtWidgets.QWidget()
+        self.setCentralWidget(root)
+        v = QtWidgets.QVBoxLayout(root)
+        v.setContentsMargins(0, 0, 0, 0)
+        v.setSpacing(0)
+
+        top = QtWidgets.QFrame()
+        top.setObjectName('topbar')
+        t = QtWidgets.QVBoxLayout(top)
+        t.setContentsMargins(10, 8, 10, 8)
+        t.setSpacing(5)
+        row = QtWidgets.QHBoxLayout()
+        row.setSpacing(7)
+        self.btn_back = QtWidgets.QPushButton('<')
+        self.btn_fwd = QtWidgets.QPushButton('>')
+        self.btn_refresh = QtWidgets.QPushButton('R')
+        self.btn_hub = QtWidgets.QPushButton('H')
+        self.btn_close = QtWidgets.QPushButton('X')
+        for b in (self.btn_back, self.btn_fwd, self.btn_refresh, self.btn_hub, self.btn_close):
+            b.setObjectName('navbtn')
+            row.addWidget(b, 0)
+        self.addr = QtWidgets.QLineEdit()
+        self.addr.setObjectName('addr')
+        self.addr.setPlaceholderText('https://...')
+        row.addWidget(self.addr, 1)
+        t.addLayout(row)
+        self.bar = QtWidgets.QProgressBar()
+        self.bar.setObjectName('loadbar')
+        self.bar.setRange(0, 100)
+        self.bar.setValue(0)
+        self.bar.setTextVisible(False)
+        t.addWidget(self.bar)
+        v.addWidget(top, 0)
+
+        self.stack = QtWidgets.QStackedWidget()
+        if QtWebEngineWidgets is None:
+            fallback = QtWidgets.QTextEdit()
+            fallback.setReadOnly(True)
+            fallback.setPlainText('QtWebEngine is not installed. Install python3-pyqt5.qtwebengine.')
+            self.web = None
+            self.stack.addWidget(fallback)
+        else:
+            self.web = QtWebEngineWidgets.QWebEngineView()
+            self.stack.addWidget(self.web)
+        self.hub = self._build_hub_widget()
+        self.stack.addWidget(self.hub)
+        v.addWidget(self.stack, 1)
+
+        self.btn_back.clicked.connect(self._go_back)
+        self.btn_fwd.clicked.connect(self._go_forward)
+        self.btn_refresh.clicked.connect(self._reload)
+        self.btn_hub.clicked.connect(self._show_hub)
+        self.btn_close.clicked.connect(self.close)
+        self.addr.returnPressed.connect(self._open_from_bar)
+
+        if self.web is not None:
+            self.web.loadProgress.connect(self.bar.setValue)
+            self.web.titleChanged.connect(self.setWindowTitle)
+            self.web.urlChanged.connect(self._on_url_changed)
+            self.web.loadFinished.connect(self._on_loaded)
+
+        QtWidgets.QShortcut(QtGui.QKeySequence(QtCore.Qt.Key_Escape), self, activated=self.close)
+        QtWidgets.QShortcut(QtGui.QKeySequence(QtCore.Qt.Key_Back), self, activated=self.close)
+        QtWidgets.QShortcut(QtGui.QKeySequence('Alt+Left'), self, activated=self._go_back)
+        QtWidgets.QShortcut(QtGui.QKeySequence('Alt+Right'), self, activated=self._go_forward)
+        QtWidgets.QShortcut(QtGui.QKeySequence('Ctrl+L'), self, activated=lambda: self.addr.setFocus())
+        QtWidgets.QShortcut(QtGui.QKeySequence(QtCore.Qt.Key_F1), self, activated=self._show_hub)
+
+    def _build_hub_widget(self):
+        hub = QtWidgets.QWidget()
+        hub.setObjectName('hub')
+        v = QtWidgets.QVBoxLayout(hub)
+        v.setContentsMargins(16, 14, 16, 12)
+        v.setSpacing(8)
+        ttl = QtWidgets.QLabel('Web Hub')
+        ttl.setObjectName('hubtitle')
+        v.addWidget(ttl)
+        grid = QtWidgets.QGridLayout()
+        grid.setHorizontalSpacing(10)
+        grid.setVerticalSpacing(8)
+        self.fav_list = QtWidgets.QListWidget()
+        self.recent_list = QtWidgets.QListWidget()
+        self.featured_list = QtWidgets.QListWidget()
+        for lw in (self.fav_list, self.recent_list, self.featured_list):
+            lw.setObjectName('cards')
+            lw.itemActivated.connect(self._open_card)
+            lw.itemDoubleClicked.connect(self._open_card)
+            lw.setMinimumHeight(210)
+        grid.addWidget(self._section('Favorites', self.fav_list), 0, 0)
+        grid.addWidget(self._section('Recent', self.recent_list), 0, 1)
+        grid.addWidget(self._section('Featured', self.featured_list), 0, 2)
+        v.addLayout(grid, 1)
+        hint = QtWidgets.QLabel('ENTER = open | F1 = toggle hub | ESC = close browser')
+        hint.setObjectName('hint')
+        v.addWidget(hint)
+        return hub
+
+    def _section(self, title, body):
+        w = QtWidgets.QWidget()
+        l = QtWidgets.QVBoxLayout(w)
+        l.setContentsMargins(0, 0, 0, 0)
+        l.setSpacing(4)
+        t = QtWidgets.QLabel(title)
+        t.setObjectName('sec')
+        l.addWidget(t)
+        l.addWidget(body, 1)
+        return w
+
+    def _load_hub_lists(self):
+        defaults = [
+            'https://www.xbox.com',
+            'https://www.youtube.com',
+            'https://news.ycombinator.com',
+            'https://www.github.com',
+            'https://www.reddit.com/r/linux_gaming',
+        ]
+        favs = safe_read(FAV_FILE, defaults)
+        if not isinstance(favs, list) or not favs:
+            favs = defaults
+        safe_write(FAV_FILE, favs[:20])
+        self.fav_list.clear()
+        for u in favs[:20]:
+            self.fav_list.addItem(str(u))
+        rec = safe_read(RECENT_FILE, [])
+        self.recent_list.clear()
+        for u in rec[:20]:
+            self.recent_list.addItem(str(u))
+        self.featured_list.clear()
+        featured = [
+            'https://www.xbox.com/en-US/games',
+            'https://store.steampowered.com',
+            'https://www.gog.com',
+            'https://www.retroarch.com',
+            'https://www.duckduckgo.com',
+        ]
+        for u in featured:
+            self.featured_list.addItem(u)
+
+    def _remember_recent(self, url):
+        u = str(url or '').strip()
+        if not u or u.startswith('about:'):
+            return
+        rec = safe_read(RECENT_FILE, [])
+        if not isinstance(rec, list):
+            rec = []
+        rec = [x for x in rec if str(x) != u]
+        rec.insert(0, u)
+        safe_write(RECENT_FILE, rec[:MAX_RECENT])
+        self._load_hub_lists()
+
+    def _open_card(self, item):
+        if item is None:
+            return
+        self.open_url(item.text())
+
+    def _show_hub(self):
+        if self.stack.currentWidget() is self.hub:
+            if self.web is not None:
+                self.stack.setCurrentWidget(self.web)
+            return
+        self._load_hub_lists()
+        self.stack.setCurrentWidget(self.hub)
+
+    def _open_from_bar(self):
+        self.open_url(self.addr.text())
+
+    def open_url(self, raw):
+        url = normalize_url(raw)
+        self.addr.setText(url)
+        if self.web is None:
+            return
+        self.stack.setCurrentWidget(self.web)
+        self.web.load(QtCore.QUrl(url))
+
+    def _on_url_changed(self, qurl):
+        s = qurl.toString()
+        self.addr.setText(s)
+
+    def _on_loaded(self, ok):
+        if ok and self.web is not None:
+            self._remember_recent(self.web.url().toString())
+
+    def _go_back(self):
+        if self.web is not None:
+            self.web.back()
+
+    def _go_forward(self):
+        if self.web is not None:
+            self.web.forward()
+
+    def _reload(self):
+        if self.web is not None:
+            self.web.reload()
+
+    def showEvent(self, e):
+        super().showEvent(e)
+        if self.kiosk:
+            try:
+                self.showFullScreen()
+            except Exception:
+                pass
+
+
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--mode', choices=['hub', 'kiosk', 'normal'], default='hub')
+    parser.add_argument('url', nargs='?', default='https://www.xbox.com')
+    args = parser.parse_args()
+    app = QtWidgets.QApplication(sys.argv)
+    w = WebHub(url=args.url, kiosk=(args.mode == 'kiosk'))
+    if args.mode == 'kiosk':
+        w.showFullScreen()
+    else:
+        w.show()
+    sys.exit(app.exec_())
+
+
+if __name__ == '__main__':
+    main()
 PY
-        exit $?
-    fi
+    chmod +x "$BIN_DIR/xui_webhub.py"
+
+    cat > "$BIN_DIR/xui_browser.sh" <<'BASH'
+#!/usr/bin/env bash
+set -euo pipefail
+MODE=hub
+URL="https://www.xbox.com"
+while [ $# -gt 0 ]; do
+  case "${1:-}" in
+    --kiosk) MODE=kiosk; shift ;;
+    --hub) MODE=hub; shift ;;
+    --normal) MODE=normal; shift ;;
+    *) URL="${1:-$URL}"; shift ;;
+  esac
+done
+
+PYRUN="$HOME/.xui/bin/xui_python.sh"
+WEBHUB="$HOME/.xui/bin/xui_webhub.py"
+if [ -x "$PYRUN" ] && [ -f "$WEBHUB" ]; then
+  exec "$PYRUN" "$WEBHUB" --mode "$MODE" "$URL"
+fi
+if command -v python3 >/dev/null 2>&1 && [ -f "$WEBHUB" ]; then
+  exec python3 "$WEBHUB" --mode "$MODE" "$URL"
 fi
 
-if command -v firefox >/dev/null 2>&1; then
-    if [ "$MODE" = "kiosk" ]; then
-        firefox --kiosk "$URL" &
-    else
-        firefox "$URL" &
-    fi
-elif command -v chromium-browser >/dev/null 2>&1; then
-    if [ "$MODE" = "kiosk" ]; then
-        chromium-browser --kiosk "$URL" &
-    else
-        chromium-browser "$URL" &
-    fi
-elif command -v chromium >/dev/null 2>&1; then
-    if [ "$MODE" = "kiosk" ]; then
-        chromium --kiosk "$URL" &
-    else
-        chromium "$URL" &
-    fi
-elif command -v x-www-browser >/dev/null 2>&1; then
-    x-www-browser "$URL" &
-elif command -v w3m >/dev/null 2>&1; then
-    # text-mode browser fallback
-    exec w3m "$URL"
-else
-    echo "No browser found. Install Firefox/Chromium or w3m." >&2
-    exit 1
+if command -v chromium-browser >/dev/null 2>&1; then
+  [ "$MODE" = "kiosk" ] && exec chromium-browser --kiosk "$URL" || exec chromium-browser "$URL"
 fi
+if command -v chromium >/dev/null 2>&1; then
+  [ "$MODE" = "kiosk" ] && exec chromium --kiosk "$URL" || exec chromium "$URL"
+fi
+if command -v firefox >/dev/null 2>&1; then
+  [ "$MODE" = "kiosk" ] && exec firefox --kiosk "$URL" || exec firefox "$URL"
+fi
+if command -v x-www-browser >/dev/null 2>&1; then
+  exec x-www-browser "$URL"
+fi
+echo "No browser runtime found."
+exit 1
 BASH
     chmod +x "$BIN_DIR/xui_browser.sh"
+
+    cat > "$BIN_DIR/xui_close_active_app.sh" <<'BASH'
+#!/usr/bin/env bash
+set -euo pipefail
+PID_FILE="$HOME/.xui/data/active_game.pid"
+if [ -f "$PID_FILE" ]; then
+  pid="$(cat "$PID_FILE" 2>/dev/null || true)"
+  if [ -n "${pid:-}" ] && kill -0 "$pid" 2>/dev/null; then
+    kill "$pid" >/dev/null 2>&1 || true
+    sleep 0.3
+    kill -9 "$pid" >/dev/null 2>&1 || true
+    rm -f "$PID_FILE"
+    echo "Closed tracked game process $pid"
+    exit 0
+  fi
+fi
+if ! command -v xdotool >/dev/null 2>&1; then
+  echo "xdotool not installed."
+  exit 1
+fi
+wid="$(xdotool getactivewindow 2>/dev/null || true)"
+if [ -z "$wid" ]; then
+  echo "No active window."
+  exit 1
+fi
+name="$(xdotool getwindowname "$wid" 2>/dev/null || true)"
+if echo "$name" | grep -Eiq 'xui|dashboard'; then
+  echo "No tracked external game found; refusing to close dashboard window."
+  exit 1
+fi
+pid="$(xdotool getwindowpid "$wid" 2>/dev/null || true)"
+xdotool windowactivate "$wid" key --clearmodifiers Alt+F4 >/dev/null 2>&1 || true
+sleep 0.3
+if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
+  kill "$pid" >/dev/null 2>&1 || true
+  sleep 0.2
+  kill -9 "$pid" >/dev/null 2>&1 || true
+fi
+echo "Close requested for window $wid"
+BASH
+    chmod +x "$BIN_DIR/xui_close_active_app.sh"
 
     # Quick notes
     cat > "$BIN_DIR/xui_note.sh" <<'BASH'
@@ -6067,7 +8315,7 @@ import time
 import urllib.request
 import uuid
 from pathlib import Path
-from PyQt5 import QtCore, QtWidgets
+from PyQt5 import QtCore, QtGui, QtWidgets
 
 XUI_HOME = Path.home() / '.xui'
 DATA_HOME = XUI_HOME / 'data'
