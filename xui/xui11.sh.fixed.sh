@@ -6179,6 +6179,8 @@ if __name__ == '__main__':
     main()
 PY
   chmod +x "$GAMES_DIR/store.py"
+  cp -f "$GAMES_DIR/store.py" "$BIN_DIR/xui_store_modern.py" || true
+  chmod +x "$BIN_DIR/xui_store_modern.py" || true
 
   cat > "$BIN_DIR/xui_missions.sh" <<'BASH'
 #!/usr/bin/env bash
@@ -6190,7 +6192,35 @@ BASH
   cat > "$BIN_DIR/xui_store.sh" <<'BASH'
 #!/usr/bin/env bash
 set -euo pipefail
-exec "$HOME/.xui/bin/xui_python.sh" "$HOME/.xui/games/store.py" "$@"
+PY="$HOME/.xui/bin/xui_python.sh"
+STORE_MODERN="$HOME/.xui/bin/xui_store_modern.py"
+STORE_LEGACY="$HOME/.xui/games/store.py"
+
+if [ -f "$STORE_MODERN" ]; then
+  exec "$PY" "$STORE_MODERN" "$@"
+fi
+
+# If legacy file is already modernized, use it.
+if [ -f "$STORE_LEGACY" ] && grep -q 'class StoreTile' "$STORE_LEGACY" 2>/dev/null; then
+  exec "$PY" "$STORE_LEGACY" "$@"
+fi
+
+# Try self-repair once from known script locations.
+for c in \
+  "$PWD/xui11.sh.fixed.sh" \
+  "$HOME/Downloads/xui/xui/xui11.sh.fixed.sh" \
+  "/mnt/c/Users/Usuario/Downloads/xui/xui/xui11.sh.fixed.sh"
+do
+  if [ -f "$c" ]; then
+    bash "$c" --refresh-store-ui >/dev/null 2>&1 || true
+    if [ -f "$STORE_MODERN" ]; then
+      exec "$PY" "$STORE_MODERN" "$@"
+    fi
+  fi
+done
+
+echo "Store moderna no instalada. Ejecuta: bash xui11.sh.fixed.sh --refresh-store-ui" >&2
+exit 1
 BASH
   chmod +x "$BIN_DIR/xui_store.sh"
 
