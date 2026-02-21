@@ -142,7 +142,7 @@ BASH
         # Optional tools (can fail without breaking dashboard runtime)
         apt_safe_install \
             ffmpeg mpv jq xdotool curl ca-certificates iproute2 bc \
-            xclip xsel rofi feh maim scrot udisks2 p7zip-full joystick joycond \
+            xclip xsel rofi feh maim scrot udisks2 p7zip-full joystick joycond evtest jstest-gtk xboxdrv \
             retroarch lutris || warn "Some apt packages failed to install"
         # Windows compatibility (best effort): Wine + Winetricks + ARM helpers
         if [ "$arch_now" = "x86_64" ] || [ "$arch_now" = "amd64" ]; then
@@ -243,6 +243,7 @@ parse_args(){
     XUI_SKIP_APT_WAIT=0
     XUI_APT_WAIT_SECONDS="${XUI_APT_WAIT_SECONDS:-180}"
     XUI_ONLY_REFRESH_STORE=0
+    XUI_ONLY_REFRESH_CONTROLLERS=0
     while [ "$#" -gt 0 ]; do
         case "$1" in
             --yes-install|-y)
@@ -276,15 +277,19 @@ parse_args(){
                 XUI_ONLY_REFRESH_STORE=1
                 shift
                 ;;
+            --refresh-controllers|--fix-controllers)
+                XUI_ONLY_REFRESH_CONTROLLERS=1
+                shift
+                ;;
             --help|-h)
-                echo "Usage: $0 [--yes-install|-y] [--no-auto-install] [--use-external-dashboard] [--skip-apt-wait] [--apt-wait-seconds N] [--refresh-store-ui]"; exit 0 ;;
+                echo "Usage: $0 [--yes-install|-y] [--no-auto-install] [--use-external-dashboard] [--skip-apt-wait] [--apt-wait-seconds N] [--refresh-store-ui] [--refresh-controllers]"; exit 0 ;;
             *)
                 # pass-through unknown args
                 shift
                 ;;
         esac
     done
-    export AUTO_INSTALL_TOOLS XUI_INSTALL_SYSTEM XUI_USE_EXTERNAL_DASHBOARD XUI_SKIP_APT_WAIT XUI_APT_WAIT_SECONDS XUI_ONLY_REFRESH_STORE
+    export AUTO_INSTALL_TOOLS XUI_INSTALL_SYSTEM XUI_USE_EXTERNAL_DASHBOARD XUI_SKIP_APT_WAIT XUI_APT_WAIT_SECONDS XUI_ONLY_REFRESH_STORE XUI_ONLY_REFRESH_CONTROLLERS
 }
 
 ensure_dirs(){
@@ -1024,6 +1029,16 @@ RECENT_FILE = DATA_HOME / 'recent.json'
 FRIENDS_FILE = DATA_HOME / 'friends.json'
 PROFILE_FILE = DATA_HOME / 'profile.json'
 PEERS_FILE = DATA_HOME / 'social_peers.json'
+
+sys.path.insert(0, str(XUI_HOME / 'bin'))
+try:
+    from xui_game_lib import unlock_for_event, ensure_achievements
+except Exception:
+    def unlock_for_event(*_args, **_kwargs):
+        return []
+
+    def ensure_achievements(*_args, **_kwargs):
+        return {'items': [], 'unlocked': []}
 
 
 def play_media(path, video=False, blocking=False):
@@ -2434,6 +2449,187 @@ class DashboardPage(QtWidgets.QWidget):
             self.hero.apply_scale(s, compact)
 
 
+class AchievementToast(QtWidgets.QFrame):
+    finished = QtCore.pyqtSignal()
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setObjectName('achievement_toast')
+        self.setAttribute(QtCore.Qt.WA_TransparentForMouseEvents, True)
+        self.setFixedSize(430, 84)
+        self.setFocusPolicy(QtCore.Qt.NoFocus)
+        self._compact = False
+        self._scale = 1.0
+        self._anim = None
+        self._opacity = QtWidgets.QGraphicsOpacityEffect(self)
+        self._opacity.setOpacity(0.0)
+        self.setGraphicsEffect(self._opacity)
+        self._build()
+        self.hide()
+
+    def _build(self):
+        root = QtWidgets.QHBoxLayout(self)
+        root.setContentsMargins(12, 10, 16, 10)
+        root.setSpacing(10)
+
+        icon_wrap = QtWidgets.QFrame()
+        icon_wrap.setObjectName('ach_icon_wrap')
+        icon_wrap.setFixedSize(56, 56)
+        icon_layout = QtWidgets.QVBoxLayout(icon_wrap)
+        icon_layout.setContentsMargins(0, 0, 0, 0)
+
+        self.icon_lbl = QtWidgets.QLabel()
+        self.icon_lbl.setObjectName('ach_icon')
+        self.icon_lbl.setAlignment(QtCore.Qt.AlignCenter)
+        self.icon_lbl.setFixedSize(40, 40)
+        px = self.style().standardIcon(QtWidgets.QStyle.SP_DialogApplyButton).pixmap(22, 22)
+        self.icon_lbl.setPixmap(px)
+        icon_layout.addWidget(self.icon_lbl, 0, QtCore.Qt.AlignCenter)
+
+        text_col = QtWidgets.QVBoxLayout()
+        text_col.setContentsMargins(0, 0, 0, 0)
+        text_col.setSpacing(2)
+        self.title_lbl = QtWidgets.QLabel('Achievement unlocked')
+        self.title_lbl.setObjectName('ach_title')
+        self.name_lbl = QtWidgets.QLabel('Ready')
+        self.name_lbl.setObjectName('ach_name')
+        text_col.addWidget(self.title_lbl)
+        text_col.addWidget(self.name_lbl)
+
+        self.score_lbl = QtWidgets.QLabel('0G')
+        self.score_lbl.setObjectName('ach_score')
+        self.score_lbl.setAlignment(QtCore.Qt.AlignCenter)
+        self.score_lbl.setFixedWidth(64)
+
+        root.addWidget(icon_wrap, 0, QtCore.Qt.AlignVCenter)
+        root.addLayout(text_col, 1)
+        root.addWidget(self.score_lbl, 0, QtCore.Qt.AlignVCenter)
+
+        self.setStyleSheet('''
+            QFrame#achievement_toast {
+                background:qlineargradient(x1:0,y1:0,x2:1,y2:0, stop:0 #2d3138, stop:1 #5a5f66);
+                border:2px solid rgba(255,255,255,0.28);
+                border-radius:40px;
+            }
+            QFrame#ach_icon_wrap {
+                background:qradialgradient(cx:0.35, cy:0.35, radius:0.9, fx:0.35, fy:0.35, stop:0 #3a4047, stop:1 #171d25);
+                border:2px solid #79bd3b;
+                border-radius:28px;
+            }
+            QLabel#ach_icon {
+                color:#ecf4ea;
+                border:none;
+            }
+            QLabel#ach_title {
+                color:#f2f5f7;
+                font-size:18px;
+                font-weight:800;
+            }
+            QLabel#ach_name {
+                color:rgba(239,246,249,0.9);
+                font-size:15px;
+                font-weight:700;
+            }
+            QLabel#ach_score {
+                color:#9bdb64;
+                font-size:18px;
+                font-weight:900;
+                border:none;
+            }
+        ''')
+
+    def apply_scale(self, scale=1.0, compact=False):
+        self._scale = max(0.62, float(scale))
+        self._compact = bool(compact)
+        cf = 0.9 if self._compact else 1.0
+        w = max(320, int(430 * self._scale * cf))
+        h = max(70, int(84 * self._scale * cf))
+        self.setFixedSize(w, h)
+        self.score_lbl.setFixedWidth(max(52, int(64 * self._scale)))
+
+    def _target_pos(self):
+        parent = self.parentWidget()
+        if parent is None:
+            return QtCore.QPoint(20, 20)
+        margin_x = max(12, int(26 * self._scale))
+        margin_y = max(10, int(24 * self._scale))
+        x = margin_x
+        y = max(margin_y, parent.height() - self.height() - margin_y)
+        return QtCore.QPoint(x, y)
+
+    def reposition(self):
+        if self.isVisible():
+            self.move(self._target_pos())
+
+    def show_achievement(self, name, score=0):
+        title = str(name or 'Achievement')
+        self.title_lbl.setText('Achievement unlocked')
+        self.name_lbl.setText(title)
+        try:
+            score_int = int(score)
+        except Exception:
+            score_int = 0
+        self.score_lbl.setText(f'{max(0, score_int)}G')
+
+        if self._anim is not None:
+            self._anim.stop()
+            self._anim = None
+
+        target = self._target_pos()
+        start = QtCore.QPoint(-self.width() - 30, target.y())
+        end = QtCore.QPoint(-self.width() + 80, target.y())
+        self.move(start)
+        self._opacity.setOpacity(0.0)
+        self.show()
+        self.raise_()
+
+        seq = QtCore.QSequentialAnimationGroup(self)
+        fade_in = QtCore.QPropertyAnimation(self._opacity, b'opacity')
+        fade_in.setDuration(220)
+        fade_in.setStartValue(0.0)
+        fade_in.setEndValue(1.0)
+        fade_in.setEasingCurve(QtCore.QEasingCurve.OutCubic)
+
+        slide_in = QtCore.QPropertyAnimation(self, b'pos')
+        slide_in.setDuration(280)
+        slide_in.setStartValue(start)
+        slide_in.setEndValue(target)
+        slide_in.setEasingCurve(QtCore.QEasingCurve.OutCubic)
+
+        hold = QtCore.QPauseAnimation(1700)
+
+        fade_out = QtCore.QPropertyAnimation(self._opacity, b'opacity')
+        fade_out.setDuration(280)
+        fade_out.setStartValue(1.0)
+        fade_out.setEndValue(0.0)
+        fade_out.setEasingCurve(QtCore.QEasingCurve.InCubic)
+
+        slide_out = QtCore.QPropertyAnimation(self, b'pos')
+        slide_out.setDuration(320)
+        slide_out.setStartValue(target)
+        slide_out.setEndValue(end)
+        slide_out.setEasingCurve(QtCore.QEasingCurve.InCubic)
+
+        grp_in = QtCore.QParallelAnimationGroup()
+        grp_in.addAnimation(fade_in)
+        grp_in.addAnimation(slide_in)
+        grp_out = QtCore.QParallelAnimationGroup()
+        grp_out.addAnimation(fade_out)
+        grp_out.addAnimation(slide_out)
+
+        seq.addAnimation(grp_in)
+        seq.addAnimation(hold)
+        seq.addAnimation(grp_out)
+
+        def done():
+            self.hide()
+            self.finished.emit()
+
+        seq.finished.connect(done)
+        self._anim = seq
+        self._anim.start(QtCore.QAbstractAnimation.DeleteWhenStopped)
+
+
 class Dashboard(QtWidgets.QMainWindow):
     def __init__(self):
         super().__init__()
@@ -2583,6 +2779,8 @@ class Dashboard(QtWidgets.QMainWindow):
         self._ui_scale = 1.0
         self._compact_ui = False
         self._stage_layout = None
+        self._achievement_queue = []
+        self._achievement_toast = None
         self.sfx = {
             'hover': 'hover.mp3',
             'open': 'open.mp3',
@@ -2600,6 +2798,11 @@ class Dashboard(QtWidgets.QMainWindow):
             'achievement': ['archievements.mp3', 'achievement.mp3', 'select.mp3'],
         }
         self._build()
+        self._setup_achievement_toast()
+        try:
+            ensure_achievements(660)
+        except Exception:
+            pass
         self._apply_responsive_layout()
         self.update_focus()
 
@@ -2703,6 +2906,9 @@ class Dashboard(QtWidgets.QMainWindow):
             self.desc.setStyleSheet(f'font-size:{desc_px}px; color:rgba(235,240,244,0.75);')
         for p in self.pages:
             p.apply_scale(scale, compact)
+        if self._achievement_toast is not None:
+            self._achievement_toast.apply_scale(scale, compact)
+            self._achievement_toast.reposition()
 
     def showEvent(self, e):
         super().showEvent(e)
@@ -2893,6 +3099,80 @@ class Dashboard(QtWidgets.QMainWindow):
             return
         play_media(snd, video=False, blocking=False)
 
+    def _setup_achievement_toast(self):
+        self._achievement_toast = AchievementToast(self)
+        self._achievement_toast.finished.connect(self._on_achievement_toast_finished)
+        self._achievement_toast.apply_scale(self._ui_scale, self._compact_ui)
+
+    def _queue_achievement_unlocks(self, rows):
+        if not rows:
+            return
+        for row in rows:
+            if isinstance(row, dict):
+                self._achievement_queue.append(row)
+        if self._achievement_toast is None:
+            return
+        if not self._achievement_toast.isVisible():
+            self._show_next_achievement_toast()
+
+    def _show_next_achievement_toast(self):
+        if self._achievement_toast is None:
+            return
+        if not self._achievement_queue:
+            return
+        row = self._achievement_queue.pop(0)
+        title = str(row.get('title') or row.get('id') or 'Achievement')
+        score = int(row.get('score', 0) or 0)
+        self._play_sfx('achievement')
+        self._achievement_toast.show_achievement(title, score=score)
+
+    def _on_achievement_toast_finished(self):
+        if not self._achievement_queue:
+            return
+        QtCore.QTimer.singleShot(80, self._show_next_achievement_toast)
+
+    def _unlock_achievement_event(self, kind, value):
+        try:
+            fresh = unlock_for_event(kind, value, limit=4)
+        except Exception:
+            fresh = []
+        if fresh:
+            self._queue_achievement_unlocks(fresh)
+
+    def _launch_event_keys(self, action):
+        mapping = {
+            'casino': ('casino', 'game_casino'),
+            'runner': ('runner', 'game_runner'),
+            'gem_match': ('gem_match', 'minigame_bejeweled_xui'),
+            'bejeweled': ('gem_match', 'minigame_bejeweled_xui'),
+            'fnae': ('fnae', 'game_fnae_fangame'),
+            'five_night_s_at_epstein_s': ('fnae', 'game_fnae_fangame'),
+            'five_nights_at_epstein_s': ('fnae', 'game_fnae_fangame'),
+            'steam': ('steam', 'platform_steam'),
+            'retroarch': ('retroarch', 'platform_retroarch'),
+            'lutris': ('lutris', 'platform_lutris'),
+            'heroic': ('heroic', 'platform_heroic'),
+            'store': ('store', 'xui_store_modern'),
+            'avatar_store': ('store', 'xui_store_modern'),
+            'web_browser': ('web_browser', 'browser_xui_webhub'),
+            'media_player': ('media_player',),
+            'boot_video': ('boot_video',),
+            'playlist': ('playlist',),
+            'visualizer': ('visualizer',),
+            'system_music': ('system_music',),
+            'netflix': ('netflix',),
+            'youtube': ('youtube',),
+            'kodi': ('kodi',),
+            'app_launcher': ('app_launcher',),
+            'missions': ('missions', 'game_missions'),
+            'misiones': ('missions', 'game_missions'),
+            'xui_web_browser': ('web_browser', 'browser_xui_webhub'),
+        }
+        key = ''.join(ch.lower() if ch.isalnum() else '_' for ch in str(action or '')).strip('_')
+        while '__' in key:
+            key = key.replace('__', '_')
+        return mapping.get(key, ())
+
     def _run(self, cmd, args=None):
         self._play_sfx('open')
         try:
@@ -2988,6 +3268,7 @@ class Dashboard(QtWidgets.QMainWindow):
         install_script = spec['install']
         if self._platform_available(launch_script):
             self._run('/bin/sh', ['-c', f'"{launch_script}"'])
+            self._unlock_achievement_event('launch', key)
             return
         ask = self._ask_yes_no(
             label,
@@ -3227,6 +3508,7 @@ class Dashboard(QtWidgets.QMainWindow):
 
     def _launch_media_candidate(self, target):
         xui = str(XUI_HOME)
+        self._unlock_achievement_event('launch', Path(target).stem)
         q_target = shlex.quote(str(target))
         ext = Path(target).suffix.lower().lstrip('.')
         if ext in ('exe', 'msi', 'bat'):
@@ -3376,6 +3658,11 @@ class Dashboard(QtWidgets.QMainWindow):
             'Utilities': 'Open utility menu with system tools.',
             'Network Info': 'Displays network interfaces and routes.',
             'Disk Usage': 'Shows storage usage summary.',
+            'Gamepad Test': 'Run interactive gamepad test tool (evdev/jstest).',
+            'Controller Probe': 'Detect Joy-Con/Xbox controllers and show VID/PID + listener log.',
+            'Controller Mappings': 'Show default dashboard mappings for Joy-Con and Xbox pads.',
+            'Controller L4T Fix': 'Load L4T controller modules/services (hid_nintendo/xpad/joycond).',
+            'Controller Profile': 'Select controller mapping profile (auto/xbox360/switch).',
             'Diagnostics': 'Run diagnostics helper.',
             'Update Check': 'Checks if updates are available.',
             'System Update': 'Runs distro package update flow.',
@@ -3392,6 +3679,9 @@ class Dashboard(QtWidgets.QMainWindow):
     def handle_action(self, action):
         self._save_recent(action)
         self._play_sfx('select')
+        self._unlock_achievement_event('action', action)
+        for launch_key in self._launch_event_keys(action):
+            self._unlock_achievement_event('launch', launch_key)
         xui = str(XUI_HOME)
         if action in ('Hub', 'Social Hub', 'Games Hub', 'Media Hub', 'Music Hub', 'Apps Hub', 'Settings Hub'):
             self._open_current_tab_menu()
@@ -3423,7 +3713,6 @@ class Dashboard(QtWidgets.QMainWindow):
             out = subprocess.getoutput(f'/bin/sh -c "{xui}/bin/xui_close_active_app.sh"')
             self._msg('Close Active App', out or 'No output')
         elif action in ('Missions', 'Misiones'):
-            self._play_sfx('achievement')
             self._run('/bin/sh', ['-c', f'{xui}/bin/xui_missions.sh'])
         elif action == 'LAN':
             self._menu('LAN', ['LAN Chat', 'LAN Status', 'P2P Internet Help'])
@@ -3470,7 +3759,9 @@ class Dashboard(QtWidgets.QMainWindow):
             self._menu('Utilities', [
                 'System Info', 'Web Control', 'Theme Toggle', 'Power Profile', 'Battery Saver',
                 'Update Check', 'System Update', 'Steam', 'Compat X86', 'File Manager',
-                'Gallery', 'Screenshot', 'Calculator', 'Gamepad Test', 'WiFi Toggle', 'Bluetooth Toggle',
+                'Gallery', 'Screenshot', 'Calculator', 'Gamepad Test', 'Controller Probe', 'Controller Mappings',
+                'Controller L4T Fix', 'Controller Profile',
+                'WiFi Toggle', 'Bluetooth Toggle',
                 'Terminal', 'Process Monitor', 'Network Info', 'Disk Usage', 'Battery Info', 'Diagnostics',
                 'HTTP Server', 'RetroArch', 'Torrent', 'Kodi', 'Screen Recorder', 'Clipboard Tool',
                 'Emoji Picker', 'Cron Manager', 'Backup Data', 'Restore Last Backup', 'Plugin Manager',
@@ -3493,7 +3784,8 @@ class Dashboard(QtWidgets.QMainWindow):
         elif action == 'Developer Tools':
             self._menu('Developer Tools', [
                 'Terminal', 'Process Monitor', 'Logs Viewer', 'JSON Browser', 'Hash Tool',
-                'Docker Status', 'VM Status', 'Network Info', 'Disk Usage', 'Diagnostics'
+                'Docker Status', 'VM Status', 'Network Info', 'Disk Usage', 'Diagnostics',
+                'Gamepad Test', 'Controller Probe', 'Controller Mappings', 'Controller L4T Fix', 'Controller Profile'
             ])
         elif action == 'Service Manager':
             self._menu('Service Manager', [
@@ -3658,6 +3950,18 @@ class Dashboard(QtWidgets.QMainWindow):
             self._msg('Dashboard Service', out or 'Restart requested.')
         elif action == 'Gamepad Test':
             self._run_terminal(f'"{xui}/bin/xui_gamepad_test.sh"')
+        elif action == 'Controller Probe':
+            self._run_terminal(f'"{xui}/bin/xui_controller_probe.sh"')
+        elif action == 'Controller Mappings':
+            out = subprocess.getoutput(f'/bin/sh -c "{xui}/bin/xui_controller_mappings.sh"')
+            self._msg('Controller Mappings', out or 'No mappings available.')
+        elif action == 'Controller L4T Fix':
+            self._run_terminal(f'"{xui}/bin/xui_controller_l4t_fix.sh"')
+        elif action == 'Controller Profile':
+            prof, ok = self._input_item('Controller Profile', 'Choose profile:', ['auto', 'xbox360', 'switch'], 0)
+            if ok and prof:
+                out = subprocess.getoutput(f'/bin/sh -c "{xui}/bin/xui_controller_profile.sh {prof}"')
+                self._msg('Controller Profile', out or f'Profile set: {prof}')
         elif action == 'WiFi Toggle':
             out = subprocess.getoutput(f'/bin/sh -c "{xui}/bin/xui_wifi_toggle.sh"')
             self._msg('WiFi', out or 'No output')
@@ -4146,7 +4450,10 @@ DEADZONE = int(os.environ.get('XUI_JOY_DEADZONE', '12000'))
 REPEAT_SEC = float(os.environ.get('XUI_JOY_REPEAT_SEC', '0.22'))
 RESCAN_SEC = float(os.environ.get('XUI_JOY_RESCAN_SEC', '2.5'))
 NINTENDO_AB_SWAP = os.environ.get('XUI_JOY_NINTENDO_AB_SWAP', '1').lower() not in ('0', 'false', 'no')
+JOY_PROFILE = os.environ.get('XUI_JOY_PROFILE', 'auto').strip().lower()
 XDOTOOL = shutil.which('xdotool')
+NINTENDO_VENDOR = 0x057E
+MICROSOFT_VENDOR = 0x045E
 
 
 def _c(name, default):
@@ -4160,7 +4467,8 @@ DPAD_BUTTON_CODES = {
     _c('BTN_DPAD_UP', 544), _c('BTN_DPAD_DOWN', 545), _c('BTN_DPAD_LEFT', 546), _c('BTN_DPAD_RIGHT', 547)
 }
 ANALOG_AXIS_CODES = {
-    _c('ABS_X', 0), _c('ABS_Y', 1), _c('ABS_RX', 3), _c('ABS_RY', 4)
+    _c('ABS_X', 0), _c('ABS_Y', 1), _c('ABS_RX', 3), _c('ABS_RY', 4),
+    _c('ABS_Z', 2), _c('ABS_RZ', 5),
 }
 HAT_CODES = {_c('ABS_HAT0X', 16), _c('ABS_HAT0Y', 17)}
 
@@ -4194,6 +4502,52 @@ TRIGGER_HAPPY_MAP = {
     _c('BTN_TRIGGER_HAPPY4', 707): 'Down',
 }
 
+XBOX_BUTTON_MAP = {
+    _c('BTN_TL', 310): 'Left',
+    _c('BTN_TR', 311): 'Right',
+    _c('BTN_TL2', 312): 'Tab',
+    _c('BTN_TR2', 313): 'Tab',
+    _c('BTN_THUMBL', 317): 'F1',
+    _c('BTN_THUMBR', 318): 'F1',
+}
+
+JOYCON_LEFT_BUTTON_MAP = {
+    _c('BTN_TL', 310): 'Tab',
+    _c('BTN_TL2', 312): 'Escape',
+    _c('BTN_START', 315): 'Return',
+    _c('BTN_SELECT', 314): 'Escape',
+    _c('BTN_MODE', 316): 'F1',
+}
+
+JOYCON_RIGHT_BUTTON_MAP = {
+    _c('BTN_TR', 311): 'Right',
+    _c('BTN_TR2', 313): 'Tab',
+    _c('BTN_START', 315): 'Return',
+    _c('BTN_SELECT', 314): 'Escape',
+    _c('BTN_MODE', 316): 'F1',
+}
+
+XBOX360_PROFILE_MAP = {
+    _c('BTN_SOUTH', 304): 'Return',
+    _c('BTN_EAST', 305): 'Escape',
+    _c('BTN_NORTH', 307): 'space',
+    _c('BTN_WEST', 308): 'Tab',
+    _c('BTN_START', 315): 'Return',
+    _c('BTN_SELECT', 314): 'Escape',
+    _c('BTN_MODE', 316): 'F1',
+    _c('BTN_TL', 310): 'Left',
+    _c('BTN_TR', 311): 'Right',
+    _c('BTN_TL2', 312): 'Tab',
+    _c('BTN_TR2', 313): 'Tab',
+}
+
+SWITCH_PROFILE_MAP = {
+    _c('BTN_EAST', 305): 'Return',
+    _c('BTN_SOUTH', 304): 'Escape',
+    _c('BTN_NORTH', 307): 'space',
+    _c('BTN_WEST', 308): 'Tab',
+}
+
 ABS_MAP = {
     _c('ABS_X', 0): ('Left', 'Right'),
     _c('ABS_Y', 1): ('Up', 'Down'),
@@ -4216,11 +4570,33 @@ def emit_key(key):
     return True
 
 
+def _vendor_product(dev):
+    info = getattr(dev, 'info', None)
+    vendor = int(getattr(info, 'vendor', 0) or 0)
+    product = int(getattr(info, 'product', 0) or 0)
+    return vendor, product
+
+
 def classify_controller(dev):
     name = (dev.name or '').lower()
+    vendor, product = _vendor_product(dev)
+
+    if vendor == NINTENDO_VENDOR:
+        if product == 0x2006 or 'joy-con (l)' in name:
+            return 'joycon_l'
+        if product == 0x2007 or 'joy-con (r)' in name:
+            return 'joycon_r'
+        return 'nintendo'
+    if vendor == MICROSOFT_VENDOR:
+        return 'xbox'
+
+    if any(token in name for token in ('joy-con (l)', 'left joy-con', 'joycon l')):
+        return 'joycon_l'
+    if any(token in name for token in ('joy-con (r)', 'right joy-con', 'joycon r')):
+        return 'joycon_r'
     if any(token in name for token in ('joy-con', 'joycon', 'nintendo switch', 'pro controller', 'switch')):
         return 'nintendo'
-    if any(token in name for token in ('xbox', 'x-input', 'xinput', 'x-pad')):
+    if any(token in name for token in ('xbox', 'x-input', 'xinput', 'x-pad', 'xpadneo')):
         return 'xbox'
     return 'generic'
 
@@ -4238,7 +4614,8 @@ def is_controller_device(dev):
     has_axis = bool(abs_caps & ANALOG_AXIS_CODES)
     named_as_pad = any(token in name for token in (
         'xbox', 'x-input', 'xinput', 'x-pad', 'joy-con', 'joycon',
-        'nintendo switch', 'pro controller', 'gamepad', 'joystick'
+        'nintendo switch', 'pro controller', 'hid-nintendo',
+        'wireless controller', 'gamepad', 'joystick'
     ))
     if named_as_pad and (has_face or has_dpad or has_axis):
         return True
@@ -4276,6 +4653,16 @@ def score_device(dev):
     return score
 
 
+def _profile_overrides(kind):
+    profile = JOY_PROFILE or 'auto'
+    if profile in ('xbox360', 'xbox'):
+        return dict(XBOX360_PROFILE_MAP)
+    if profile in ('switch', 'nintendo'):
+        if kind in ('nintendo', 'joycon_l', 'joycon_r'):
+            return dict(SWITCH_PROFILE_MAP)
+    return {}
+
+
 class ControllerBridge:
     def __init__(self):
         self.devices = {}
@@ -4289,8 +4676,18 @@ class ControllerBridge:
     def _mapping_for_kind(self, kind):
         mapping = dict(COMMON_BUTTON_MAP)
         mapping.update(TRIGGER_HAPPY_MAP)
-        if kind == 'nintendo' and NINTENDO_AB_SWAP:
+        if kind in ('nintendo', 'joycon_l', 'joycon_r') and NINTENDO_AB_SWAP:
             mapping.update(NINTENDO_BUTTON_MAP)
+        if kind == 'xbox':
+            mapping.update(XBOX_BUTTON_MAP)
+        elif kind == 'joycon_l':
+            mapping.update(JOYCON_LEFT_BUTTON_MAP)
+        elif kind == 'joycon_r':
+            mapping.update(JOYCON_RIGHT_BUTTON_MAP)
+        elif kind == 'nintendo':
+            mapping.update(JOYCON_LEFT_BUTTON_MAP)
+            mapping.update(JOYCON_RIGHT_BUTTON_MAP)
+        mapping.update(_profile_overrides(kind))
         return mapping
 
     def _open_device(self, path):
@@ -4355,7 +4752,11 @@ class ControllerBridge:
             self.device_map[path] = self._mapping_for_kind(kind)
             self.device_sig[path] = sig
             signature_paths[sig] = path
-            logging.info('controller connected: %s (%s) kind=%s', path, dev.name, kind)
+            vendor, product = _vendor_product(dev)
+            logging.info(
+                'controller connected: %s (%s) kind=%s vid=0x%04x pid=0x%04x',
+                path, dev.name, kind, vendor, product
+            )
         active = set(self.devices.keys())
         self.axis_state = {k: v for k, v in self.axis_state.items() if k[0] in active}
         self.axis_last_emit = {k: v for k, v in self.axis_last_emit.items() if k[0] in active}
@@ -4460,7 +4861,7 @@ if __name__ == '__main__':
         level=logging.INFO,
         format='%(asctime)s %(levelname)s %(message)s'
     )
-    logging.info('xui joy bridge starting')
+    logging.info('xui joy bridge starting (profile=%s, nintendo_ab_swap=%s)', JOY_PROFILE, NINTENDO_AB_SWAP)
     if not XDOTOOL:
         logging.warning('xdotool not found, controller input cannot be injected')
     bridge = ControllerBridge()
@@ -4474,6 +4875,209 @@ if __name__ == '__main__':
             time.sleep(1.0)
 PY
   chmod +x "$BIN_DIR/xui_joy_listener.py"
+
+  cat > "$BIN_DIR/xui_controller_mappings.sh" <<'BASH'
+#!/usr/bin/env bash
+set -euo pipefail
+ENV_FILE="$HOME/.xui/data/controller_profile.env"
+if [ -f "$ENV_FILE" ]; then
+  # shellcheck disable=SC1090
+  source "$ENV_FILE" || true
+fi
+echo "Profile: ${XUI_JOY_PROFILE:-auto} | Nintendo AB swap: ${XUI_JOY_NINTENDO_AB_SWAP:-1}"
+echo
+cat <<'TXT'
+XUI Default Controller Mapping
+------------------------------
+Global:
+  D-Pad / Stick -> Arrows
+  South(A on Xbox / B on Nintendo) -> Enter
+  East(B on Xbox / A on Nintendo with swap) -> Escape
+  North(X) -> Space
+  West(Y) -> Tab
+  Start -> Enter
+  Select/Back -> Escape
+  Guide/Home/Mode -> F1 (Xbox Guide)
+
+Xbox profile:
+  LB -> Left
+  RB -> Right
+  LT -> Tab
+  RT -> Tab
+  L3/R3 -> F1
+
+Joy-Con Left profile:
+  L -> Tab
+  ZL -> Escape
+  Minus -> Escape
+  Home/Capture/Mode -> F1
+
+Joy-Con Right profile:
+  R -> Right
+  ZR -> Tab
+  Plus -> Enter
+  Home/Mode -> F1
+
+Profiles:
+  xui_controller_profile.sh auto
+  xui_controller_profile.sh xbox360
+  xui_controller_profile.sh switch
+TXT
+BASH
+  chmod +x "$BIN_DIR/xui_controller_mappings.sh"
+
+  cat > "$BIN_DIR/xui_controller_probe.sh" <<'BASH'
+#!/usr/bin/env bash
+set -euo pipefail
+echo "=== XUI Controller Probe ==="
+echo "Date: $(date)"
+echo
+if [ -f "$HOME/.xui/data/controller_profile.env" ]; then
+  echo "[profile env]"
+  cat "$HOME/.xui/data/controller_profile.env"
+  echo
+fi
+if command -v lsusb >/dev/null 2>&1; then
+  echo "[USB devices - filtered]"
+  lsusb | grep -Ei 'nintendo|xbox|microsoft|controller|gamepad|joy-con' || true
+  echo
+fi
+if command -v python3 >/dev/null 2>&1; then
+python3 - <<'PY'
+try:
+    from evdev import InputDevice, list_devices
+except Exception as exc:
+    print(f'evdev unavailable: {exc}')
+    raise SystemExit(0)
+
+print('[evdev controllers]')
+paths = list_devices()
+if not paths:
+    print('No input devices found')
+for p in paths:
+    try:
+        d = InputDevice(p)
+    except Exception:
+        continue
+    name = (d.name or '').lower()
+    if any(t in name for t in ('xbox','joy-con','joycon','nintendo','pro controller','gamepad','joystick','wireless controller')):
+        info = getattr(d, 'info', None)
+        vid = int(getattr(info, 'vendor', 0) or 0)
+        pid = int(getattr(info, 'product', 0) or 0)
+        print(f'{p}: {d.name} vid=0x{vid:04x} pid=0x{pid:04x}')
+PY
+else
+  echo "python3 not found"
+fi
+echo
+echo "[XUI joy listener log tail]"
+tail -n 60 "$HOME/.xui/logs/joy_listener.log" 2>/dev/null || echo "No joy listener log yet."
+BASH
+  chmod +x "$BIN_DIR/xui_controller_probe.sh"
+
+  cat > "$BIN_DIR/xui_controller_l4t_fix.sh" <<'BASH'
+#!/usr/bin/env bash
+set -euo pipefail
+as_root(){
+  if [ "$(id -u)" -eq 0 ]; then "$@"; return $?; fi
+  if command -v sudo >/dev/null 2>&1; then sudo "$@"; return $?; fi
+  echo "sudo required for: $*" >&2
+  return 1
+}
+
+echo "=== XUI L4T Controller Fix ==="
+echo "Target: Kubuntu L4T / Switch (Joy-Con + Xbox pads)"
+echo
+
+for mod in joydev uinput hid_nintendo xpad; do
+  if lsmod | awk '{print $1}' | grep -qx "$mod"; then
+    echo "module $mod: already loaded"
+  else
+    if as_root modprobe "$mod" 2>/dev/null; then
+      echo "module $mod: loaded"
+    else
+      echo "module $mod: not available"
+    fi
+  fi
+done
+
+if command -v systemctl >/dev/null 2>&1; then
+  if systemctl list-unit-files 2>/dev/null | grep -q '^joycond\.service'; then
+    as_root systemctl enable --now joycond.service >/dev/null 2>&1 || true
+    echo "joycond.service: enabled/started (best effort)"
+  fi
+fi
+
+echo
+if [ -x "$HOME/.xui/bin/xui_controller_probe.sh" ]; then
+  "$HOME/.xui/bin/xui_controller_probe.sh" || true
+fi
+echo
+echo "Done. If buttons are inverted on Nintendo layout, toggle:"
+echo "  export XUI_JOY_NINTENDO_AB_SWAP=1  # Nintendo A=Enter, B=Back"
+echo "or"
+echo "  export XUI_JOY_NINTENDO_AB_SWAP=0  # Keep physical labels"
+echo "Profile helper:"
+echo "  ~/.xui/bin/xui_controller_profile.sh xbox360"
+BASH
+  chmod +x "$BIN_DIR/xui_controller_l4t_fix.sh"
+
+  cat > "$BIN_DIR/xui_controller_profile.sh" <<'BASH'
+#!/usr/bin/env bash
+set -euo pipefail
+PROFILE="${1:-show}"
+ENV_FILE="$HOME/.xui/data/controller_profile.env"
+mkdir -p "$(dirname "$ENV_FILE")"
+
+write_env(){
+  local p="$1"
+  local swap="$2"
+  cat > "$ENV_FILE" <<EOF
+XUI_JOY_PROFILE=$p
+XUI_JOY_NINTENDO_AB_SWAP=$swap
+EOF
+}
+
+case "$PROFILE" in
+  show)
+    if [ -f "$ENV_FILE" ]; then
+      cat "$ENV_FILE"
+    else
+      echo "XUI_JOY_PROFILE=auto"
+      echo "XUI_JOY_NINTENDO_AB_SWAP=1"
+    fi
+    exit 0
+    ;;
+  auto|default)
+    write_env auto 1
+    ;;
+  xbox|xbox360)
+    write_env xbox360 1
+    ;;
+  switch|nintendo)
+    write_env switch 0
+    ;;
+  *)
+    echo "Usage: $0 {show|auto|xbox360|switch}"
+    exit 1
+    ;;
+esac
+
+echo "Saved controller profile: $PROFILE"
+if command -v systemctl >/dev/null 2>&1; then
+  systemctl --user daemon-reload >/dev/null 2>&1 || true
+  systemctl --user restart xui-joy.service >/dev/null 2>&1 || true
+  echo "xui-joy.service restarted"
+fi
+BASH
+  chmod +x "$BIN_DIR/xui_controller_profile.sh"
+
+  if [ ! -f "$DATA_DIR/controller_profile.env" ]; then
+    cat > "$DATA_DIR/controller_profile.env" <<'EOF'
+XUI_JOY_PROFILE=auto
+XUI_JOY_NINTENDO_AB_SWAP=1
+EOF
+  fi
 }
 
 # Create casino, runner, missions and store apps with GUI flows.
@@ -4519,6 +5123,7 @@ JSON
   cat > "$BIN_DIR/xui_game_lib.py" <<'PY'
 #!/usr/bin/env python3
 import json
+import time
 from pathlib import Path
 
 DATA_HOME = Path.home() / '.xui' / 'data'
@@ -4526,11 +5131,13 @@ WALLET_FILE = DATA_HOME / 'saldo.json'
 STORE_FILE = DATA_HOME / 'store.json'
 MISSIONS_FILE = DATA_HOME / 'missions.json'
 INVENTORY_FILE = DATA_HOME / 'inventory.json'
+ACHIEVEMENTS_FILE = DATA_HOME / 'achievements.json'
+ACHIEVEMENTS_MIN = 660
 
 
 def _safe_read(path, default):
     try:
-        return json.loads(Path(path).read_text())
+        return json.loads(Path(path).read_text(encoding='utf-8'))
     except Exception:
         return default
 
@@ -4538,7 +5145,7 @@ def _safe_read(path, default):
 def _safe_write(path, data):
     p = Path(path)
     p.parent.mkdir(parents=True, exist_ok=True)
-    p.write_text(json.dumps(data, indent=2))
+    p.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding='utf-8')
 
 
 def ensure_wallet():
@@ -4616,6 +5223,405 @@ def save_inventory(data):
     _safe_write(INVENTORY_FILE, data if isinstance(data, dict) else {'items': []})
 
 
+def _norm_key(text):
+    raw = str(text or '').strip().lower()
+    out = []
+    last_sep = False
+    for ch in raw:
+        if ch.isalnum():
+            out.append(ch)
+            last_sep = False
+        else:
+            if not last_sep:
+                out.append('_')
+            last_sep = True
+    key = ''.join(out).strip('_')
+    while '__' in key:
+        key = key.replace('__', '_')
+    return key or 'unknown'
+
+
+def _achievement(aid, title, desc, score=5, event='generic', value='', threshold=0):
+    return {
+        'id': str(aid),
+        'title': str(title),
+        'desc': str(desc),
+        'score': int(max(1, score)),
+        'event': str(event or 'generic'),
+        'value': str(value or ''),
+        'threshold': int(max(0, threshold)),
+    }
+
+
+def _action_seed():
+    return [
+        'Hub', 'Social Hub', 'Games Hub', 'Media Hub', 'Music Hub', 'Apps Hub', 'Settings Hub',
+        'Open Tray', 'Rescan Media', 'Toggle Tray', 'Open Tray', 'Close Tray',
+        'My Pins', 'Recent', 'Casino', 'Runner', 'Gem Match', 'FNAE', 'Steam', 'RetroArch',
+        'Lutris', 'Heroic', 'Store', 'Avatar Store', 'Web Browser', 'Close Active App', 'Missions',
+        'LAN', 'Messages', 'LAN Chat', 'LAN Status', 'P2P Internet Help', 'Party', 'Gamer Card',
+        'Social Apps', 'Friends', 'Sign In', 'Utilities', 'Games Integrations', 'Developer Tools',
+        'Service Manager', 'Service Status', 'Compat X86', 'Compatibility Status', 'Install Box64',
+        'Install Steam', 'Install RetroArch', 'Install Lutris', 'Install Heroic', 'Platforms Status',
+        'Game Details', 'Media Player', 'Boot Video', 'Netflix', 'YouTube', 'ESPN', 'Startup Sound',
+        'All Audio Files', 'Playlist', 'Visualizer', 'System Music', 'Mute / Unmute',
+        'System Info', 'Web Control', 'Web Start', 'Web Status', 'Web Stop', 'Theme Toggle',
+        'Setup Wizard', 'File Manager', 'Gallery', 'Screenshot', 'Calculator', 'App Launcher',
+        'Scan Media Games', 'Install Wine Runtime', 'Open Notes', 'Terminal', 'Process Monitor',
+        'Network Info', 'Disk Usage', 'Battery Info', 'Diagnostics', 'HTTP Server', 'Torrent',
+        'Kodi', 'Screen Recorder', 'Clipboard Tool', 'Logs Viewer', 'JSON Browser', 'Archive Manager',
+        'Hash Tool', 'Ping Test', 'Docker Status', 'VM Status', 'Emoji Picker', 'Cron Manager',
+        'Backup Data', 'Restore Last Backup', 'Plugin Manager', 'Restart Dashboard Service',
+        'Gamepad Test', 'Controller Probe', 'Controller Mappings', 'Controller L4T Fix',
+        'Controller Profile', 'WiFi Toggle', 'Bluetooth Toggle', 'Power Profile', 'Battery Saver',
+        'Update Check', 'System Update', 'Family', 'Turn Off', 'Exit', 'Canjear codigo', 'Logros',
+    ]
+
+
+def _store_targets():
+    data = load_store()
+    raw_items = data.get('all_items', data.get('items', []))
+    if not isinstance(raw_items, list):
+        raw_items = []
+    out = []
+    seen = set()
+    for raw in raw_items:
+        if not isinstance(raw, dict):
+            continue
+        iid = str(raw.get('id', '')).strip()
+        if not iid:
+            continue
+        key = _norm_key(iid)
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append({
+            'id': iid,
+            'key': key,
+            'name': str(raw.get('name', iid)).strip() or iid,
+            'category': str(raw.get('category', 'Apps')).strip() or 'Apps',
+        })
+    return out
+
+
+def _mission_targets():
+    out = []
+    seen = set()
+    for raw in load_missions():
+        if not isinstance(raw, dict):
+            continue
+        mid = str(raw.get('id', '')).strip() or str(raw.get('title', '')).strip()
+        if not mid:
+            continue
+        key = _norm_key(mid)
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append({
+            'id': mid,
+            'key': key,
+            'title': str(raw.get('title', mid)).strip() or mid,
+        })
+    return out
+
+
+def build_achievement_catalog(min_count=ACHIEVEMENTS_MIN):
+    min_count = int(max(ACHIEVEMENTS_MIN, min_count))
+    out = []
+
+    # Global progression achievements.
+    out.extend([
+        _achievement('boot_001', 'System Warmup', 'Open the XUI dashboard for the first time.', 5, 'action_count', threshold=1),
+        _achievement('boot_010', 'Live Ready', 'Perform ten dashboard actions.', 10, 'action_count', threshold=10),
+        _achievement('launch_001', 'First Launch', 'Launch your first app or game.', 10, 'launch_count', threshold=1),
+        _achievement('launch_050', 'Session Veteran', 'Launch fifty apps/games.', 35, 'launch_count', threshold=50),
+        _achievement('store_001', 'First Purchase', 'Buy one item from the marketplace.', 10, 'purchase_count', threshold=1),
+        _achievement('store_050', 'Collector', 'Own fifty marketplace items.', 45, 'purchase_count', threshold=50),
+        _achievement('mission_001', 'Mission Start', 'Complete one mission.', 10, 'mission_count', threshold=1),
+        _achievement('mission_020', 'Mission Commander', 'Complete twenty missions.', 60, 'mission_count', threshold=20),
+    ])
+
+    # One action achievement per dashboard action.
+    seen_action = set()
+    for idx, action in enumerate(_action_seed(), 1):
+        key = _norm_key(action)
+        if key in seen_action:
+            continue
+        seen_action.add(key)
+        out.append(_achievement(
+            f'action_{key}',
+            f'{action} Used',
+            f'Use action "{action}" from the dashboard.',
+            4 + (idx % 12),
+            'action',
+            key,
+            0
+        ))
+
+    # Per-item achievements (buy + launch) for store catalog.
+    store_targets = _store_targets()
+    for idx, item in enumerate(store_targets, 1):
+        key = item['key']
+        name = item['name']
+        cat = item['category']
+        out.append(_achievement(
+            f'purchase_item_{key}',
+            f'Owned: {name}',
+            f'Buy "{name}" ({cat}) in marketplace.',
+            6 + (idx % 15),
+            'purchase',
+            key,
+            0
+        ))
+        out.append(_achievement(
+            f'launch_item_{key}',
+            f'Play: {name}',
+            f'Launch "{name}" from dashboard/store.',
+            8 + (idx % 18),
+            'launch',
+            key,
+            0
+        ))
+
+    # Mission-specific achievements.
+    for m in _mission_targets():
+        out.append(_achievement(
+            f'mission_{m["key"]}',
+            f'Mission: {m["title"]}',
+            f'Complete mission "{m["title"]}".',
+            12,
+            'mission',
+            m['key'],
+            0
+        ))
+
+    # Counter ladders.
+    for n in (1, 3, 5, 10, 20, 35, 50, 75, 100, 150, 220, 300, 400, 520, 680, 820):
+        out.append(_achievement(
+            f'count_actions_{n:04d}',
+            f'Action Chain {n}',
+            f'Reach {n} dashboard actions.',
+            5 + min(80, n // 8),
+            'action_count',
+            '',
+            n
+        ))
+    for n in (1, 2, 3, 5, 8, 12, 20, 30, 45, 65, 90, 120, 180, 260, 360, 480):
+        out.append(_achievement(
+            f'count_launches_{n:04d}',
+            f'Launcher Tier {n}',
+            f'Launch {n} apps/games.',
+            8 + min(90, n // 6),
+            'launch_count',
+            '',
+            n
+        ))
+    for n in (1, 2, 3, 5, 8, 12, 20, 30, 45, 65, 90, 120, 180, 260):
+        out.append(_achievement(
+            f'count_purchases_{n:04d}',
+            f'Buyer Tier {n}',
+            f'Complete {n} marketplace purchases.',
+            8 + min(90, n // 5),
+            'purchase_count',
+            '',
+            n
+        ))
+    for n in (1, 2, 3, 5, 8, 12, 20, 30, 45, 60):
+        out.append(_achievement(
+            f'count_missions_{n:04d}',
+            f'Mission Tier {n}',
+            f'Complete {n} missions.',
+            10 + min(100, n * 2),
+            'mission_count',
+            '',
+            n
+        ))
+
+    # Ensure >600 achievements even on a minimal install.
+    fill_idx = 1
+    while len(out) < min_count:
+        threshold = 10 + fill_idx
+        out.append(_achievement(
+            f'community_chain_{fill_idx:04d}',
+            f'Community Chain {fill_idx:03d}',
+            'Keep using apps and games across the dashboard ecosystem.',
+            5 + (fill_idx % 16),
+            'action_count',
+            '',
+            threshold
+        ))
+        fill_idx += 1
+
+    # Deduplicate by ID while preserving order.
+    dedup = []
+    seen = set()
+    for item in out:
+        aid = str(item.get('id', '')).strip()
+        if not aid or aid in seen:
+            continue
+        seen.add(aid)
+        dedup.append(item)
+    return dedup
+
+
+def ensure_achievements(min_count=ACHIEVEMENTS_MIN):
+    DATA_HOME.mkdir(parents=True, exist_ok=True)
+    raw = _safe_read(ACHIEVEMENTS_FILE, {})
+    if not isinstance(raw, dict):
+        raw = {}
+    catalog = build_achievement_catalog(min_count=min_count)
+    catalog_ids = {str(x.get('id', '')) for x in catalog}
+
+    unlocked = raw.get('unlocked', [])
+    if not isinstance(unlocked, list):
+        unlocked = []
+    clean_unlocked = []
+    seen_unlock = set()
+    for rec in unlocked:
+        if not isinstance(rec, dict):
+            continue
+        aid = str(rec.get('id', '')).strip()
+        if not aid or aid in seen_unlock or aid not in catalog_ids:
+            continue
+        seen_unlock.add(aid)
+        clean_unlocked.append({
+            'id': aid,
+            'ts': int(rec.get('ts', 0) or 0),
+            'event': str(rec.get('event', '')),
+            'value': str(rec.get('value', '')),
+        })
+
+    stats = raw.get('stats', {})
+    if not isinstance(stats, dict):
+        stats = {}
+    state = {
+        'version': 'xui-660',
+        'updated': int(time.time()),
+        'items': catalog,
+        'unlocked': clean_unlocked,
+        'stats': {
+            'actions': int(stats.get('actions', 0) or 0),
+            'launches': int(stats.get('launches', 0) or 0),
+            'purchases': int(stats.get('purchases', 0) or 0),
+            'missions': int(stats.get('missions', 0) or 0),
+        },
+    }
+    _safe_write(ACHIEVEMENTS_FILE, state)
+    return state
+
+
+def load_achievements():
+    return ensure_achievements()
+
+
+def achievements_progress():
+    data = ensure_achievements()
+    total = len(data.get('items', []))
+    unlocked = len(data.get('unlocked', []))
+    return {
+        'total': total,
+        'unlocked': unlocked,
+        'locked': max(0, total - unlocked),
+    }
+
+
+def unlock_for_event(kind, value='', limit=6):
+    state = ensure_achievements()
+    kind = _norm_key(kind)
+    val = _norm_key(value)
+
+    stats = state.get('stats', {})
+    if kind == 'action':
+        stats['actions'] = int(stats.get('actions', 0)) + 1
+    elif kind == 'launch':
+        stats['launches'] = int(stats.get('launches', 0)) + 1
+    elif kind == 'purchase':
+        stats['purchases'] = int(stats.get('purchases', 0)) + 1
+    elif kind == 'mission':
+        stats['missions'] = int(stats.get('missions', 0)) + 1
+    state['stats'] = stats
+
+    catalog = state.get('items', [])
+    catalog_map = {str(x.get('id', '')): x for x in catalog if isinstance(x, dict)}
+    unlocked = state.get('unlocked', [])
+    unlocked_ids = {str(x.get('id', '')) for x in unlocked if isinstance(x, dict)}
+
+    candidates = []
+    if kind == 'action':
+        candidates.append(f'action_{val}')
+    elif kind == 'launch':
+        candidates.append(f'launch_{val}')
+        candidates.append(f'launch_item_{val}')
+    elif kind == 'purchase':
+        candidates.append(f'purchase_{val}')
+        candidates.append(f'purchase_item_{val}')
+    elif kind == 'mission':
+        candidates.append(f'mission_{val}')
+
+    action_count = int(stats.get('actions', 0))
+    launch_count = int(stats.get('launches', 0))
+    purchase_count = int(stats.get('purchases', 0))
+    mission_count = int(stats.get('missions', 0))
+
+    for item in catalog:
+        if not isinstance(item, dict):
+            continue
+        aid = str(item.get('id', '')).strip()
+        if not aid:
+            continue
+        ev = _norm_key(item.get('event', 'generic'))
+        ev_val = _norm_key(item.get('value', ''))
+        thr = int(item.get('threshold', 0) or 0)
+        if ev == kind and ev_val and ev_val == val:
+            candidates.append(aid)
+            continue
+        if ev == 'action_count' and action_count >= thr > 0:
+            candidates.append(aid)
+            continue
+        if ev == 'launch_count' and launch_count >= thr > 0:
+            candidates.append(aid)
+            continue
+        if ev == 'purchase_count' and purchase_count >= thr > 0:
+            candidates.append(aid)
+            continue
+        if ev == 'mission_count' and mission_count >= thr > 0:
+            candidates.append(aid)
+            continue
+
+    fresh = []
+    seen = set()
+    now = int(time.time())
+    max_unlock = int(max(1, limit))
+    for aid in candidates:
+        aid = str(aid).strip()
+        if not aid or aid in seen:
+            continue
+        seen.add(aid)
+        if aid in unlocked_ids:
+            continue
+        item = catalog_map.get(aid)
+        if not item:
+            continue
+        unlocked.append({'id': aid, 'ts': now, 'event': kind, 'value': val})
+        unlocked_ids.add(aid)
+        fresh.append({
+            'id': aid,
+            'title': str(item.get('title', aid)),
+            'desc': str(item.get('desc', '')),
+            'score': int(item.get('score', 0) or 0),
+            'event': kind,
+            'value': val,
+            'ts': now,
+        })
+        if len(fresh) >= max_unlock:
+            break
+
+    state['unlocked'] = unlocked
+    state['updated'] = int(time.time())
+    _safe_write(ACHIEVEMENTS_FILE, state)
+    return fresh
+
+
 def complete_mission(mission_id=None, title_contains=None):
     missions = load_missions()
     idx = -1
@@ -4627,15 +5633,17 @@ def complete_mission(mission_id=None, title_contains=None):
             idx = i
             break
     if idx < 0:
-        return {'completed': False, 'reward': 0.0, 'balance': get_balance()}
+        return {'completed': False, 'reward': 0.0, 'balance': get_balance(), 'achievements': []}
     if missions[idx].get('done'):
-        return {'completed': False, 'reward': 0.0, 'balance': get_balance()}
+        return {'completed': False, 'reward': 0.0, 'balance': get_balance(), 'achievements': []}
     reward = float(missions[idx].get('reward', 0))
+    mid = str(missions[idx].get('id', '')).strip() or str(mission_id or title_contains or '')
     missions[idx]['done'] = True
     save_missions(missions)
     if reward > 0:
         change_balance(reward)
-    return {'completed': True, 'reward': reward, 'balance': get_balance()}
+    fresh = unlock_for_event('mission', mid, limit=4)
+    return {'completed': True, 'reward': reward, 'balance': get_balance(), 'achievements': fresh}
 PY
   chmod +x "$BIN_DIR/xui_game_lib.py"
 
@@ -4647,7 +5655,7 @@ from pathlib import Path
 from PyQt5 import QtWidgets, QtCore
 
 sys.path.insert(0, str(Path.home() / '.xui' / 'bin'))
-from xui_game_lib import get_balance, change_balance, ensure_wallet, complete_mission
+from xui_game_lib import get_balance, change_balance, ensure_wallet, complete_mission, unlock_for_event
 
 
 RED_NUMBERS = {1,3,5,7,9,12,14,16,18,19,21,23,25,27,30,32,34,36}
@@ -4657,6 +5665,7 @@ class CasinoWindow(QtWidgets.QMainWindow):
     def __init__(self):
         super().__init__()
         ensure_wallet()
+        unlock_for_event('launch', 'casino', limit=2)
         self.start_msg = 'Bienvenido al casino.'
         m = complete_mission(mission_id='m1')
         if m.get('completed'):
@@ -4905,12 +5914,13 @@ from pathlib import Path
 from PyQt5 import QtWidgets, QtGui, QtCore
 
 sys.path.insert(0, str(Path.home() / '.xui' / 'bin'))
-from xui_game_lib import change_balance, get_balance, complete_mission
+from xui_game_lib import change_balance, get_balance, complete_mission, unlock_for_event
 
 
 class RunnerGame(QtWidgets.QWidget):
     def __init__(self):
         super().__init__()
+        unlock_for_event('launch', 'runner', limit=2)
         self.setWindowTitle('XUI Runner')
         self.resize(920, 360)
         self.setFocusPolicy(QtCore.Qt.StrongFocus)
@@ -5038,10 +6048,10 @@ PY
 #!/usr/bin/env python3
 import sys
 from pathlib import Path
-from PyQt5 import QtWidgets
+from PyQt5 import QtCore, QtWidgets
 
 sys.path.insert(0, str(Path.home() / '.xui' / 'bin'))
-from xui_game_lib import load_missions, save_missions, change_balance, get_balance
+from xui_game_lib import load_missions, save_missions, get_balance, complete_mission
 
 
 class MissionsWindow(QtWidgets.QMainWindow):
@@ -5112,11 +6122,9 @@ class MissionsWindow(QtWidgets.QMainWindow):
         if mission.get('done'):
             self.reload('Esa misión ya estaba completada.')
             return
-        reward = float(mission.get('reward', 0))
-        mission['done'] = True
-        self.missions[idx] = mission
-        save_missions(self.missions)
-        bal = change_balance(reward)
+        res = complete_mission(mission_id=mission.get('id'))
+        reward = float(res.get('reward', 0))
+        bal = float(res.get('balance', get_balance()))
         self.reload(f"Misión completada: +{reward:.2f} | Balance EUR {bal:.2f}")
 
     def reset_missions(self):
@@ -5159,7 +6167,10 @@ from pathlib import Path
 from PyQt5 import QtCore, QtGui, QtWidgets
 
 sys.path.insert(0, str(Path.home() / '.xui' / 'bin'))
-from xui_game_lib import load_store, load_inventory, save_inventory, get_balance, change_balance, complete_mission
+from xui_game_lib import (
+    load_store, load_inventory, save_inventory, get_balance, change_balance, complete_mission,
+    unlock_for_event, ensure_achievements,
+)
 
 DATA_HOME = Path.home() / '.xui' / 'data'
 STORE_FILE = DATA_HOME / 'store.json'
@@ -5581,6 +6592,10 @@ class StoreWindow(QtWidgets.QMainWindow):
         self.reflow_timer.setSingleShot(True)
         self.reflow_timer.timeout.connect(self._rebuild_tile_grid)
         self._build()
+        try:
+            ensure_achievements(660)
+        except Exception:
+            pass
         self.reload()
 
     def _build(self):
@@ -6079,6 +7094,11 @@ class StoreWindow(QtWidgets.QMainWindow):
         })
         self.inventory['items'] = inv
         save_inventory(self.inventory)
+        fresh = unlock_for_event('purchase', iid, limit=3)
+        ach_note = ''
+        if fresh:
+            ach_names = ', '.join(str(x.get('title', 'Achievement')) for x in fresh[:2])
+            ach_note = f' | Achievement: {ach_names}'
 
         mission = complete_mission(mission_id='m3')
         install_cmd = str(item.get('install', '')).strip()
@@ -6097,9 +7117,9 @@ class StoreWindow(QtWidgets.QMainWindow):
         if mission.get('completed'):
             bal = float(mission.get('balance', bal))
             reward = float(mission.get('reward', 0))
-            self.reload(f'Purchase OK: {name} (EUR {price:.2f}) | Mission +EUR {reward:.2f} | Balance EUR {bal:.2f}{extra}')
+            self.reload(f'Purchase OK: {name} (EUR {price:.2f}) | Mission +EUR {reward:.2f} | Balance EUR {bal:.2f}{extra}{ach_note}')
         else:
-            self.reload(f'Purchase OK: {name} (EUR {price:.2f}) | Balance EUR {bal:.2f}{extra}')
+            self.reload(f'Purchase OK: {name} (EUR {price:.2f}) | Balance EUR {bal:.2f}{extra}{ach_note}')
 
     def install_selected(self):
         item = self._selected_item()
@@ -6133,7 +7153,12 @@ class StoreWindow(QtWidgets.QMainWindow):
             self.reload('No launcher defined for this item.')
             return
         self._run_detached(cmd)
-        self.reload(f'Launched: {item.get("name", "item")}')
+        fresh = unlock_for_event('launch', iid, limit=3)
+        ach_note = ''
+        if fresh:
+            ach_names = ', '.join(str(x.get('title', 'Achievement')) for x in fresh[:2])
+            ach_note = f' | Achievement: {ach_names}'
+        self.reload(f'Launched: {item.get("name", "item")}{ach_note}')
 
     def show_inventory(self):
         inv = self.inventory.get('items', [])
@@ -6640,6 +7665,7 @@ Description=XUI Joy Listener (user)
 
 [Service]
 Type=simple
+EnvironmentFile=-%h/.xui/data/controller_profile.env
 ExecStart=%h/.xui/bin/xui_python.sh %h/.xui/bin/xui_joy_listener.py
 Restart=on-failure
 
@@ -9267,22 +10293,40 @@ BASH
         cat > "$BIN_DIR/xui_gamepad_test.sh" <<'BASH'
 #!/usr/bin/env bash
 set -euo pipefail
+echo "=== XUI Gamepad Test ==="
+echo
+if [ -x "$HOME/.xui/bin/xui_controller_probe.sh" ]; then
+    "$HOME/.xui/bin/xui_controller_probe.sh" || true
+    echo
+fi
+
 if command -v jstest-gtk >/dev/null 2>&1; then
+    echo "Launching jstest-gtk..."
     jstest-gtk &
-elif command -v jstest >/dev/null 2>&1; then
-    DEV=$(ls /dev/input/js* 2>/dev/null | head -n1 || true)
+    exit 0
+fi
+
+if command -v jstest >/dev/null 2>&1; then
+    DEV=""
+    for d in /dev/input/js*; do
+        [ -e "$d" ] || continue
+        DEV="$d"
+        break
+    done
     if [ -n "$DEV" ]; then
+        echo "Launching jstest on $DEV"
         exec jstest "$DEV"
     fi
-    echo "No /dev/input/js* device found"
-    exit 1
-elif command -v evtest >/dev/null 2>&1; then
-    echo "Run manually with permissions: evtest"
-    exit 1
-else
-    echo "No gamepad tester installed"
-    exit 1
 fi
+
+if command -v evtest >/dev/null 2>&1; then
+    echo "evtest is available."
+    echo "Tip: run 'sudo evtest' to inspect raw Joy-Con/Xbox events."
+    exit 0
+fi
+
+echo "No gamepad tester installed (jstest-gtk/jstest/evtest)."
+exit 1
 BASH
         chmod +x "$BIN_DIR/xui_gamepad_test.sh"
 
@@ -10335,6 +11379,22 @@ finish_setup(){
 
 main(){
   parse_args "$@"
+  if [ "${XUI_ONLY_REFRESH_CONTROLLERS:-0}" = "1" ]; then
+    info "Refreshing controller integration only (Joy-Con/Xbox)"
+    ensure_dirs
+    write_joy_py
+    write_systemd_and_autostart
+    write_even_more_apps
+    if command -v systemctl >/dev/null 2>&1; then
+      systemctl --user daemon-reload >/dev/null 2>&1 || true
+      systemctl --user restart xui-joy.service >/dev/null 2>&1 || true
+    fi
+    info "Controller tools refreshed. Run:"
+    info "  ~/.xui/bin/xui_controller_probe.sh"
+    info "  ~/.xui/bin/xui_controller_mappings.sh"
+    info "  ~/.xui/bin/xui_controller_l4t_fix.sh"
+    exit 0
+  fi
   if [ "${XUI_ONLY_REFRESH_STORE:-0}" = "1" ]; then
     info "Refreshing store UI only (fast mode)"
     ensure_dirs
