@@ -1979,6 +1979,178 @@ class HeroPanel(QtWidgets.QFrame):
         super().mousePressEvent(e)
 
 
+class GamesShowcasePanel(QtWidgets.QFrame):
+    clicked = QtCore.pyqtSignal(str)
+
+    def __init__(self, action='Games Hub', title='games', subtitle='play now', parent=None):
+        super().__init__(parent)
+        self.action = action
+        self.title = title
+        self.subtitle = subtitle
+        self.base_size = (900, 460)
+        self.setObjectName('games_showcase_panel')
+        self.setFocusPolicy(QtCore.Qt.StrongFocus)
+        self._cards = []
+        self._build()
+        self.apply_scale(1.0, False)
+        self.set_selected(False)
+
+    def _make_mini_card(self, label):
+        card = QtWidgets.QFrame()
+        card.setObjectName('games_mini_card')
+        card_l = QtWidgets.QVBoxLayout(card)
+        card_l.setContentsMargins(8, 6, 8, 6)
+        card_l.setSpacing(0)
+        cat = QtWidgets.QLabel('GAME')
+        cat.setObjectName('games_mini_cat')
+        name = QtWidgets.QLabel(label)
+        name.setObjectName('games_mini_name')
+        card_l.addWidget(cat, 0, QtCore.Qt.AlignLeft | QtCore.Qt.AlignTop)
+        card_l.addStretch(1)
+        card_l.addWidget(name, 0, QtCore.Qt.AlignLeft | QtCore.Qt.AlignBottom)
+        return card
+
+    def _build(self):
+        root = QtWidgets.QVBoxLayout(self)
+        self._layout = root
+        root.setContentsMargins(18, 16, 18, 12)
+        root.setSpacing(8)
+
+        title_row = QtWidgets.QHBoxLayout()
+        self.top_label = QtWidgets.QLabel(self.title)
+        self.top_label.setObjectName('games_title')
+        title_row.addWidget(self.top_label, 0, QtCore.Qt.AlignLeft)
+        title_row.addStretch(1)
+        root.addLayout(title_row)
+
+        body = QtWidgets.QHBoxLayout()
+        body.setSpacing(10)
+
+        blades = QtWidgets.QFrame()
+        blades.setObjectName('games_blades')
+        blades_l = QtWidgets.QVBoxLayout(blades)
+        blades_l.setContentsMargins(8, 8, 8, 8)
+        blades_l.setSpacing(6)
+        self.btn_my_games = QtWidgets.QPushButton('My Games')
+        self.btn_market = QtWidgets.QPushButton('Marketplace')
+        for b in (self.btn_my_games, self.btn_market):
+            b.setObjectName('games_blade_btn')
+            blades_l.addWidget(b)
+        blades_l.addStretch(1)
+        self.btn_my_games.clicked.connect(lambda: self.clicked.emit('My Games'))
+        self.btn_market.clicked.connect(lambda: self.clicked.emit('Games Marketplace'))
+        body.addWidget(blades, 1)
+
+        right = QtWidgets.QVBoxLayout()
+        right.setSpacing(8)
+
+        self.featured = QtWidgets.QFrame()
+        self.featured.setObjectName('games_featured')
+        ft_l = QtWidgets.QVBoxLayout(self.featured)
+        ft_l.setContentsMargins(14, 10, 14, 10)
+        ft_l.setSpacing(4)
+        self.featured_tag = QtWidgets.QLabel('FEATURED')
+        self.featured_tag.setObjectName('games_featured_tag')
+        self.featured_name = QtWidgets.QLabel('My Games Collection')
+        self.featured_name.setObjectName('games_featured_name')
+        self.featured_sub = QtWidgets.QLabel('Open your installed games and services')
+        self.featured_sub.setObjectName('games_featured_sub')
+        ft_l.addWidget(self.featured_tag, 0, QtCore.Qt.AlignLeft)
+        ft_l.addStretch(1)
+        ft_l.addWidget(self.featured_name, 0, QtCore.Qt.AlignLeft)
+        ft_l.addWidget(self.featured_sub, 0, QtCore.Qt.AlignLeft)
+        right.addWidget(self.featured, 1)
+
+        strip = QtWidgets.QHBoxLayout()
+        strip.setSpacing(8)
+        for label in ('Forza', 'FIFA', 'Halo', 'COD'):
+            card = self._make_mini_card(label)
+            self._cards.append(card)
+            strip.addWidget(card, 1)
+        right.addLayout(strip)
+        body.addLayout(right, 4)
+
+        root.addLayout(body, 1)
+        self.sub_label = QtWidgets.QLabel(self.subtitle)
+        self.sub_label.setObjectName('games_sub')
+        root.addWidget(self.sub_label, 0, QtCore.Qt.AlignLeft | QtCore.Qt.AlignBottom)
+
+    def apply_scale(self, scale=1.0, compact=False):
+        s = max(0.62, float(scale))
+        compact_factor = 0.88 if compact else 1.0
+        w = max(480, int(self.base_size[0] * s * compact_factor))
+        h = max(260, int(self.base_size[1] * s * compact_factor))
+        self.setFixedSize(w, h)
+
+        mx = max(10, int(18 * s * compact_factor))
+        my = max(8, int(16 * s * compact_factor))
+        self._layout.setContentsMargins(mx, my, mx, max(8, int(12 * s * compact_factor)))
+        self._layout.setSpacing(max(6, int(8 * s * compact_factor)))
+
+        title_fs = max(20, int(37 * s * compact_factor))
+        sub_fs = max(13, int(22 * s * compact_factor))
+        blade_fs = max(11, int(17 * s * compact_factor))
+        self.top_label.setStyleSheet(f'color:#f2f6fa; font-size:{title_fs}px; font-weight:800;')
+        self.sub_label.setStyleSheet(f'color:rgba(235,242,244,0.78); font-size:{sub_fs}px; font-weight:600;')
+
+        blade_h = max(40, int(58 * s * compact_factor))
+        for b in (self.btn_my_games, self.btn_market):
+            b.setMinimumHeight(blade_h)
+            b.setStyleSheet(
+                'QPushButton#games_blade_btn {'
+                'text-align:left; padding:6px 8px;'
+                f'font-size:{blade_fs}px; font-weight:700;'
+                'color:#ecf4ef; background:qlineargradient(x1:0,y1:0,x2:1,y2:0, stop:0 #57b541, stop:1 #3b8f31);'
+                'border:1px solid rgba(255,255,255,0.24); border-radius:2px; }'
+                'QPushButton#games_blade_btn:hover { background:#65c44d; }'
+            )
+
+        feat_name_fs = max(14, int(31 * s * compact_factor))
+        feat_sub_fs = max(10, int(16 * s * compact_factor))
+        self.featured_tag.setStyleSheet(f'color:rgba(220,231,236,0.92); font-size:{max(9, int(12 * s))}px; font-weight:700;')
+        self.featured_name.setStyleSheet(f'color:#eff4f8; font-size:{feat_name_fs}px; font-weight:800;')
+        self.featured_sub.setStyleSheet(f'color:rgba(234,241,246,0.86); font-size:{feat_sub_fs}px; font-weight:600;')
+
+        mini_h = max(54, int(88 * s * compact_factor))
+        mini_cat_fs = max(8, int(11 * s * compact_factor))
+        mini_name_fs = max(10, int(17 * s * compact_factor))
+        for c in self._cards:
+            c.setMinimumHeight(mini_h)
+            c.setStyleSheet(
+                'QFrame#games_mini_card {'
+                'background:qlineargradient(x1:0,y1:0,x2:1,y2:1, stop:0 #707b84, stop:1 #4f5962);'
+                'border:1px solid rgba(223,232,239,0.5); border-radius:2px; }'
+                f'QLabel#games_mini_cat {{ color:rgba(229,236,241,0.82); font-size:{mini_cat_fs}px; font-weight:700; }}'
+                f'QLabel#games_mini_name {{ color:#f3f7f9; font-size:{mini_name_fs}px; font-weight:700; }}'
+            )
+
+    def set_selected(self, on):
+        border = '#d4f2ff' if on else 'rgba(255,255,255,0.08)'
+        width = '4px' if on else '1px'
+        self.setStyleSheet(
+            f'''
+            QFrame#games_showcase_panel {{
+                background:qlineargradient(x1:0,y1:0,x2:1,y2:1, stop:0 #121518, stop:1 #1f262c);
+                border:{width} solid {border};
+                border-radius:4px;
+            }}
+            QFrame#games_blades {{
+                background:rgba(18,24,30,0.92);
+                border:1px solid rgba(194,213,231,0.3);
+            }}
+            QFrame#games_featured {{
+                background:qlineargradient(x1:0,y1:0,x2:1,y2:1, stop:0 #4f5962, stop:1 #3b444d);
+                border:1px solid rgba(223,232,239,0.5);
+                border-radius:2px;
+            }}
+            '''
+        )
+
+    def mousePressEvent(self, e):
+        self.clicked.emit(self.action)
+        super().mousePressEvent(e)
+
+
 class QuickMenu(QtWidgets.QDialog):
     def __init__(self, title, options, descriptions=None, parent=None):
         super().__init__(parent)
@@ -1991,44 +2163,45 @@ class QuickMenu(QtWidgets.QDialog):
         self.resize(760, 500)
         self.setStyleSheet('''
             QFrame#guide_panel {
-                background:qlineargradient(x1:0,y1:0,x2:1,y2:1, stop:0 #0e141b, stop:1 #1e2732);
-                border:2px solid rgba(161,214,255,0.42);
-                border-radius:8px;
+                background:qlineargradient(x1:0,y1:0,x2:1,y2:1, stop:0 #d9dde2, stop:1 #9ca3aa);
+                border:2px solid rgba(226,236,246,0.72);
+                border-radius:5px;
             }
-            QLabel#guide_title { color:#f2f7f9; font-size:34px; font-weight:800; }
-            QLabel#guide_hint { color:rgba(241,247,251,0.76); font-size:16px; }
+            QLabel#guide_title { color:#1f252b; font-size:34px; font-weight:800; }
+            QLabel#guide_hint { color:rgba(22,27,33,0.82); font-size:16px; font-weight:600; }
             QFrame#guide_left {
-                background:rgba(7,16,28,0.82);
-                border:1px solid rgba(128,170,205,0.25);
+                background:rgba(246,248,250,0.86);
+                border:1px solid rgba(132,142,152,0.54);
             }
             QFrame#guide_info {
-                background:rgba(176,183,191,0.26);
-                border:1px solid rgba(200,208,216,0.33);
+                background:rgba(74,80,88,0.78);
+                border:1px solid rgba(223,229,236,0.54);
             }
             QLabel#guide_info_title {
-                color:#f2f6f8;
+                color:#eff4f7;
                 font-size:19px;
                 font-weight:700;
             }
             QLabel#guide_info_text {
-                color:rgba(239,244,247,0.9);
+                color:rgba(237,243,247,0.94);
                 font-size:15px;
             }
             QListWidget {
-                background:#08111b;
-                color:#f3f7f7;
-                font-size:26px;
-                border:1px solid #39506a;
+                background:#f6f7f8;
+                color:#20262d;
+                font-size:27px;
+                border:1px solid #8e979f;
                 outline:none;
             }
             QListWidget::item {
-                padding:8px 10px;
+                padding:7px 10px;
                 border:1px solid transparent;
+                margin:1px 0px;
             }
             QListWidget::item:selected {
-                background:qlineargradient(x1:0,y1:0,x2:1,y2:1, stop:0 #34d85a, stop:1 #20b540);
-                color:#efffee;
-                border:1px solid rgba(255,255,255,0.22);
+                background:qlineargradient(x1:0,y1:0,x2:1,y2:0, stop:0 #5abc3e, stop:1 #3d8f31);
+                color:#f4fff2;
+                border:1px solid rgba(248,255,247,0.36);
             }
         ''')
         outer = QtWidgets.QVBoxLayout(self)
@@ -2127,6 +2300,247 @@ class QuickMenu(QtWidgets.QDialog):
     def keyPressEvent(self, e):
         if e.key() in (QtCore.Qt.Key_Escape, QtCore.Qt.Key_Back):
             self.reject()
+            return
+        super().keyPressEvent(e)
+
+
+class GamesHubMenu(QtWidgets.QDialog):
+    def __init__(self, items, parent=None):
+        super().__init__(parent)
+        self._items = list(items or [])
+        self._selection = None
+        self._open_anim = None
+        self.setWindowTitle('games hub')
+        self.setWindowFlags(QtCore.Qt.Dialog | QtCore.Qt.FramelessWindowHint)
+        self.setAttribute(QtCore.Qt.WA_TranslucentBackground, True)
+        self.setModal(True)
+        self.resize(980, 560)
+        self.setStyleSheet('''
+            QFrame#games_hub_panel {
+                background:qlineargradient(x1:0,y1:0,x2:1,y2:1, stop:0 #d7dce2, stop:1 #a2a9b1);
+                border:2px solid rgba(226,236,246,0.72);
+                border-radius:6px;
+            }
+            QLabel#games_hub_title {
+                color:#28313b;
+                font-size:36px;
+                font-weight:800;
+            }
+            QLabel#games_hub_hint {
+                color:rgba(23,29,35,0.85);
+                font-size:15px;
+                font-weight:600;
+            }
+            QFrame#games_hub_list_box {
+                background:rgba(248,250,252,0.9);
+                border:1px solid rgba(133,143,154,0.56);
+            }
+            QListWidget#games_hub_list {
+                background:transparent;
+                color:#212830;
+                font-size:30px;
+                border:none;
+                outline:none;
+            }
+            QListWidget#games_hub_list::item {
+                padding:7px 10px;
+                margin:1px 0px;
+            }
+            QListWidget#games_hub_list::item:selected {
+                background:qlineargradient(x1:0,y1:0,x2:1,y2:0, stop:0 #5cbc42, stop:1 #3c8f31);
+                color:#f4fff2;
+                border:1px solid rgba(248,255,247,0.36);
+            }
+            QFrame#games_hub_preview {
+                background:qlineargradient(x1:0,y1:0,x2:1,y2:1, stop:0 #4f5963, stop:1 #3f4751);
+                border:1px solid rgba(226,235,243,0.58);
+            }
+            QLabel#games_hub_preview_tag {
+                color:rgba(228,237,244,0.86);
+                font-size:12px;
+                font-weight:700;
+                letter-spacing:1px;
+            }
+            QLabel#games_hub_preview_title {
+                color:#f2f6fa;
+                font-size:32px;
+                font-weight:800;
+            }
+            QLabel#games_hub_preview_desc {
+                color:rgba(234,241,246,0.92);
+                font-size:16px;
+                font-weight:600;
+            }
+            QFrame#games_hub_card {
+                background:qlineargradient(x1:0,y1:0,x2:1,y2:1, stop:0 #747f88, stop:1 #515a63);
+                border:1px solid rgba(226,235,243,0.55);
+                border-radius:2px;
+            }
+            QLabel#games_hub_card_title {
+                color:#f4f8fb;
+                font-size:14px;
+                font-weight:700;
+            }
+        ''')
+        outer = QtWidgets.QVBoxLayout(self)
+        outer.setContentsMargins(0, 0, 0, 0)
+        panel = QtWidgets.QFrame()
+        panel.setObjectName('games_hub_panel')
+        outer.addWidget(panel)
+
+        root = QtWidgets.QVBoxLayout(panel)
+        root.setContentsMargins(12, 10, 12, 10)
+        root.setSpacing(8)
+
+        top = QtWidgets.QHBoxLayout()
+        title = QtWidgets.QLabel('games hub')
+        title.setObjectName('games_hub_title')
+        top.addWidget(title, 0, QtCore.Qt.AlignLeft)
+        top.addStretch(1)
+        root.addLayout(top)
+
+        body = QtWidgets.QHBoxLayout()
+        body.setSpacing(10)
+
+        left = QtWidgets.QFrame()
+        left.setObjectName('games_hub_list_box')
+        left_l = QtWidgets.QVBoxLayout(left)
+        left_l.setContentsMargins(8, 8, 8, 8)
+        left_l.setSpacing(6)
+        self.listw = QtWidgets.QListWidget()
+        self.listw.setObjectName('games_hub_list')
+        self.listw.addItems([str(x.get('label', 'Option')) for x in self._items])
+        self.listw.setCurrentRow(0 if self._items else -1)
+        self.listw.itemActivated.connect(self._accept_current)
+        self.listw.itemDoubleClicked.connect(self._accept_current)
+        left_l.addWidget(self.listw, 1)
+        body.addWidget(left, 2)
+
+        right_wrap = QtWidgets.QVBoxLayout()
+        right_wrap.setSpacing(8)
+        preview = QtWidgets.QFrame()
+        preview.setObjectName('games_hub_preview')
+        preview_l = QtWidgets.QVBoxLayout(preview)
+        preview_l.setContentsMargins(12, 10, 12, 10)
+        preview_l.setSpacing(4)
+        self.preview_tag = QtWidgets.QLabel('FEATURED')
+        self.preview_tag.setObjectName('games_hub_preview_tag')
+        self.preview_title = QtWidgets.QLabel('My Games')
+        self.preview_title.setObjectName('games_hub_preview_title')
+        self.preview_desc = QtWidgets.QLabel('')
+        self.preview_desc.setWordWrap(True)
+        self.preview_desc.setObjectName('games_hub_preview_desc')
+        preview_l.addWidget(self.preview_tag, 0, QtCore.Qt.AlignLeft)
+        preview_l.addStretch(1)
+        preview_l.addWidget(self.preview_title, 0, QtCore.Qt.AlignLeft)
+        preview_l.addWidget(self.preview_desc, 0, QtCore.Qt.AlignLeft)
+        right_wrap.addWidget(preview, 1)
+
+        card_row = QtWidgets.QHBoxLayout()
+        card_row.setSpacing(8)
+        self.preview_cards = []
+        for _ in range(4):
+            c = QtWidgets.QFrame()
+            c.setObjectName('games_hub_card')
+            c_l = QtWidgets.QVBoxLayout(c)
+            c_l.setContentsMargins(8, 8, 8, 8)
+            c_l.setSpacing(0)
+            lbl = QtWidgets.QLabel('game')
+            lbl.setObjectName('games_hub_card_title')
+            c_l.addStretch(1)
+            c_l.addWidget(lbl, 0, QtCore.Qt.AlignLeft | QtCore.Qt.AlignBottom)
+            self.preview_cards.append(lbl)
+            card_row.addWidget(c, 1)
+        right_wrap.addLayout(card_row)
+        body.addLayout(right_wrap, 4)
+        root.addLayout(body, 1)
+
+        hint = QtWidgets.QLabel('ESC = Back | ENTER = Select | Flechas = Move')
+        hint.setObjectName('games_hub_hint')
+        root.addWidget(hint)
+
+        self.listw.currentRowChanged.connect(self._update_preview)
+        self._update_preview(self.listw.currentRow())
+
+    def _item_at(self, row):
+        if row < 0 or row >= len(self._items):
+            return None
+        return self._items[row]
+
+    def _update_preview(self, row):
+        item = self._item_at(int(row))
+        if not item:
+            self.preview_title.setText('games')
+            self.preview_desc.setText('')
+            for lbl in self.preview_cards:
+                lbl.setText('-')
+            return
+        self.preview_title.setText(str(item.get('label', 'games')))
+        self.preview_desc.setText(str(item.get('desc', 'Open this section.')))
+        cards = list(item.get('cards', []))
+        while len(cards) < len(self.preview_cards):
+            cards.append('Classic')
+        for i, lbl in enumerate(self.preview_cards):
+            lbl.setText(str(cards[i]))
+
+    def selected_action(self):
+        if self._selection:
+            return self._selection
+        row = self.listw.currentRow()
+        item = self._item_at(row)
+        if not item:
+            return None
+        return str(item.get('action', ''))
+
+    def _accept_current(self, *_):
+        row = self.listw.currentRow()
+        item = self._item_at(row)
+        if not item:
+            return
+        self._selection = str(item.get('action', ''))
+        self.accept()
+
+    def showEvent(self, e):
+        super().showEvent(e)
+        parent = self.parentWidget()
+        if parent is not None:
+            w = min(max(980, int(parent.width() * 0.78)), max(980, parent.width() - 80))
+            h = min(max(560, int(parent.height() * 0.74)), max(560, parent.height() - 80))
+            self.resize(w, h)
+            x = parent.x() + (parent.width() - w) // 2
+            y = parent.y() + (parent.height() - h) // 2
+            self.move(max(0, x), max(0, y))
+        self._animate_open()
+
+    def _animate_open(self):
+        effect = QtWidgets.QGraphicsOpacityEffect(self)
+        self.setGraphicsEffect(effect)
+        effect.setOpacity(0.0)
+        end_rect = self.geometry()
+        start_rect = QtCore.QRect(end_rect.x() + max(18, end_rect.width() // 26), end_rect.y(), end_rect.width(), end_rect.height())
+        self.setGeometry(start_rect)
+        self._open_anim = QtCore.QParallelAnimationGroup(self)
+        fade = QtCore.QPropertyAnimation(effect, b'opacity', self)
+        fade.setDuration(180)
+        fade.setStartValue(0.0)
+        fade.setEndValue(1.0)
+        fade.setEasingCurve(QtCore.QEasingCurve.OutCubic)
+        slide = QtCore.QPropertyAnimation(self, b'geometry', self)
+        slide.setDuration(220)
+        slide.setStartValue(start_rect)
+        slide.setEndValue(end_rect)
+        slide.setEasingCurve(QtCore.QEasingCurve.OutCubic)
+        self._open_anim.addAnimation(fade)
+        self._open_anim.addAnimation(slide)
+        self._open_anim.finished.connect(lambda: self.setGraphicsEffect(None))
+        self._open_anim.start(QtCore.QAbstractAnimation.DeleteWhenStopped)
+
+    def keyPressEvent(self, e):
+        if e.key() in (QtCore.Qt.Key_Escape, QtCore.Qt.Key_Back):
+            self.reject()
+            return
+        if e.key() in (QtCore.Qt.Key_Return, QtCore.Qt.Key_Enter):
+            self._accept_current()
             return
         super().keyPressEvent(e)
 
@@ -2401,11 +2815,19 @@ class DashboardPage(QtWidgets.QWidget):
         self.center_layout = center
         center.setContentsMargins(0, 0, 0, 0)
         center.setSpacing(14)
-        self.hero = HeroPanel(
-            self.spec.get('hero_action', 'Hub'),
-            self.spec.get('hero_title', self.name),
-            self.spec.get('hero_subtitle', 'featured'),
-        )
+        hero_variant = str(self.spec.get('hero_variant', 'default')).strip().lower()
+        if hero_variant == 'games':
+            self.hero = GamesShowcasePanel(
+                self.spec.get('hero_action', 'Games Hub'),
+                self.spec.get('hero_title', self.name),
+                self.spec.get('hero_subtitle', 'featured'),
+            )
+        else:
+            self.hero = HeroPanel(
+                self.spec.get('hero_action', 'Hub'),
+                self.spec.get('hero_title', self.name),
+                self.spec.get('hero_subtitle', 'featured'),
+            )
         self.hero.clicked.connect(self.actionTriggered.emit)
         center.addWidget(self.hero, 0, alignment=QtCore.Qt.AlignHCenter)
         center.addStretch(1)
@@ -2678,11 +3100,12 @@ class Dashboard(QtWidgets.QMainWindow):
             'games': {
                 'hint': 'games: biblioteca y juego local',
                 'hero_action': 'Games Hub',
+                'hero_variant': 'games',
                 'hero_title': 'games',
-                'hero_subtitle': 'play now',
+                'hero_subtitle': 'my games and marketplace',
                 'left': [
-                    ('Casino', 'Casino', (320, 170)),
-                    ('Runner', 'Runner', (320, 170)),
+                    ('My Games', 'My Games', (320, 170)),
+                    ('Games Marketplace', 'Marketplace', (320, 170)),
                     ('Missions', 'Missions', (320, 205)),
                 ],
                 'right': [
@@ -3073,6 +3496,48 @@ class Dashboard(QtWidgets.QMainWindow):
             self._msg(name, 'No actions configured.')
             return
         self._menu(name, options)
+
+    def _open_games_hub_menu(self):
+        self._play_sfx('open')
+        items = [
+            {
+                'label': 'My Games',
+                'action': 'My Games',
+                'desc': 'Browse your installed games, minigames and integrations.',
+                'cards': ['Runner', 'Casino', 'FNAE', 'Gem Match'],
+            },
+            {
+                'label': 'Games Marketplace',
+                'action': 'Games Marketplace',
+                'desc': 'Open the modern Xbox-style store with rotating catalog.',
+                'cards': ['Store', 'Arcade', 'Accessories', 'Themes'],
+            },
+            {
+                'label': 'Recently Played',
+                'action': 'Recently Played',
+                'desc': 'See your latest launches and quick-return shortcuts.',
+                'cards': ['Recent', 'Last Session', 'Favorites', 'Continue'],
+            },
+            {
+                'label': 'Arcade Picks',
+                'action': 'Arcade Picks',
+                'desc': 'Open lightweight arcade games and classic experiences.',
+                'cards': ['Gem Match', 'Runner', 'Casino', 'Retro'],
+            },
+            {
+                'label': 'Disc & Local Media',
+                'action': 'Disc & Local Media',
+                'desc': 'Scan DVD/USB media and launch discovered game files.',
+                'cards': ['Open Tray', 'USB Scan', 'ISO', 'AppImage'],
+            },
+        ]
+        d = GamesHubMenu(items, self)
+        if d.exec_() == QtWidgets.QDialog.Accepted:
+            action = d.selected_action()
+            if action:
+                self.handle_action(action)
+        else:
+            self._play_sfx('back')
 
     def _save_recent(self, action):
         try:
@@ -3627,6 +4092,11 @@ class Dashboard(QtWidgets.QMainWindow):
             'Lutris': 'Launch Lutris game platform.',
             'Heroic': 'Launch Heroic Games Launcher.',
             'Games Integrations': 'Manage Steam/RetroArch/Lutris/Heroic from one place.',
+            'My Games': 'Open your personal games list (installed and ready to launch).',
+            'Games Marketplace': 'Open Games marketplace tiles and offers.',
+            'Recently Played': 'Show recently used games and apps.',
+            'Arcade Picks': 'Quick access to arcade style games.',
+            'Disc & Local Media': 'Scan tray/USB media for launchable games.',
             'Platforms Status': 'Show installation/status of integrated game platforms.',
             'Install RetroArch': 'Install RetroArch from package manager or Flatpak.',
             'Install Lutris': 'Install Lutris from package manager or Flatpak.',
@@ -3683,12 +4153,31 @@ class Dashboard(QtWidgets.QMainWindow):
         for launch_key in self._launch_event_keys(action):
             self._unlock_achievement_event('launch', launch_key)
         xui = str(XUI_HOME)
-        if action in ('Hub', 'Social Hub', 'Games Hub', 'Media Hub', 'Music Hub', 'Apps Hub', 'Settings Hub'):
+        if action == 'Games Hub':
+            self._open_games_hub_menu()
+        elif action in ('Hub', 'Social Hub', 'Media Hub', 'Music Hub', 'Apps Hub', 'Settings Hub'):
             self._open_current_tab_menu()
         elif action == 'Open Tray':
             self._open_tray_dashboard_menu()
         elif action == 'My Pins':
             self._menu('My Pins', ['Casino', 'Runner', 'Gem Match', 'FNAE', 'Store', 'Web Browser', 'System Info', 'Web Control'])
+        elif action == 'My Games':
+            self._menu('My Games', ['Runner', 'Casino', 'Gem Match', 'FNAE', 'Steam', 'RetroArch', 'Games Integrations'])
+        elif action in ('Games Marketplace', 'Games Market'):
+            self._run('/bin/sh', ['-c', f'{xui}/bin/xui_store.sh'])
+        elif action == 'Recently Played':
+            try:
+                arr = json.loads(RECENT_FILE.read_text()) if RECENT_FILE.exists() else []
+            except Exception:
+                arr = []
+            recent_games = [x for x in arr if str(x) in (
+                'Runner', 'Casino', 'Gem Match', 'FNAE', 'Steam', 'RetroArch', 'Lutris', 'Heroic', 'Store'
+            )]
+            self._menu('Recently Played', recent_games or ['No recent games'])
+        elif action == 'Arcade Picks':
+            self._menu('Arcade Picks', ['Gem Match', 'Runner', 'Casino', 'Missions'])
+        elif action == 'Disc & Local Media':
+            self._open_tray_dashboard_menu()
         elif action == 'Recent':
             try:
                 arr = json.loads(RECENT_FILE.read_text()) if RECENT_FILE.exists() else []
