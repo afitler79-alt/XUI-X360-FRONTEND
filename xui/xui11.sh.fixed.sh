@@ -2754,6 +2754,100 @@ class MandatoryUpdateDialog(QtWidgets.QDialog):
         super().keyPressEvent(e)
 
 
+class UpdateProgressDialog(QtWidgets.QDialog):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._phase = 0
+        self.setWindowTitle('Update in Progress')
+        self.setWindowFlags(QtCore.Qt.Dialog | QtCore.Qt.FramelessWindowHint)
+        self.setModal(True)
+        self.resize(760, 360)
+        self.setStyleSheet('''
+            QDialog {
+                background:#e7eaee;
+                border:2px solid rgba(242,247,250,0.9);
+            }
+            QLabel#title {
+                color:#f6f8fb;
+                background:#151a1f;
+                font-size:34px;
+                font-weight:800;
+                padding:8px 14px;
+            }
+            QLabel#body {
+                color:#27313a;
+                font-size:28px;
+                font-weight:700;
+            }
+            QLabel#detail {
+                color:#34414e;
+                font-size:17px;
+                font-weight:700;
+            }
+            QProgressBar {
+                border:1px solid #c9d3db;
+                border-radius:2px;
+                background:#dfe4e8;
+                height:24px;
+                text-align:center;
+                color:#1e252c;
+                font-size:14px;
+                font-weight:800;
+            }
+            QProgressBar::chunk {
+                background:qlineargradient(x1:0,y1:0,x2:1,y2:0, stop:0 #37b935, stop:1 #5dd43f);
+            }
+        ''')
+        v = QtWidgets.QVBoxLayout(self)
+        v.setContentsMargins(0, 0, 0, 0)
+        v.setSpacing(0)
+        self.lbl_title = QtWidgets.QLabel('Update in Progress')
+        self.lbl_title.setObjectName('title')
+        v.addWidget(self.lbl_title)
+        body = QtWidgets.QWidget()
+        body_l = QtWidgets.QVBoxLayout(body)
+        body_l.setContentsMargins(28, 28, 28, 20)
+        body_l.setSpacing(18)
+        self.lbl = QtWidgets.QLabel('Applying update. Do not turn off or unplug your console.')
+        self.lbl.setObjectName('body')
+        self.lbl.setWordWrap(True)
+        body_l.addStretch(1)
+        body_l.addWidget(self.lbl)
+        self.bar = QtWidgets.QProgressBar()
+        self.bar.setRange(0, 100)
+        self.bar.setValue(6)
+        self.bar.setFormat('%p%')
+        body_l.addWidget(self.bar)
+        self.detail = QtWidgets.QLabel('Preparing update...')
+        self.detail.setObjectName('detail')
+        body_l.addWidget(self.detail)
+        body_l.addStretch(1)
+        v.addWidget(body, 1)
+        self._tick = QtCore.QTimer(self)
+        self._tick.timeout.connect(self._pulse)
+        self._tick.start(120)
+
+    def _pulse(self):
+        cur = self.bar.value()
+        target = 92 if self._phase < 1 else 98
+        nxt = cur + 1
+        if nxt > target:
+            nxt = target
+        self.bar.setValue(nxt)
+
+    def set_detail(self, text):
+        t = str(text or '').strip()
+        if t:
+            self.detail.setText(t[:220])
+        if self.bar.value() < 92:
+            self.bar.setValue(min(92, self.bar.value() + 1))
+
+    def finish_ok(self):
+        self._phase = 1
+        self.bar.setValue(100)
+        self.detail.setText('Update installed successfully. Restarting dashboard...')
+
+
 class XboxGuideMenu(QtWidgets.QDialog):
     def __init__(self, gamertag='Player1', parent=None):
         super().__init__(parent)
@@ -4172,20 +4266,7 @@ class Dashboard(QtWidgets.QMainWindow):
         self._mandatory_update_output = ''
         self._play_sfx('open')
 
-        progress = QtWidgets.QProgressDialog(
-            'Applying mandatory update from GitHub...\nPlease wait...',
-            '',
-            0,
-            0,
-            self,
-        )
-        progress.setWindowTitle('Applying Update')
-        progress.setWindowModality(QtCore.Qt.ApplicationModal)
-        progress.setCancelButton(None)
-        progress.setAutoClose(False)
-        progress.setAutoReset(False)
-        progress.setMinimumDuration(0)
-        progress.setRange(0, 0)
+        progress = UpdateProgressDialog(self)
         progress.show()
         self._mandatory_update_progress = progress
 
@@ -4233,7 +4314,8 @@ class Dashboard(QtWidgets.QMainWindow):
             return
         lines = [ln.strip() for ln in self._mandatory_update_output.splitlines() if ln.strip()]
         tail = lines[-1][:160] if lines else 'Applying mandatory update from GitHub...'
-        dlg.setLabelText('Applying mandatory update from GitHub...\n' + tail)
+        if hasattr(dlg, 'set_detail'):
+            dlg.set_detail(tail)
 
     def _restart_dashboard_after_update(self):
         cmd = (
@@ -4263,7 +4345,6 @@ class Dashboard(QtWidgets.QMainWindow):
 
     def _on_mandatory_update_finished(self, code, status):
         self._on_mandatory_update_output()
-        self._close_mandatory_update_progress()
         proc = self._mandatory_update_proc
         self._mandatory_update_proc = None
         if proc is not None:
@@ -4271,9 +4352,16 @@ class Dashboard(QtWidgets.QMainWindow):
         self._mandatory_update_in_progress = False
         ok = (status == QtCore.QProcess.NormalExit and int(code) == 0)
         if ok:
+            dlg = self._mandatory_update_progress
+            if dlg is not None and hasattr(dlg, 'finish_ok'):
+                dlg.finish_ok()
+                QtCore.QTimer.singleShot(360, self._close_mandatory_update_progress)
+            else:
+                self._close_mandatory_update_progress()
             self._msg('Update', 'Mandatory update installed. Restarting dashboard...')
-            self._restart_dashboard_after_update()
+            QtCore.QTimer.singleShot(420, self._restart_dashboard_after_update)
             return
+        self._close_mandatory_update_progress()
         lines = [ln for ln in self._mandatory_update_output.splitlines() if ln.strip()]
         tail = '\n'.join(lines[-14:]).strip()
         if not tail:
@@ -5252,7 +5340,17 @@ class Dashboard(QtWidgets.QMainWindow):
         elif action == 'Battery Saver':
             self._run('/bin/sh', ['-c', f'{xui}/bin/xui_battery_saver.sh toggle'])
         elif action == 'Update Check':
-            self._msg('Update', subprocess.getoutput(f'/bin/sh -c "{xui}/bin/xui_update_check.sh mandatory"'))
+            payload = self._mandatory_update_payload()
+            if isinstance(payload, dict) and bool(payload.get('checked', False)):
+                if bool(payload.get('update_required', False)):
+                    repo = str(payload.get('repo', 'afitler79-alt/XUI-X360-FRONTEND'))
+                    rc = str(payload.get('remote_commit', 'unknown'))[:10]
+                    if self._ask_yes_no('Update', f'Update required from {repo}\nLatest build: {rc}\n\nApply update now?'):
+                        self._launch_mandatory_updater_and_quit()
+                else:
+                    self._msg('Update', 'System is up to date.')
+            else:
+                self._msg('Update', subprocess.getoutput(f'/bin/sh -c "{xui}/bin/xui_update_check.sh mandatory"'))
         elif action == 'System Update':
             self._run_terminal(f'"{xui}/bin/xui_update_system.sh"')
         elif action == 'Family':
@@ -10633,13 +10731,49 @@ apply_update(){
   fi
   git -C "$SRC" clean -fd >/dev/null 2>&1 || true
 
-  local installer=""
-  for c in "$INSTALLER_NAME" "xui11.sh.fixed.sh" "xui11.sh.fixed" "xui11.sh"; do
-    if [ -f "$SRC/$c" ]; then
-      installer="$SRC/$c"
-      break
+  find_installer(){
+    local c f
+    local names=(
+      "$INSTALLER_NAME"
+      "xui11.sh.fixed.sh"
+      "xui11.sh.fixed"
+      "xui11.sh"
+      "install.sh"
+      "installer.sh"
+      "main-xui.sh"
+      "Main-XUI.sh"
+    )
+    for c in "${names[@]}"; do
+      [ -n "$c" ] || continue
+      if [ -f "$SRC/$c" ]; then
+        echo "$SRC/$c"
+        return 0
+      fi
+    done
+    for c in "${names[@]}"; do
+      [ -n "$c" ] || continue
+      f="$(find "$SRC" -maxdepth 6 -type f -name "$c" 2>/dev/null | head -n 1 || true)"
+      if [ -n "$f" ]; then
+        echo "$f"
+        return 0
+      fi
+    done
+    while IFS= read -r f; do
+      if grep -q "write_dashboard_py" "$f" 2>/dev/null && grep -q "write_auto_update" "$f" 2>/dev/null; then
+        echo "$f"
+        return 0
+      fi
+    done < <(find "$SRC" -maxdepth 6 -type f -name "*.sh" 2>/dev/null | sort)
+    f="$(find "$SRC" -maxdepth 6 -type f \( -iname '*xui*installer*.sh' -o -iname '*xui11*.sh' -o -iname '*main*xui*.sh' \) 2>/dev/null | head -n 1 || true)"
+    if [ -n "$f" ]; then
+      echo "$f"
+      return 0
     fi
-  done
+    return 1
+  }
+
+  local installer=""
+  installer="$(find_installer || true)"
   if [ -z "$installer" ]; then
     echo "Installer not found in repo: $SRC"
     exit 1
