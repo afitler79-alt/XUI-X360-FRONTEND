@@ -2119,11 +2119,14 @@ def tile_icon(action, text=''):
 class GreenTile(QtWidgets.QFrame):
     clicked = QtCore.pyqtSignal(str)
 
-    def __init__(self, action, text, size=(250, 140), parent=None):
+    def __init__(self, action, text, size=(250, 140), parent=None, icon_scale=1.0, text_scale=1.0, dense=False):
         super().__init__(parent)
         self.action = action
         self.text = text
         self.base_size = (int(size[0]), int(size[1]))
+        self.icon_scale = max(0.55, float(icon_scale))
+        self.text_scale = max(0.65, float(text_scale))
+        self.dense = bool(dense)
         self.setObjectName('green_tile')
         self.setFocusPolicy(QtCore.Qt.StrongFocus)
         v = QtWidgets.QVBoxLayout(self)
@@ -2151,18 +2154,20 @@ class GreenTile(QtWidgets.QFrame):
     def apply_scale(self, scale=1.0, compact=False):
         s = max(0.62, float(scale))
         compact_factor = 0.85 if compact else 1.0
+        if self.dense:
+            compact_factor *= 0.92
         w = max(170, int(self.base_size[0] * s * compact_factor))
         h = max(90, int(self.base_size[1] * s * compact_factor))
         self.setFixedSize(w, h)
-        pad_x = max(8, int(16 * s * compact_factor))
-        pad_y = max(6, int(12 * s * compact_factor))
+        pad_x = max(7, int((13 if self.dense else 16) * s * compact_factor))
+        pad_y = max(5, int((8 if self.dense else 12) * s * compact_factor))
         self._layout.setContentsMargins(pad_x, pad_y, pad_x, pad_y)
-        icon_sz = max(26, int(44 * s * compact_factor))
-        pix_sz = max(16, int(26 * s * compact_factor))
+        icon_sz = max(22, int(44 * s * compact_factor * self.icon_scale))
+        pix_sz = max(14, int(26 * s * compact_factor * self.icon_scale))
         self.icon.setFixedSize(icon_sz, icon_sz)
         icon = tile_icon(self.action, self.text)
         self.icon.setPixmap(icon.pixmap(pix_sz, pix_sz))
-        font_px = max(14, int(30 * s * compact_factor))
+        font_px = max(13, int(30 * s * compact_factor * self.text_scale))
         self.lbl.setStyleSheet(f'color:#efffee; font-size:{font_px}px; font-weight:700;')
 
     def set_selected(self, on):
@@ -3748,9 +3753,23 @@ class DashboardPage(QtWidgets.QWidget):
         self.right_layout = None
         self._build()
 
-    def _build_tiles(self, defs, target, layout, alignment=QtCore.Qt.AlignLeft):
+    def _build_tiles(self, defs, target, layout, alignment=QtCore.Qt.AlignLeft, tile_opts=None):
+        opts = dict(tile_opts or {})
         for action, text, size in defs:
-            tile = GreenTile(action, text, size)
+            tile_size = size
+            if opts.get('dense'):
+                try:
+                    tile_size = (int(size[0]), max(84, int(size[1] * 0.86)))
+                except Exception:
+                    tile_size = size
+            tile = GreenTile(
+                action,
+                text,
+                tile_size,
+                icon_scale=float(opts.get('icon_scale', 1.0)),
+                text_scale=float(opts.get('text_scale', 1.0)),
+                dense=bool(opts.get('dense', False)),
+            )
             tile.clicked.connect(self.actionTriggered.emit)
             target.append(tile)
             layout.addWidget(tile, 0, alignment)
@@ -3801,7 +3820,13 @@ class DashboardPage(QtWidgets.QWidget):
         self.right_layout = right
         right.setContentsMargins(0, 0, 0, 0)
         right.setSpacing(14)
-        self._build_tiles(self.spec.get('right', []), self.right_tiles, right, QtCore.Qt.AlignRight)
+        self._build_tiles(
+            self.spec.get('right', []),
+            self.right_tiles,
+            right,
+            QtCore.Qt.AlignRight,
+            tile_opts={'dense': True, 'icon_scale': 0.70, 'text_scale': 0.86},
+        )
         right.addStretch(1)
 
         body.addWidget(left_col, 0, alignment=QtCore.Qt.AlignVCenter)
@@ -4165,8 +4190,12 @@ class Dashboard(QtWidgets.QMainWindow):
         self._compact_ui = False
         self._stage_layout = None
         self._achievement_queue = []
+        self._achievement_queued_ids = set()
+        self._achievement_last_sfx_at = 0.0
         self._achievement_toast = None
         self._startup_update_checked = False
+        self._mandatory_update_timer = None
+        self._mandatory_update_dialog_open = False
         self._mandatory_update_in_progress = False
         self._mandatory_update_proc = None
         self._mandatory_update_progress = None
@@ -4335,6 +4364,16 @@ class Dashboard(QtWidgets.QMainWindow):
         if not self._startup_update_checked:
             self._startup_update_checked = True
             QtCore.QTimer.singleShot(260, self._check_mandatory_update_gate)
+            self._start_mandatory_update_monitor()
+
+    def _start_mandatory_update_monitor(self):
+        if self._mandatory_update_timer is not None:
+            return
+        t = QtCore.QTimer(self)
+        t.setInterval(120000)
+        t.timeout.connect(self._check_mandatory_update_gate)
+        t.start()
+        self._mandatory_update_timer = t
 
     def resizeEvent(self, e):
         super().resizeEvent(e)
@@ -4713,6 +4752,12 @@ class Dashboard(QtWidgets.QMainWindow):
     def _check_mandatory_update_gate(self):
         if self._mandatory_update_in_progress:
             return
+        if self._mandatory_update_dialog_open:
+            return
+        if not self.isVisible():
+            return
+        if QtWidgets.QApplication.activeModalWidget() is not None:
+            return
         payload = self._mandatory_update_payload()
         if not isinstance(payload, dict):
             return
@@ -4721,10 +4766,12 @@ class Dashboard(QtWidgets.QMainWindow):
         if not bool(payload.get('update_required', False)):
             return
         self._play_sfx('open')
+        self._mandatory_update_dialog_open = True
         d = MandatoryUpdateDialog(payload, self)
         selected = 'No'
         if d.exec_() == QtWidgets.QDialog.Accepted:
             selected = d.selected_choice()
+        self._mandatory_update_dialog_open = False
         if str(selected).strip().lower() == 'yes':
             self._launch_mandatory_updater_and_quit()
             return
@@ -4765,7 +4812,12 @@ class Dashboard(QtWidgets.QMainWindow):
             return
         for row in rows:
             if isinstance(row, dict):
+                aid = str(row.get('id', '')).strip()
+                if aid and aid in self._achievement_queued_ids:
+                    continue
                 self._achievement_queue.append(row)
+                if aid:
+                    self._achievement_queued_ids.add(aid)
         if self._achievement_toast is None:
             return
         if not self._achievement_toast.isVisible():
@@ -4777,9 +4829,15 @@ class Dashboard(QtWidgets.QMainWindow):
         if not self._achievement_queue:
             return
         row = self._achievement_queue.pop(0)
+        aid = str(row.get('id', '')).strip()
+        if aid and aid in self._achievement_queued_ids:
+            self._achievement_queued_ids.discard(aid)
         title = str(row.get('title') or row.get('id') or 'Achievement')
         score = int(row.get('score', 0) or 0)
-        self._play_sfx('achievement')
+        now = time.monotonic()
+        if (now - float(self._achievement_last_sfx_at)) > 0.75:
+            self._play_sfx('achievement')
+            self._achievement_last_sfx_at = now
         self._achievement_toast.show_achievement(title, score=score)
 
     def _on_achievement_toast_finished(self):
@@ -5340,7 +5398,8 @@ class Dashboard(QtWidgets.QMainWindow):
     def handle_action(self, action):
         self._save_recent(action)
         self._play_sfx('select')
-        self._unlock_achievement_event('action', action)
+        # Avoid false-positive achievement spam when only navigating tiles.
+        # Real unlock events should come from launches/purchases/missions.
         for launch_key in self._launch_event_keys(action):
             self._unlock_achievement_event('launch', launch_key)
         xui = str(XUI_HOME)
