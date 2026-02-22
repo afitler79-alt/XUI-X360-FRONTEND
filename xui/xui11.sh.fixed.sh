@@ -146,7 +146,7 @@ BASH
         apt_safe_install \
             ffmpeg mpv jq xdotool curl ca-certificates iproute2 bc \
             xclip xsel rofi feh maim scrot udisks2 p7zip-full joystick joycond evtest jstest-gtk xboxdrv \
-            retroarch lutris || warn "Some apt packages failed to install"
+            retroarch lutris kodi || warn "Some apt packages failed to install"
         # Windows compatibility (best effort): Wine + Winetricks + ARM helpers
         if [ "$arch_now" = "x86_64" ] || [ "$arch_now" = "amd64" ]; then
             apt_safe_install wine wine64 winetricks || warn "Wine/Winetricks install failed on x86_64"
@@ -163,7 +163,7 @@ BASH
         run_as_root dnf install -y \
             python3 python3-pip python3-virtualenv python3-qt5 python3-pillow python3-evdev \
             ffmpeg mpv jq xdotool curl iproute bc \
-            xclip xsel rofi feh scrot udisks2 p7zip joystick joycond retroarch lutris || warn "Some dnf packages failed to install"
+            xclip xsel rofi feh scrot udisks2 p7zip joystick joycond retroarch lutris kodi || warn "Some dnf packages failed to install"
         run_as_root dnf install -y python3-qt5-webengine || true
         for pkg in python3-qt5-gamepad qt5-qtgamepad qt5-qtgamepad-devel; do
             run_as_root dnf install -y "$pkg" || true
@@ -176,7 +176,7 @@ BASH
         run_as_root pacman -Syu --noconfirm \
             python python-pip python-virtualenv pyqt5 python-pillow python-evdev \
             ffmpeg mpv jq xdotool curl iproute2 bc \
-            xclip xsel rofi feh scrot maim udisks2 p7zip joystick joycond retroarch lutris || warn "Some pacman packages failed to install"
+            xclip xsel rofi feh scrot maim udisks2 p7zip joystick joycond retroarch lutris kodi || warn "Some pacman packages failed to install"
         run_as_root pacman -S --noconfirm python-pyqt5-webengine || true
         for pkg in qt5-gamepad; do
             run_as_root pacman -S --noconfirm "$pkg" || true
@@ -939,11 +939,7 @@ PY
         warn "python3 (Pillow) not available — cannot generate placeholder images"
     fi
 
-    # Generate startup.mp3/mp4 via ffmpeg if missing
-    if [ ! -f "$ASSETS_DIR/startup.mp3" ] && command -v ffmpeg >/dev/null 2>&1; then
-        info "Generating startup.mp3 via ffmpeg"
-        ffmpeg -y -f lavfi -i "sine=frequency=440:duration=3" -c:a libmp3lame -q:a 4 "$ASSETS_DIR/startup.mp3" >/dev/null 2>&1 || warn "ffmpeg failed to create startup.mp3"
-    fi
+    # Generate startup.mp4 via ffmpeg if missing
     if [ ! -f "$ASSETS_DIR/startup.mp4" ] && command -v ffmpeg >/dev/null 2>&1 && [ -f "$ASSETS_DIR/applogo.png" ]; then
         info "Generating startup.mp4 from applogo.png via ffmpeg"
         ffmpeg -y -loop 1 -i "$ASSETS_DIR/applogo.png" -c:v libx264 -t 3 -pix_fmt yuv420p "$ASSETS_DIR/startup.mp4" >/dev/null 2>&1 || warn "ffmpeg failed to create startup.mp4"
@@ -1075,6 +1071,17 @@ def play_media(path, video=False, blocking=False):
 def play_startup_video():
     if os.environ.get('XUI_SKIP_STARTUP_VIDEO', '0') == '1':
         return
+    once_flag = DATA_HOME / 'startup_video_once.flag'
+    try:
+        sid = os.environ.get('XDG_SESSION_ID', '').strip() or str(os.getpid())
+        if once_flag.exists():
+            prev = once_flag.read_text(encoding='utf-8', errors='ignore').strip()
+            if prev == sid:
+                return
+        once_flag.parent.mkdir(parents=True, exist_ok=True)
+        once_flag.write_text(sid, encoding='utf-8')
+    except Exception:
+        pass
     play_media(ASSETS / 'startup.mp4', video=True, blocking=True)
 
 
@@ -2941,6 +2948,259 @@ class XboxGuideMenu(QtWidgets.QDialog):
         super().keyPressEvent(e)
 
 
+class GamesInlineOverlay(QtWidgets.QFrame):
+    actionTriggered = QtCore.pyqtSignal(str)
+    closed = QtCore.pyqtSignal()
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._items = []
+        self.setObjectName('games_inline_overlay')
+        self.setVisible(False)
+        self.setFocusPolicy(QtCore.Qt.StrongFocus)
+        self.setStyleSheet('''
+            QFrame#games_inline_overlay {
+                background:qlineargradient(x1:0,y1:0,x2:1,y2:1, stop:0 #edf1f5, stop:1 #bcc4cd);
+                border:2px solid rgba(235,243,250,0.9);
+                border-radius:4px;
+            }
+            QLabel#gio_title { color:#2b3440; font-size:34px; font-weight:800; }
+            QLabel#gio_hint { color:#2f3a46; font-size:14px; font-weight:700; }
+            QListWidget#gio_list {
+                background:#f7f9fb; border:1px solid #a8b1ba; color:#1f2832; outline:none;
+                font-size:19px; font-weight:700;
+            }
+            QListWidget#gio_list::item { border:1px solid #c4ccd4; padding:6px; margin:4px; min-width:190px; min-height:116px; }
+            QListWidget#gio_list::item:selected { background:#66b340; color:#ffffff; border:2px solid #2d6f23; }
+            QLabel#gio_meta { color:#455363; font-size:15px; font-weight:700; }
+            QPushButton#gio_btn {
+                background:#4ea42a; color:#fff; border:1px solid #3b7f1f; padding:7px 12px; font-size:14px; font-weight:800;
+            }
+            QPushButton#gio_btn:hover, QPushButton#gio_btn:focus { background:#3f9120; }
+        ''')
+        root = QtWidgets.QVBoxLayout(self)
+        root.setContentsMargins(10, 10, 10, 8)
+        root.setSpacing(8)
+
+        self.title = QtWidgets.QLabel('My Games')
+        self.title.setObjectName('gio_title')
+        root.addWidget(self.title, 0, QtCore.Qt.AlignLeft)
+
+        self.listw = QtWidgets.QListWidget()
+        self.listw.setObjectName('gio_list')
+        self.listw.setViewMode(QtWidgets.QListView.IconMode)
+        self.listw.setMovement(QtWidgets.QListView.Static)
+        self.listw.setResizeMode(QtWidgets.QListView.Adjust)
+        self.listw.setWrapping(True)
+        self.listw.setSpacing(6)
+        self.listw.setGridSize(QtCore.QSize(208, 132))
+        self.listw.itemActivated.connect(self._play_current)
+        self.listw.currentRowChanged.connect(self._update_meta)
+        root.addWidget(self.listw, 1)
+
+        self.meta = QtWidgets.QLabel('Select a game/app tile.')
+        self.meta.setObjectName('gio_meta')
+        root.addWidget(self.meta, 0, QtCore.Qt.AlignLeft)
+
+        row = QtWidgets.QHBoxLayout()
+        row.setSpacing(8)
+        self.play_btn = QtWidgets.QPushButton('Play / Open')
+        self.install_btn = QtWidgets.QPushButton('Install')
+        self.uninstall_btn = QtWidgets.QPushButton('Uninstall')
+        self.close_btn = QtWidgets.QPushButton('Close')
+        for b in (self.play_btn, self.install_btn, self.uninstall_btn, self.close_btn):
+            b.setObjectName('gio_btn')
+            row.addWidget(b, 0)
+        row.addStretch(1)
+        root.addLayout(row)
+
+        self.hint = QtWidgets.QLabel('A/ENTER = Open | X/SPACE = Install | Y/TAB = Uninstall | B/ESC = Back')
+        self.hint.setObjectName('gio_hint')
+        root.addWidget(self.hint, 0, QtCore.Qt.AlignLeft)
+
+        self.play_btn.clicked.connect(self._play_current)
+        self.install_btn.clicked.connect(self._install_current)
+        self.uninstall_btn.clicked.connect(self._uninstall_current)
+        self.close_btn.clicked.connect(self.close_overlay)
+
+    def set_items(self, items, title='My Games'):
+        self._items = list(items or [])
+        self.title.setText(str(title or 'My Games'))
+        self.listw.clear()
+        for item in self._items:
+            label = str(item.get('label', 'Item'))
+            it = QtWidgets.QListWidgetItem(label)
+            it.setData(QtCore.Qt.UserRole, dict(item))
+            self.listw.addItem(it)
+        if self.listw.count() > 0:
+            self.listw.setCurrentRow(0)
+        self._update_meta(self.listw.currentRow())
+
+    def _current_payload(self):
+        it = self.listw.currentItem()
+        if it is None:
+            return {}
+        data = it.data(QtCore.Qt.UserRole)
+        return data if isinstance(data, dict) else {}
+
+    def _update_meta(self, _row):
+        data = self._current_payload()
+        desc = str(data.get('desc', 'Select a game/app tile.')).strip()
+        self.meta.setText(desc or 'Select a game/app tile.')
+
+    def _play_current(self):
+        data = self._current_payload()
+        action = str(data.get('play', '')).strip()
+        if action:
+            self.actionTriggered.emit(action)
+
+    def _install_current(self):
+        data = self._current_payload()
+        action = str(data.get('install', '')).strip()
+        if action:
+            self.actionTriggered.emit(action)
+
+    def _uninstall_current(self):
+        data = self._current_payload()
+        action = str(data.get('uninstall', '')).strip()
+        if action:
+            self.actionTriggered.emit(action)
+
+    def open_overlay(self):
+        self.setVisible(True)
+        self.raise_()
+        self.activateWindow()
+        self.setFocus()
+        self.listw.setFocus()
+        effect = QtWidgets.QGraphicsOpacityEffect(self)
+        self.setGraphicsEffect(effect)
+        effect.setOpacity(0.0)
+        end_rect = self.geometry()
+        start_rect = QtCore.QRect(end_rect.x() + 20, end_rect.y(), end_rect.width(), end_rect.height())
+        self.setGeometry(start_rect)
+        grp = QtCore.QParallelAnimationGroup(self)
+        fade = QtCore.QPropertyAnimation(effect, b'opacity', self)
+        fade.setDuration(170)
+        fade.setStartValue(0.0)
+        fade.setEndValue(1.0)
+        fade.setEasingCurve(QtCore.QEasingCurve.OutCubic)
+        slide = QtCore.QPropertyAnimation(self, b'geometry', self)
+        slide.setDuration(210)
+        slide.setStartValue(start_rect)
+        slide.setEndValue(end_rect)
+        slide.setEasingCurve(QtCore.QEasingCurve.OutCubic)
+        grp.addAnimation(fade)
+        grp.addAnimation(slide)
+        grp.finished.connect(lambda: self.setGraphicsEffect(None))
+        grp.start(QtCore.QAbstractAnimation.DeleteWhenStopped)
+
+    def close_overlay(self):
+        if not self.isVisible():
+            return
+        self.setVisible(False)
+        self.closed.emit()
+
+    def keyPressEvent(self, e):
+        k = e.key()
+        if k in (QtCore.Qt.Key_Escape, QtCore.Qt.Key_Back):
+            self.close_overlay()
+            return
+        if k in (QtCore.Qt.Key_Return, QtCore.Qt.Key_Enter):
+            self._play_current()
+            return
+        if k == QtCore.Qt.Key_Space:
+            self._install_current()
+            return
+        if k == QtCore.Qt.Key_Tab:
+            self._uninstall_current()
+            return
+        super().keyPressEvent(e)
+
+
+class VirtualKeyboardDialog(QtWidgets.QDialog):
+    def __init__(self, initial='', parent=None, sfx_cb=None):
+        super().__init__(parent)
+        self._play_sfx = sfx_cb
+        self.setWindowTitle('Virtual Keyboard')
+        self.setWindowFlags(QtCore.Qt.Dialog | QtCore.Qt.FramelessWindowHint)
+        self.setModal(True)
+        self.resize(920, 420)
+        self.setStyleSheet('''
+            QDialog { background:#d2d7dc; border:2px solid #e8edf1; }
+            QLineEdit { background:#ffffff; border:1px solid #8a96a3; color:#1e2731; font-size:24px; font-weight:700; padding:8px; }
+            QListWidget { background:#eef2f5; border:1px solid #9da8b3; color:#24303b; font-size:18px; font-weight:800; outline:none; }
+            QListWidget::item { border:1px solid #c1c9d2; min-width:74px; min-height:46px; margin:4px; }
+            QListWidget::item:selected { background:#66b340; color:#fff; border:2px solid #2f6e28; }
+            QLabel { color:#2f3944; font-size:14px; font-weight:700; }
+        ''')
+        v = QtWidgets.QVBoxLayout(self)
+        v.setContentsMargins(12, 10, 12, 10)
+        v.setSpacing(8)
+        self.edit = QtWidgets.QLineEdit(str(initial or ''))
+        v.addWidget(self.edit)
+        self.keys = QtWidgets.QListWidget()
+        self.keys.setViewMode(QtWidgets.QListView.IconMode)
+        self.keys.setMovement(QtWidgets.QListView.Static)
+        self.keys.setResizeMode(QtWidgets.QListView.Adjust)
+        self.keys.setWrapping(True)
+        self.keys.setSpacing(4)
+        self.keys.setGridSize(QtCore.QSize(84, 54))
+        self.keys.itemActivated.connect(self._activate_current)
+        for token in list("1234567890QWERTYUIOPASDFGHJKLZXCVBNM") + ['-', '_', '@', '.', '/', ':', 'SPACE', 'BACK', 'CLEAR', 'DONE']:
+            self.keys.addItem(QtWidgets.QListWidgetItem(token))
+        self.keys.setCurrentRow(0)
+        v.addWidget(self.keys, 1)
+        v.addWidget(QtWidgets.QLabel('A/ENTER = Select | B/ESC = Back | X = Backspace | Y = Space'))
+
+    def text(self):
+        return self.edit.text()
+
+    def _sfx(self):
+        if callable(self._play_sfx):
+            try:
+                self._play_sfx('select')
+            except Exception:
+                pass
+
+    def _activate_current(self):
+        it = self.keys.currentItem()
+        if it is None:
+            return
+        key = str(it.text() or '')
+        self._sfx()
+        if key == 'DONE':
+            self.accept()
+            return
+        if key == 'SPACE':
+            self.edit.setText(self.edit.text() + ' ')
+            return
+        if key == 'BACK':
+            self.edit.setText(self.edit.text()[:-1])
+            return
+        if key == 'CLEAR':
+            self.edit.setText('')
+            return
+        self.edit.setText(self.edit.text() + key)
+
+    def keyPressEvent(self, e):
+        k = e.key()
+        if k in (QtCore.Qt.Key_Escape, QtCore.Qt.Key_Back):
+            self.reject()
+            return
+        if k in (QtCore.Qt.Key_Return, QtCore.Qt.Key_Enter):
+            self._activate_current()
+            return
+        if k == QtCore.Qt.Key_Space:
+            self._sfx()
+            self.edit.setText(self.edit.text() + ' ')
+            return
+        if k == QtCore.Qt.Key_Backspace:
+            self._sfx()
+            self.edit.setText(self.edit.text()[:-1])
+            return
+        super().keyPressEvent(e)
+
+
 class EscInputDialog(QtWidgets.QInputDialog):
     def keyPressEvent(self, e):
         if e.key() in (QtCore.Qt.Key_Escape, QtCore.Qt.Key_Back):
@@ -2950,8 +3210,9 @@ class EscInputDialog(QtWidgets.QInputDialog):
 
 
 class WebKioskWindow(QtWidgets.QMainWindow):
-    def __init__(self, url, parent=None):
+    def __init__(self, url, parent=None, sfx_cb=None):
         super().__init__(parent)
+        self._play_sfx = sfx_cb
         self.setWindowTitle(url)
         self.resize(1280, 720)
         self.setStyleSheet('background:#000;')
@@ -2962,10 +3223,85 @@ class WebKioskWindow(QtWidgets.QMainWindow):
         self._esc.activated.connect(self.close)
         self._back = QtWidgets.QShortcut(QtGui.QKeySequence(QtCore.Qt.Key_Back), self)
         self._back.activated.connect(self.close)
+        self._kbd = QtWidgets.QShortcut(QtGui.QKeySequence(QtCore.Qt.Key_F2), self)
+        self._kbd.activated.connect(self._open_virtual_keyboard_for_page)
+        self._kbd2 = QtWidgets.QShortcut(QtGui.QKeySequence('Ctrl+K'), self)
+        self._kbd2.activated.connect(self._open_virtual_keyboard_for_page)
+
+    def _sfx(self, name='select'):
+        if callable(self._play_sfx):
+            try:
+                self._play_sfx(name)
+            except Exception:
+                pass
+
+    def _inject_text(self, text):
+        payload = json.dumps(str(text or ''))
+        js = f"""
+(() => {{
+  const el = document.activeElement;
+  if (!el) return false;
+  const tag = (el.tagName || '').toLowerCase();
+  const tp = (el.type || '').toLowerCase();
+  const editable = el.isContentEditable || tag === 'textarea' ||
+    (tag === 'input' && !['button','submit','checkbox','radio','range','color','file','image','reset'].includes(tp));
+  if (!editable) return false;
+  const txt = {payload};
+  if (el.isContentEditable) {{
+    try {{ document.execCommand('insertText', false, txt); }} catch (_e) {{ el.textContent = (el.textContent || '') + txt; }}
+  }} else {{
+    el.value = (el.value || '') + txt;
+  }}
+  el.dispatchEvent(new Event('input', {{ bubbles: true }}));
+  el.dispatchEvent(new Event('change', {{ bubbles: true }}));
+  return true;
+}})();
+"""
+        self.view.page().runJavaScript(js)
+
+    def _open_virtual_keyboard_for_page(self):
+        self._sfx('open')
+        d = VirtualKeyboardDialog('', self, sfx_cb=self._play_sfx)
+        if d.exec_() == QtWidgets.QDialog.Accepted:
+            txt = d.text()
+            if txt:
+                self._inject_text(txt)
+                self._sfx('select')
+            return
+        self._sfx('back')
+
+    def _open_keyboard_if_editable(self):
+        probe = """
+(() => {
+  const el = document.activeElement;
+  if (!el) return false;
+  const tag = (el.tagName || '').toLowerCase();
+  const tp = (el.type || '').toLowerCase();
+  return !!(el.isContentEditable || tag === 'textarea' ||
+    (tag === 'input' && !['button','submit','checkbox','radio','range','color','file','image','reset'].includes(tp)));
+})();
+"""
+        def cb(editable):
+            if bool(editable):
+                self._open_virtual_keyboard_for_page()
+            else:
+                self._forward_enter_to_view()
+        self.view.page().runJavaScript(probe, cb)
+
+    def _forward_enter_to_view(self):
+        self.view.setFocus()
+        press = QtGui.QKeyEvent(QtCore.QEvent.KeyPress, QtCore.Qt.Key_Return, QtCore.Qt.NoModifier)
+        rel = QtGui.QKeyEvent(QtCore.QEvent.KeyRelease, QtCore.Qt.Key_Return, QtCore.Qt.NoModifier)
+        QtWidgets.QApplication.postEvent(self.view, press)
+        QtWidgets.QApplication.postEvent(self.view, rel)
 
     def keyPressEvent(self, e):
-        if e.key() in (QtCore.Qt.Key_Escape, QtCore.Qt.Key_Back):
+        k = e.key()
+        if k in (QtCore.Qt.Key_Escape, QtCore.Qt.Key_Back):
             self.close()
+            return
+        if k in (QtCore.Qt.Key_Return, QtCore.Qt.Key_Enter):
+            self._open_keyboard_if_editable()
             return
         super().keyPressEvent(e)
 
@@ -3408,6 +3744,7 @@ class Dashboard(QtWidgets.QMainWindow):
         self._achievement_toast = None
         self._startup_update_checked = False
         self._mandatory_update_in_progress = False
+        self._games_inline = None
         self.sfx = {
             'hover': 'hover.mp3',
             'open': 'open.mp3',
@@ -3427,7 +3764,7 @@ class Dashboard(QtWidgets.QMainWindow):
         self._build()
         self._setup_achievement_toast()
         try:
-            ensure_achievements(660)
+            ensure_achievements(5000)
         except Exception:
             pass
         self._apply_responsive_layout()
@@ -3483,15 +3820,22 @@ class Dashboard(QtWidgets.QMainWindow):
 
         outer.addWidget(stage)
 
+        self._games_inline = GamesInlineOverlay(stage)
+        self._games_inline.actionTriggered.connect(self.handle_action)
+        self._games_inline.closed.connect(lambda: self._play_sfx('back'))
+        self._games_inline.hide()
+
         self.setStyleSheet('''
             QMainWindow {
-                background:qlineargradient(x1:0.5,y1:0.0,x2:0.5,y2:1.0, stop:0 #31353c, stop:0.58 #6f747c, stop:1 #d8dee4);
+                background:qlineargradient(x1:0.5,y1:0.0,x2:0.5,y2:1.0, stop:0 #2f343b, stop:0.45 #5f656e, stop:0.78 #c5ccd4, stop:1 #edf1f5);
             }
             QFrame#stage {
-                background: rgba(255,255,255,0.08);
+                background: rgba(255,255,255,0.06);
                 border-radius: 2px;
             }
         ''')
+        self.setCursor(QtGui.QCursor(QtCore.Qt.BlankCursor))
+        root.setCursor(QtGui.QCursor(QtCore.Qt.BlankCursor))
 
     def _compute_ui_metrics(self):
         w = max(800, self.width())
@@ -3536,6 +3880,21 @@ class Dashboard(QtWidgets.QMainWindow):
         if self._achievement_toast is not None:
             self._achievement_toast.apply_scale(scale, compact)
             self._achievement_toast.reposition()
+        self._layout_overlays()
+
+    def _layout_overlays(self):
+        if self._games_inline is None:
+            return
+        parent = self._games_inline.parentWidget()
+        if parent is None:
+            return
+        pw = max(640, parent.width())
+        ph = max(420, parent.height())
+        w = int(pw * 0.74)
+        h = int(ph * 0.66)
+        x = int((pw - w) / 2)
+        y = int(max(80, ph * 0.18))
+        self._games_inline.setGeometry(x, y, w, h)
 
     def showEvent(self, e):
         super().showEvent(e)
@@ -3706,45 +4065,76 @@ class Dashboard(QtWidgets.QMainWindow):
 
     def _open_games_hub_menu(self):
         self._play_sfx('open')
+        if self._games_inline is None:
+            return
         items = [
             {
                 'label': 'My Games',
-                'action': 'My Games',
-                'desc': 'Browse your installed games, minigames and integrations.',
-                'cards': ['Runner', 'Casino', 'FNAE', 'Gem Match'],
+                'play': 'My Games',
+                'install': 'Games Marketplace',
+                'uninstall': '',
+                'desc': 'Installed games and quick launch library.',
+            },
+            {
+                'label': 'FNAE',
+                'play': 'FNAE',
+                'install': 'FNAE',
+                'uninstall': 'Uninstall FNAE',
+                'desc': 'Five Nights At Epstein\'s: install, play or uninstall.',
+            },
+            {
+                'label': 'Steam',
+                'play': 'Steam',
+                'install': 'Install Steam',
+                'uninstall': '',
+                'desc': 'Steam integration and launcher.',
+            },
+            {
+                'label': 'RetroArch',
+                'play': 'RetroArch',
+                'install': 'Install RetroArch',
+                'uninstall': '',
+                'desc': 'RetroArch integration for local ROM libraries.',
+            },
+            {
+                'label': 'Gem Match',
+                'play': 'Gem Match',
+                'install': '',
+                'uninstall': '',
+                'desc': 'Arcade match-3 game.',
+            },
+            {
+                'label': 'Runner',
+                'play': 'Runner',
+                'install': '',
+                'uninstall': '',
+                'desc': 'Arcade runner game.',
+            },
+            {
+                'label': 'Casino',
+                'play': 'Casino',
+                'install': '',
+                'uninstall': '',
+                'desc': 'Casino mini game.',
             },
             {
                 'label': 'Games Marketplace',
-                'action': 'Games Marketplace',
-                'desc': 'Open the modern Xbox-style store with rotating catalog.',
-                'cards': ['Store', 'Arcade', 'Accessories', 'Themes'],
-            },
-            {
-                'label': 'Recently Played',
-                'action': 'Recently Played',
-                'desc': 'See your latest launches and quick-return shortcuts.',
-                'cards': ['Recent', 'Last Session', 'Favorites', 'Continue'],
-            },
-            {
-                'label': 'Arcade Picks',
-                'action': 'Arcade Picks',
-                'desc': 'Open lightweight arcade games and classic experiences.',
-                'cards': ['Gem Match', 'Runner', 'Casino', 'Retro'],
+                'play': 'Games Marketplace',
+                'install': '',
+                'uninstall': '',
+                'desc': 'Open store catalog with game/apps rotations.',
             },
             {
                 'label': 'Disc & Local Media',
-                'action': 'Disc & Local Media',
-                'desc': 'Scan DVD/USB media and launch discovered game files.',
-                'cards': ['Open Tray', 'USB Scan', 'ISO', 'AppImage'],
+                'play': 'Disc & Local Media',
+                'install': '',
+                'uninstall': '',
+                'desc': 'Scan tray/USB and launch local media games.',
             },
         ]
-        d = GamesHubMenu(items, self)
-        if d.exec_() == QtWidgets.QDialog.Accepted:
-            action = d.selected_action()
-            if action:
-                self.handle_action(action)
-        else:
-            self._play_sfx('back')
+        self._games_inline.set_items(items, title='My Games')
+        self._layout_overlays()
+        self._games_inline.open_overlay()
 
     def _extract_json_blob(self, text):
         raw = str(text or '').strip()
@@ -3922,7 +4312,7 @@ class Dashboard(QtWidgets.QMainWindow):
     def _open_url(self, url):
         if QtWebEngineWidgets is not None:
             try:
-                w = WebKioskWindow(url, self)
+                w = WebKioskWindow(url, self, sfx_cb=self._play_sfx)
                 self._web_windows.append(w)
                 w.showFullScreen()
                 self._play_sfx('open')
@@ -4070,13 +4460,11 @@ class Dashboard(QtWidgets.QMainWindow):
         return d.intValue(), ok
 
     def _input_text(self, title, label, text=''):
-        d = EscInputDialog(self)
+        d = VirtualKeyboardDialog(text, self, sfx_cb=self._play_sfx)
         d.setWindowTitle(title)
-        d.setLabelText(label)
-        d.setInputMode(QtWidgets.QInputDialog.TextInput)
-        d.setTextValue(text)
-        ok = d.exec_() == QtWidgets.QDialog.Accepted
-        return d.textValue(), ok
+        if d.exec_() == QtWidgets.QDialog.Accepted:
+            return d.text(), True
+        return str(text or ''), False
 
     def _input_item(self, title, label, items, current=0):
         d = EscInputDialog(self)
@@ -4458,6 +4846,10 @@ class Dashboard(QtWidgets.QMainWindow):
             self._run('/bin/sh', ['-c', f'{xui}/bin/xui_gem_match.sh'])
         elif action in ('FNAE', "Five Night's At Epstein's", "Five Nights At Epstein's"):
             self._run('/bin/sh', ['-c', f'{xui}/bin/xui_run_fnae.sh'])
+        elif action == 'Uninstall FNAE':
+            if self._ask_yes_no('FNAE', 'Uninstall Five Nights At Epstein\'s from local XUI apps folder?'):
+                subprocess.getoutput('/bin/sh -c "rm -rf $HOME/.xui/apps/fnae $HOME/.xui/data/fnae_paths.json"')
+                self._msg('FNAE', 'FNAE files removed from local install.')
         elif action == 'Steam':
             self._launch_platform('steam')
         elif action in ('Store', 'Avatar Store'):
@@ -4523,7 +4915,7 @@ class Dashboard(QtWidgets.QMainWindow):
                 'Logs Viewer', 'JSON Browser', 'Archive Manager', 'Hash Tool', 'Ping Test',
                 'Docker Status', 'VM Status', 'Open Notes', 'App Launcher', 'Service Manager',
                 'Developer Tools', 'Scan Media Games', 'Install Wine Runtime', 'Games Integrations',
-                'Web Browser', 'FNAE', 'Gem Match', 'Close Active App'
+                'Web Browser', 'Virtual Keyboard', 'FNAE', 'Gem Match', 'Close Active App'
             ])
         elif action == 'Games Integrations':
             self._menu('Games Integrations', [
@@ -4634,6 +5026,16 @@ class Dashboard(QtWidgets.QMainWindow):
             self._run('/bin/sh', ['-c', f'{xui}/bin/xui_calc.sh'])
         elif action == 'App Launcher':
             self._run('/bin/sh', ['-c', f'{xui}/bin/xui_app_launcher.sh'])
+        elif action == 'Virtual Keyboard':
+            d = VirtualKeyboardDialog('', self, sfx_cb=self._play_sfx)
+            if d.exec_() == QtWidgets.QDialog.Accepted:
+                txt = d.text()
+                if txt:
+                    qtxt = shlex.quote(txt)
+                    subprocess.getoutput(f'/bin/sh -c "printf %s {qtxt} | xclip -selection clipboard 2>/dev/null || true"')
+                    self._msg('Virtual Keyboard', f'Text captured ({len(txt)} chars) and copied to clipboard.')
+                else:
+                    self._msg('Virtual Keyboard', 'No text entered.')
         elif action == 'Scan Media Games':
             self._run_terminal(f'"{xui}/bin/xui_scan_media_games.sh"')
         elif action == 'Install Wine Runtime':
@@ -4747,6 +5149,10 @@ class Dashboard(QtWidgets.QMainWindow):
 
     def keyPressEvent(self, e):
         k = e.key()
+        if self._games_inline is not None and self._games_inline.isVisible():
+            if k in (QtCore.Qt.Key_Escape, QtCore.Qt.Key_Back):
+                self._games_inline.close_overlay()
+                return
         if k in (QtCore.Qt.Key_Escape, QtCore.Qt.Key_Back):
             self._play_sfx('back')
             if self.focus_area in ('left', 'right'):
@@ -4951,8 +5357,8 @@ Name=XUI Dashboard
 Exec=$BIN_DIR/xui_startup_and_dashboard.sh
 Terminal=false
 StartupNotify=false
-X-GNOME-Autostart-enabled=true
-Hidden=false
+X-GNOME-Autostart-enabled=false
+Hidden=true
 DESK
   info "Wrote autostart desktop to $AUTOSTART_DIR/xui-dashboard.desktop"
 }
@@ -5924,7 +6330,7 @@ STORE_FILE = DATA_HOME / 'store.json'
 MISSIONS_FILE = DATA_HOME / 'missions.json'
 INVENTORY_FILE = DATA_HOME / 'inventory.json'
 ACHIEVEMENTS_FILE = DATA_HOME / 'achievements.json'
-ACHIEVEMENTS_MIN = 660
+ACHIEVEMENTS_MIN = 5000
 
 
 def _safe_read(path, default):
@@ -6287,7 +6693,7 @@ def ensure_achievements(min_count=ACHIEVEMENTS_MIN):
     if not isinstance(stats, dict):
         stats = {}
     state = {
-        'version': 'xui-660',
+        'version': 'xui-5000',
         'updated': int(time.time()),
         'items': catalog,
         'unlocked': clean_unlocked,
@@ -6968,7 +7374,7 @@ from xui_game_lib import (
 DATA_HOME = Path.home() / '.xui' / 'data'
 STORE_FILE = DATA_HOME / 'store.json'
 XUI_BIN = Path.home() / '.xui' / 'bin'
-DAILY_ACTIVE_COUNT = 280
+DAILY_ACTIVE_COUNT = 360
 ALWAYS_VISIBLE_IDS = {
     'game_fnae_fangame',
     'minigame_bejeweled_xui',
@@ -7094,6 +7500,30 @@ def _curated_items():
             'launch': str(XUI_BIN / 'xui_heroic.sh'),
         },
         {
+            'id': 'hub_legal_steam_free',
+            'name': 'Steam Free-to-Play Hub',
+            'price': 0,
+            'category': 'Games',
+            'desc': 'Browse legal free-to-play titles from Steam.',
+            'launch': str(XUI_BIN / 'xui_browser.sh') + ' --hub https://store.steampowered.com/genre/Free%20to%20Play/',
+        },
+        {
+            'id': 'hub_legal_itch',
+            'name': 'Itch.io Free Games Hub',
+            'price': 0,
+            'category': 'Games',
+            'desc': 'Browse legal indie free games on itch.io.',
+            'launch': str(XUI_BIN / 'xui_browser.sh') + ' --hub https://itch.io/games/free',
+        },
+        {
+            'id': 'hub_legal_flathub_games',
+            'name': 'Flathub Games Hub',
+            'price': 0,
+            'category': 'Apps',
+            'desc': 'Discover legal open-source games and apps on Flathub.',
+            'launch': str(XUI_BIN / 'xui_browser.sh') + ' --hub https://flathub.org/apps/collection/popular/1',
+        },
+        {
             'id': 'acc_avatar_pack',
             'name': 'Avatar Pack Premium',
             'price': 35,
@@ -7146,6 +7576,7 @@ def _filler_items(current_ids, target_count=520):
             'price': price,
             'category': cat,
             'desc': f'{cat} item auto-generated for XUI store catalog.',
+            'launch': str(XUI_BIN / 'xui_browser.sh') + f' --hub https://www.xbox.com/en-US/search?q={rid}',
         })
         idx += 1
     return out
@@ -7181,7 +7612,7 @@ def _daily_rotated_items(all_items, keep_ids=None, active_count=DAILY_ACTIVE_COU
     return active, day_key
 
 
-def ensure_catalog_minimum(min_count=520):
+def ensure_catalog_minimum(min_count=620):
     data = load_store()
     if not isinstance(data, dict):
         data = {}
@@ -7216,7 +7647,7 @@ def ensure_catalog_minimum(min_count=520):
             items.append(item)
     active_items, day_key = _daily_rotated_items(items, ALWAYS_VISIBLE_IDS, DAILY_ACTIVE_COUNT)
     out = {
-        'catalog_version': 'xui-500',
+        'catalog_version': 'xui-620',
         'rotation_day': day_key,
         'rotation_active_count': len(active_items),
         'rotation_total_count': len(items),
@@ -7386,7 +7817,7 @@ class StoreWindow(QtWidgets.QMainWindow):
         self.reflow_timer.timeout.connect(self._rebuild_tile_grid)
         self._build()
         try:
-            ensure_achievements(660)
+            ensure_achievements(5000)
         except Exception:
             pass
         self.reload()
@@ -7836,7 +8267,7 @@ class StoreWindow(QtWidgets.QMainWindow):
         self.launch_btn.setEnabled(can_launch)
 
     def reload(self, msg=''):
-        self.store_data = ensure_catalog_minimum(520)
+        self.store_data = ensure_catalog_minimum(620)
         self.inventory = load_inventory()
         self._refresh_tiles()
         active_n = len(self.store_data.get('items', []))
@@ -7983,15 +8414,79 @@ class StoreWindow(QtWidgets.QMainWindow):
         super().resizeEvent(event)
         self.reflow_timer.start(90)
 
+    def _selected_index(self):
+        sid = str(self.selected_item_id or '').strip()
+        for i, item in enumerate(self.filtered_rows):
+            if str(item.get('id', '')).strip() == sid:
+                return i
+        return 0 if self.filtered_rows else -1
+
+    def _set_selected_index(self, idx):
+        if not self.filtered_rows:
+            self.selected_item_id = ''
+            self._apply_selection()
+            return
+        idx = max(0, min(int(idx), len(self.filtered_rows) - 1))
+        self.selected_item_id = str(self.filtered_rows[idx].get('id', '')).strip()
+        self._apply_selection()
+        self._scroll_to_selected()
+
+    def _scroll_to_selected(self):
+        sid = str(self.selected_item_id or '').strip()
+        if not sid:
+            return
+        for tile in self.tile_widgets:
+            if str(tile.item.get('id', '')).strip() == sid:
+                self.scroll.ensureWidgetVisible(tile, xMargin=20, yMargin=20)
+                break
+
+    def _move_selection(self, dr=0, dc=0):
+        if not self.filtered_rows:
+            return
+        cols = self._tile_columns()
+        idx = self._selected_index()
+        if idx < 0:
+            idx = 0
+        r = idx // cols
+        c = idx % cols
+        nr = max(0, r + int(dr))
+        nc = max(0, c + int(dc))
+        nidx = nr * cols + nc
+        if nidx >= len(self.filtered_rows):
+            if dr != 0:
+                nidx = len(self.filtered_rows) - 1
+            else:
+                nidx = min(len(self.filtered_rows) - 1, r * cols + max(0, min(cols - 1, nc)))
+        self._set_selected_index(nidx)
+
     def keyPressEvent(self, e):
-        if e.key() in (QtCore.Qt.Key_Escape, QtCore.Qt.Key_Back):
+        k = e.key()
+        if k in (QtCore.Qt.Key_Escape, QtCore.Qt.Key_Back):
             self.close()
             return
-        if e.key() == QtCore.Qt.Key_F5:
+        if k == QtCore.Qt.Key_F5:
             self.reload('Marketplace refreshed.')
             return
-        if e.key() in (QtCore.Qt.Key_Return, QtCore.Qt.Key_Enter):
+        if k in (QtCore.Qt.Key_Left,):
+            self._move_selection(0, -1)
+            return
+        if k in (QtCore.Qt.Key_Right,):
+            self._move_selection(0, 1)
+            return
+        if k in (QtCore.Qt.Key_Up,):
+            self._move_selection(-1, 0)
+            return
+        if k in (QtCore.Qt.Key_Down,):
+            self._move_selection(1, 0)
+            return
+        if k in (QtCore.Qt.Key_Return, QtCore.Qt.Key_Enter):
             self.launch_selected()
+            return
+        if k == QtCore.Qt.Key_Space:
+            self.buy_selected()
+            return
+        if k == QtCore.Qt.Key_Tab:
+            self.show_inventory()
             return
         super().keyPressEvent(e)
 
@@ -8613,8 +9108,10 @@ write_systemd_and_autostart(){
   cat > "$SYSTEMD_USER_DIR/xui-dashboard.service" <<UNIT
 [Unit]
 Description=XUI Dashboard (user)
-
-After=graphical-session.target
+DefaultDependencies=no
+After=graphical-session-pre.target
+Before=graphical-session.target
+PartOf=graphical-session.target
 
 [Service]
 Type=simple
@@ -8623,9 +9120,16 @@ ExecStart=%h/.xui/bin/xui_startup_and_dashboard.sh
 Environment=DISPLAY=:0
 Environment=XDG_RUNTIME_DIR=/run/user/%U
 Restart=on-failure
+RestartSec=0.5
+Nice=-8
+IOSchedulingClass=best-effort
+IOSchedulingPriority=0
+OOMScoreAdjust=-700
+CPUSchedulingPolicy=other
+Environment=XUI_SKIP_STARTUP_AUDIO=1
 
 [Install]
-WantedBy=default.target
+WantedBy=graphical-session.target
 UNIT
 
   cat > "$SYSTEMD_USER_DIR/xui-joy.service" <<UNIT
@@ -8936,7 +9440,7 @@ exec "$HOME/.xui/bin/xui_startup_and_dashboard.sh"
 BASH
   chmod +x "$BIN_DIR/xui_start.sh"
 
-  cat > "$AUTOSTART_DIR/xui-dashboard.desktop" <<DESK
+cat > "$AUTOSTART_DIR/xui-dashboard.desktop" <<DESK
 [Desktop Entry]
 Type=Application
 Name=XUI Dashboard
@@ -8944,8 +9448,8 @@ Exec=$BIN_DIR/xui_startup_and_dashboard.sh
 Icon=$ASSETS_DIR/logo.png
 Terminal=false
 StartupNotify=false
-X-GNOME-Autostart-enabled=true
-Hidden=false
+X-GNOME-Autostart-enabled=false
+Hidden=true
 DESK
 
 # Ensure assets/logo.png exists: prefer installer-provided logo in script dir, else try to generate a placeholder with Pillow
@@ -9135,7 +9639,7 @@ PY
 info "Wrote $ASSETS_DIR/manifest.json"
 
 # Ensure applogo and bootlogo are present in assets (already handled above if provided),
-# and create a startup wrapper that will play startup.mp3 & startup.mp4 and show bootlogo.png if needed
+# and create a startup wrapper that plays startup.mp4 once before dashboard.
 mkdir -p "$BIN_DIR"
 cat > "$BIN_DIR/xui_startup_and_dashboard.sh" <<'SH'
 #!/usr/bin/env bash
@@ -9185,33 +9689,6 @@ if [ "${XUI_FORCE_SETUP:-0}" = "1" ] || [ ! -s "$SETUP_STATE" ]; then
         warn "Setup wizard not found: $SETUP_SCRIPT"
     fi
 fi
-
-# Helper to start audio in background using available players
-start_audio_bg(){
-    local file="$1"
-    if [ ! -f "$file" ]; then return 1; fi
-    if command -v mpv >/dev/null 2>&1; then
-        mpv --no-terminal --really-quiet "$file" &
-        echo $!
-    elif command -v ffplay >/dev/null 2>&1; then
-        ffplay -nodisp -autoexit -loglevel quiet "$file" &
-        echo $!
-    elif command -v paplay >/dev/null 2>&1; then
-        paplay "$file" &
-        echo $!
-    elif command -v aplay >/dev/null 2>&1; then
-        # aplay is blocking, so run in background
-        aplay "$file" &
-        echo $!
-    elif command -v ffmpeg >/dev/null 2>&1; then
-        # use ffmpeg to play audio via ffplay-like behaviour
-        ffmpeg -hide_banner -loglevel error -i "$file" -f alsa default &
-        echo $!
-    else
-        warn "No compatible audio player found for $file"
-        return 1
-    fi
-}
 
 # Helper to play video (blocking) using mpv or ffplay
 play_video(){
@@ -9265,41 +9742,10 @@ PY
     fi
 }
 
-# Start startup audio in background if available
-startup_audio_pid=0
-if [ -f "$ASSETS_DIR/startup.mp3" ]; then
-    pid=$(start_audio_bg "$ASSETS_DIR/startup.mp3" || true)
-    startup_audio_pid=${pid:-0}
-    if [ "$startup_audio_pid" -ne 0 ]; then
-        info "Started startup audio (pid=$startup_audio_pid)"
-    fi
-fi
-
 # Play startup video (blocking) if present
 if [ -f "$ASSETS_DIR/startup.mp4" ]; then
     info "Playing startup video"
     play_video "$ASSETS_DIR/startup.mp4" || true
-fi
-
-# If the audio is still running after the video ends, show bootlogo.png until audio stops
-if [ "$startup_audio_pid" -ne 0 ] && kill -0 "$startup_audio_pid" >/dev/null 2>&1; then
-    if [ -f "$ASSETS_DIR/bootlogo.png" ]; then
-        info "Displaying bootlogo while audio finishes"
-        img_pid=$(show_image_blocking_bg "$ASSETS_DIR/bootlogo.png" || true)
-        # Poll until audio process exits
-        while kill -0 "$startup_audio_pid" >/dev/null 2>&1; do
-            sleep 0.5
-        done
-        # kill image display
-        if [ -n "${img_pid:-}" ] && kill -0 "$img_pid" >/dev/null 2>&1; then
-            kill "$img_pid" || true
-        fi
-    else
-        # no bootlogo available; just wait for audio to finish
-        while kill -0 "$startup_audio_pid" >/dev/null 2>&1; do
-            sleep 0.5
-        done
-    fi
 fi
 
 # Finally start the dashboard
@@ -9309,8 +9755,10 @@ if [ ! -f "$DASH_SCRIPT" ]; then
     exit 1
 fi
 if [ -x "$PY_RUNNER" ]; then
+    export XUI_SKIP_STARTUP_VIDEO=1
     exec "$PY_RUNNER" "$DASH_SCRIPT"
 fi
+export XUI_SKIP_STARTUP_VIDEO=1
 exec python3 "$DASH_SCRIPT"
 SH
 chmod +x "$BIN_DIR/xui_startup_and_dashboard.sh"
@@ -9322,10 +9770,7 @@ if [ ! -f "$ASSETS_DIR/startup.mp4" ] && command -v ffmpeg >/dev/null 2>&1 && [ 
     ffmpeg -y -loop 1 -i "$ASSETS_DIR/logo.png" -c:v libx264 -t 3 -pix_fmt yuv420p "$ASSETS_DIR/startup.mp4" >/dev/null 2>&1 || warn "ffmpeg failed to generate startup.mp4"
 fi
 
-if [ ! -f "$ASSETS_DIR/startup.mp3" ] && command -v ffmpeg >/dev/null 2>&1; then
-    info "Generating $ASSETS_DIR/startup.mp3 (3s sine tone)"
-    ffmpeg -y -f lavfi -i "sine=frequency=440:duration=3" -c:a libmp3lame -q:a 4 "$ASSETS_DIR/startup.mp3" >/dev/null 2>&1 || warn "ffmpeg failed to generate startup.mp3"
-fi
+# startup.mp3 is intentionally not auto-generated. Startup uses video only.
 }
 
 # Write embedded enable-autostart helper into $BIN_DIR
@@ -9359,8 +9804,8 @@ Name=XUI Dashboard
 Comment=Start XUI fullscreen dashboard
 Exec=$START_WRAPPER
 Terminal=false
-X-GNOME-Autostart-enabled=true
-Hidden=false
+X-GNOME-Autostart-enabled=false
+Hidden=true
 NoDisplay=false
 Categories=Utility;
 EOF
@@ -9369,31 +9814,35 @@ EOF
 cat > "$SYSTEMD_USER_DIR/$SERVICE_NAME" <<EOF
 [Unit]
 Description=XUI GUI Dashboard (user service)
-After=graphical-session.target
+DefaultDependencies=no
+After=graphical-session-pre.target
+Before=graphical-session.target
+PartOf=graphical-session.target
 
 [Service]
 Type=simple
 ExecStart=$START_WRAPPER
 Restart=on-failure
+RestartSec=0.5
+Nice=-8
+IOSchedulingClass=best-effort
+IOSchedulingPriority=0
+OOMScoreAdjust=-700
 Environment=DISPLAY=:0
 Environment=XDG_RUNTIME_DIR=$RUNTIME_DIR
+Environment=XUI_SKIP_STARTUP_AUDIO=1
 
 [Install]
-WantedBy=default.target
+WantedBy=graphical-session.target
 EOF
 
 OPENBOX_FILE="$HOME/.config/openbox/autostart"
 XPROFILE_FILE="$HOME/.xprofile"
-OB_LINE='[ -x "$HOME/.xui/bin/xui_startup_and_dashboard.sh" ] && "$HOME/.xui/bin/xui_startup_and_dashboard.sh" >/dev/null 2>&1 &'
-XP_LINE='[ -x "$HOME/.xui/bin/xui_startup_and_dashboard.sh" ] && "$HOME/.xui/bin/xui_startup_and_dashboard.sh" >/dev/null 2>&1 &'
 mkdir -p "$(dirname "$OPENBOX_FILE")"
 touch "$OPENBOX_FILE" "$XPROFILE_FILE"
-if ! grep -Fq 'xui_startup_and_dashboard.sh' "$OPENBOX_FILE" 2>/dev/null; then
-    printf '\n# XUI dashboard autostart\n%s\n' "$OB_LINE" >> "$OPENBOX_FILE"
-fi
-if ! grep -Fq 'xui_startup_and_dashboard.sh' "$XPROFILE_FILE" 2>/dev/null; then
-    printf '\n# XUI dashboard autostart\n%s\n' "$XP_LINE" >> "$XPROFILE_FILE"
-fi
+# Remove legacy duplicate launch hooks to avoid startup double-run.
+sed -i '/xui_startup_and_dashboard.sh/d' "$OPENBOX_FILE" 2>/dev/null || true
+sed -i '/xui_startup_and_dashboard.sh/d' "$XPROFILE_FILE" 2>/dev/null || true
 
 # Reload user systemd and enable service
 if command -v systemctl >/dev/null 2>&1; then
@@ -9402,14 +9851,13 @@ if command -v systemctl >/dev/null 2>&1; then
         echo "Failed to enable systemd user service; you can enable it with: systemctl --user enable --now $SERVICE_NAME"
     }
 else
-    echo "systemctl not found; using desktop/openbox/xprofile autostart only."
+    echo "systemctl not found; enable ~/.config/autostart/xui-dashboard.desktop manually."
 fi
 
 # Feedback
 echo "Installed autostart .desktop to $AUTOSTART_DIR/$DESKTOP_FILE_NAME"
 echo "Installed systemd user unit to $SYSTEMD_USER_DIR/$SERVICE_NAME (enabled)."
-echo "Installed Openbox autostart hook to $OPENBOX_FILE"
-echo "Installed X profile autostart hook to $XPROFILE_FILE"
+echo "Cleaned legacy Openbox/X profile startup hooks to prevent duplicate launches."
 
 echo "Note: systemd user services run after you log in. If you want the GUI before login, configure auto-login or use a display-manager-level autostart."
 BASH
@@ -10188,11 +10636,85 @@ def normalize_url(text):
     return raw
 
 
+class VirtualKeyboardDialog(QtWidgets.QDialog):
+    def __init__(self, initial='', parent=None):
+        super().__init__(parent)
+        self.setWindowTitle('Virtual Keyboard')
+        self.setWindowFlags(QtCore.Qt.Dialog | QtCore.Qt.FramelessWindowHint)
+        self.setModal(True)
+        self.resize(900, 420)
+        self.setStyleSheet('''
+            QDialog { background:#d2d7dc; border:2px solid #e8edf1; }
+            QLineEdit { background:#ffffff; border:1px solid #8a96a3; color:#1e2731; font-size:23px; font-weight:700; padding:8px; }
+            QListWidget { background:#eef2f5; border:1px solid #9da8b3; color:#24303b; font-size:17px; font-weight:800; outline:none; }
+            QListWidget::item { border:1px solid #c1c9d2; min-width:72px; min-height:44px; margin:3px; }
+            QListWidget::item:selected { background:#66b340; color:#fff; border:2px solid #2f6e28; }
+            QLabel { color:#2f3944; font-size:14px; font-weight:700; }
+        ''')
+        v = QtWidgets.QVBoxLayout(self)
+        v.setContentsMargins(12, 10, 12, 10)
+        v.setSpacing(8)
+        self.edit = QtWidgets.QLineEdit(str(initial or ''))
+        v.addWidget(self.edit)
+        self.keys = QtWidgets.QListWidget()
+        self.keys.setViewMode(QtWidgets.QListView.IconMode)
+        self.keys.setMovement(QtWidgets.QListView.Static)
+        self.keys.setResizeMode(QtWidgets.QListView.Adjust)
+        self.keys.setWrapping(True)
+        self.keys.setSpacing(4)
+        self.keys.setGridSize(QtCore.QSize(84, 54))
+        self.keys.itemActivated.connect(self._activate_current)
+        for token in list("1234567890QWERTYUIOPASDFGHJKLZXCVBNM") + ['-', '_', '@', '.', '/', ':', 'SPACE', 'BACK', 'CLEAR', 'DONE']:
+            self.keys.addItem(QtWidgets.QListWidgetItem(token))
+        self.keys.setCurrentRow(0)
+        v.addWidget(self.keys, 1)
+        v.addWidget(QtWidgets.QLabel('A/ENTER = Select | B/ESC = Back | X = Backspace | Y = Space'))
+
+    def text(self):
+        return self.edit.text()
+
+    def _activate_current(self):
+        it = self.keys.currentItem()
+        if it is None:
+            return
+        key = str(it.text() or '')
+        if key == 'DONE':
+            self.accept()
+            return
+        if key == 'SPACE':
+            self.edit.setText(self.edit.text() + ' ')
+            return
+        if key == 'BACK':
+            self.edit.setText(self.edit.text()[:-1])
+            return
+        if key == 'CLEAR':
+            self.edit.setText('')
+            return
+        self.edit.setText(self.edit.text() + key)
+
+    def keyPressEvent(self, e):
+        k = e.key()
+        if k in (QtCore.Qt.Key_Escape, QtCore.Qt.Key_Back):
+            self.reject()
+            return
+        if k in (QtCore.Qt.Key_Return, QtCore.Qt.Key_Enter):
+            self._activate_current()
+            return
+        if k == QtCore.Qt.Key_Space:
+            self.edit.setText(self.edit.text() + ' ')
+            return
+        if k == QtCore.Qt.Key_Backspace:
+            self.edit.setText(self.edit.text()[:-1])
+            return
+        super().keyPressEvent(e)
+
+
 class WebHub(QtWidgets.QMainWindow):
     def __init__(self, url='https://www.xbox.com', kiosk=False):
         super().__init__()
         self.kiosk = bool(kiosk)
         self.pending_url = normalize_url(url)
+        self._kbd_opening = False
         self.setWindowTitle('XUI Web Hub')
         self.resize(1366, 768)
         self._build()
@@ -10278,6 +10800,7 @@ class WebHub(QtWidgets.QMainWindow):
         self.addr = QtWidgets.QLineEdit()
         self.addr.setObjectName('addr')
         self.addr.setPlaceholderText('https://...')
+        self.addr.installEventFilter(self)
         row.addWidget(self.addr, 1)
         t.addLayout(row)
         self.bar = QtWidgets.QProgressBar()
@@ -10319,8 +10842,74 @@ class WebHub(QtWidgets.QMainWindow):
         QtWidgets.QShortcut(QtGui.QKeySequence(QtCore.Qt.Key_Back), self, activated=self.close)
         QtWidgets.QShortcut(QtGui.QKeySequence('Alt+Left'), self, activated=self._go_back)
         QtWidgets.QShortcut(QtGui.QKeySequence('Alt+Right'), self, activated=self._go_forward)
-        QtWidgets.QShortcut(QtGui.QKeySequence('Ctrl+L'), self, activated=lambda: self.addr.setFocus())
+        QtWidgets.QShortcut(QtGui.QKeySequence('Ctrl+L'), self, activated=self._focus_addr_with_keyboard)
         QtWidgets.QShortcut(QtGui.QKeySequence(QtCore.Qt.Key_F1), self, activated=self._show_hub)
+        QtWidgets.QShortcut(QtGui.QKeySequence(QtCore.Qt.Key_F2), self, activated=self._open_virtual_keyboard_contextual)
+        QtWidgets.QShortcut(QtGui.QKeySequence('Ctrl+K'), self, activated=self._open_virtual_keyboard_contextual)
+
+    def _focus_addr_with_keyboard(self):
+        self.addr.setFocus()
+        self._open_virtual_keyboard_for_addr()
+
+    def _open_virtual_keyboard_for_addr(self):
+        if self._kbd_opening:
+            return
+        self._kbd_opening = True
+        try:
+            d = VirtualKeyboardDialog(self.addr.text(), self)
+            if d.exec_() == QtWidgets.QDialog.Accepted:
+                txt = d.text()
+                self.addr.setText(txt)
+                if txt.strip():
+                    self._open_from_bar()
+        finally:
+            self._kbd_opening = False
+
+    def _inject_text_into_page(self, text):
+        if self.web is None:
+            return
+        payload = json.dumps(str(text or ''))
+        js = f"""
+(() => {{
+  const el = document.activeElement;
+  if (!el) return false;
+  const tag = (el.tagName || '').toLowerCase();
+  const tp = (el.type || '').toLowerCase();
+  const editable = el.isContentEditable || tag === 'textarea' ||
+    (tag === 'input' && !['button','submit','checkbox','radio','range','color','file','image','reset'].includes(tp));
+  if (!editable) return false;
+  const txt = {payload};
+  if (el.isContentEditable) {{
+    try {{ document.execCommand('insertText', false, txt); }} catch (_e) {{ el.textContent = (el.textContent || '') + txt; }}
+  }} else {{
+    el.value = (el.value || '') + txt;
+  }}
+  el.dispatchEvent(new Event('input', {{ bubbles: true }}));
+  el.dispatchEvent(new Event('change', {{ bubbles: true }}));
+  return true;
+}})();
+"""
+        self.web.page().runJavaScript(js)
+
+    def _open_virtual_keyboard_for_web(self):
+        if self.web is None:
+            return
+        d = VirtualKeyboardDialog('', self)
+        if d.exec_() == QtWidgets.QDialog.Accepted:
+            txt = d.text()
+            if txt:
+                self._inject_text_into_page(txt)
+
+    def _open_virtual_keyboard_contextual(self):
+        if self.stack.currentWidget() is self.hub:
+            self._open_virtual_keyboard_for_addr()
+        else:
+            self._open_virtual_keyboard_for_web()
+
+    def eventFilter(self, obj, event):
+        if obj is self.addr and event.type() == QtCore.QEvent.FocusIn:
+            QtCore.QTimer.singleShot(0, self._open_virtual_keyboard_for_addr)
+        return super().eventFilter(obj, event)
 
     def _build_hub_widget(self):
         hub = QtWidgets.QWidget()
@@ -12212,7 +12801,33 @@ BASH
         # Kodi launcher
         cat > "$BIN_DIR/xui_kodi.sh" <<'BASH'
 #!/usr/bin/env bash
-if command -v kodi >/dev/null 2>&1; then kodi "$@" & else echo "kodi not installed"; exit 1; fi
+set -euo pipefail
+
+if command -v kodi >/dev/null 2>&1; then
+  exec kodi "$@"
+fi
+
+if command -v kodi-standalone >/dev/null 2>&1; then
+  exec kodi-standalone "$@"
+fi
+
+if command -v flatpak >/dev/null 2>&1; then
+  if flatpak info tv.kodi.Kodi >/dev/null 2>&1; then
+    exec flatpak run tv.kodi.Kodi "$@"
+  fi
+fi
+
+if command -v snap >/dev/null 2>&1; then
+  if snap list kodi >/dev/null 2>&1; then
+    exec snap run kodi "$@"
+  fi
+fi
+
+echo "Kodi is not installed."
+echo "Install options:"
+echo "  Ubuntu/Debian: sudo apt install kodi"
+echo "  Flatpak:       flatpak install -y flathub tv.kodi.Kodi"
+exit 1
 BASH
         chmod +x "$BIN_DIR/xui_kodi.sh"
 
@@ -12434,6 +13049,105 @@ echo "Profile set to $PROFILE"
 BASH
         chmod +x "$BIN_DIR/xui_battery_profile.sh"
 
+        # Platform-aware power optimizer for handhelds/laptops (Linux active, future OS placeholders).
+        cat > "$BIN_DIR/xui_power_optimize.sh" <<'BASH'
+#!/usr/bin/env bash
+set -euo pipefail
+MODE="${1:-auto}" # auto|battery|ac|balanced|performance
+CONF="$HOME/.xui/data/power_platform_profile.json"
+mkdir -p "$(dirname "$CONF")"
+
+is_on_ac(){
+  for a in /sys/class/power_supply/AC*/online /sys/class/power_supply/AC/online /sys/class/power_supply/*/online; do
+    [ -f "$a" ] || continue
+    case "$(cat "$a" 2>/dev/null || true)" in
+      1) return 0 ;;
+    esac
+  done
+  return 1
+}
+
+device_tag(){
+  local m=""
+  m="$(cat /proc/device-tree/model 2>/dev/null || true)"
+  if [ -z "$m" ]; then
+    m="$(cat /sys/devices/virtual/dmi/id/product_name 2>/dev/null || true) $(cat /sys/devices/virtual/dmi/id/board_name 2>/dev/null || true)"
+  fi
+  m="$(printf '%s' "$m" | tr '[:upper:]' '[:lower:]')"
+  if echo "$m" | grep -Eq 'switch|tegra|l4t'; then echo "switch-l4t"; return; fi
+  if echo "$m" | grep -Eq 'steam deck|neptune|jupiter'; then echo "steamdeck"; return; fi
+  if echo "$m" | grep -Eq 'rog ally|aya|gpd|onexplayer|legion go'; then echo "pc-handheld"; return; fi
+  echo "generic-linux"
+}
+
+set_governor(){
+  local gov="$1"
+  for f in /sys/devices/system/cpu/cpu[0-9]*/cpufreq/scaling_governor; do
+    [ -f "$f" ] || continue
+    if [ -w "$f" ]; then
+      echo "$gov" > "$f" 2>/dev/null || true
+    fi
+  done
+}
+
+set_cpu_max(){
+  local val="$1"
+  [ -n "$val" ] || return 0
+  for f in /sys/devices/system/cpu/cpu[0-9]*/cpufreq/scaling_max_freq; do
+    [ -f "$f" ] || continue
+    if [ -w "$f" ]; then
+      echo "$val" > "$f" 2>/dev/null || true
+    fi
+  done
+}
+
+apply_linux_profile(){
+  local prof="$1" tag="$2"
+  case "$prof" in
+    battery)
+      set_governor powersave || true
+      case "$tag" in
+        switch-l4t) set_cpu_max 1020000 || true ;;
+        steamdeck|pc-handheld) set_cpu_max 1800000 || true ;;
+        *) set_cpu_max 1400000 || true ;;
+      esac
+      "$HOME/.xui/bin/xui_battery_saver.sh" enable >/dev/null 2>&1 || true
+      ;;
+    ac|performance)
+      set_governor schedutil || set_governor performance || true
+      "$HOME/.xui/bin/xui_battery_saver.sh" disable >/dev/null 2>&1 || true
+      ;;
+    balanced|*)
+      set_governor schedutil || true
+      "$HOME/.xui/bin/xui_battery_saver.sh" disable >/dev/null 2>&1 || true
+      ;;
+  esac
+}
+
+tag="$(device_tag)"
+profile="$MODE"
+if [ "$MODE" = "auto" ]; then
+  if is_on_ac; then profile="ac"; else profile="battery"; fi
+fi
+
+uname_s="$(uname -s 2>/dev/null || echo Linux)"
+if [ "$uname_s" = "Linux" ]; then
+  apply_linux_profile "$profile" "$tag"
+fi
+
+cat > "$CONF" <<JSON
+{
+  "platform_detected": "$tag",
+  "os": "$uname_s",
+  "profile_applied": "$profile",
+  "future_targets": ["windows", "android9plus", "windows_handheld"]
+}
+JSON
+
+echo "Power optimizer: $profile ($tag)"
+BASH
+        chmod +x "$BIN_DIR/xui_power_optimize.sh"
+
         # Battery monitor: Python small script that watches capacity and enables saver below threshold
         cat > "$BIN_DIR/xui_battery_monitor.py" <<'PY'
 #!/usr/bin/env python3
@@ -12535,6 +13249,19 @@ Restart=on-failure
 WantedBy=default.target
 UNIT
 
+        cat > "$SYSTEMD_USER_DIR/xui-power-opt.service" <<UNIT
+[Unit]
+Description=XUI Power Optimizer
+After=graphical-session.target
+
+[Service]
+Type=oneshot
+ExecStart=%h/.xui/bin/xui_power_optimize.sh auto
+
+[Install]
+WantedBy=default.target
+UNIT
+
 }
 
 
@@ -12548,31 +13275,27 @@ finish_setup(){
   touch "$XUI_DIR/.xui_4_0xv_setup_done"
   info "Configuring autostart for each login"
   mkdir -p "$AUTOSTART_DIR" "$SYSTEMD_USER_DIR" || true
-  if [ -f "$AUTOSTART_DIR/xui-dashboard.desktop" ]; then
-    info "Autostart desktop entry ready: $AUTOSTART_DIR/xui-dashboard.desktop"
-  else
-    warn "Autostart desktop entry missing: $AUTOSTART_DIR/xui-dashboard.desktop"
-  fi
-  local openbox_file xprofile_file ob_line xp_line
+  local openbox_file xprofile_file
   openbox_file="$HOME/.config/openbox/autostart"
   xprofile_file="$HOME/.xprofile"
-  ob_line='[ -x "$HOME/.xui/bin/xui_startup_and_dashboard.sh" ] && "$HOME/.xui/bin/xui_startup_and_dashboard.sh" >/dev/null 2>&1 &'
-  xp_line='[ -x "$HOME/.xui/bin/xui_startup_and_dashboard.sh" ] && "$HOME/.xui/bin/xui_startup_and_dashboard.sh" >/dev/null 2>&1 &'
   mkdir -p "$(dirname "$openbox_file")" || true
   touch "$openbox_file" "$xprofile_file" || true
-  if ! grep -Fq 'xui_startup_and_dashboard.sh' "$openbox_file" 2>/dev/null; then
-    printf '\n# XUI dashboard autostart\n%s\n' "$ob_line" >> "$openbox_file"
-    info "Added Openbox autostart hook: $openbox_file"
-  fi
-  if ! grep -Fq 'xui_startup_and_dashboard.sh' "$xprofile_file" 2>/dev/null; then
-    printf '\n# XUI dashboard autostart\n%s\n' "$xp_line" >> "$xprofile_file"
-    info "Added X session autostart hook: $xprofile_file"
+  # Remove legacy duplicate autostart hooks (Openbox / xprofile).
+  sed -i '/xui_startup_and_dashboard.sh/d' "$openbox_file" 2>/dev/null || true
+  sed -i '/xui_startup_and_dashboard.sh/d' "$xprofile_file" 2>/dev/null || true
+  info "Cleaned Openbox/Xprofile duplicate hooks."
+
+  # Keep desktop autostart disabled when systemd user service is available.
+  if [ -f "$AUTOSTART_DIR/xui-dashboard.desktop" ]; then
+    sed -i 's/^Hidden=.*/Hidden=true/' "$AUTOSTART_DIR/xui-dashboard.desktop" 2>/dev/null || true
+    sed -i 's/^X-GNOME-Autostart-enabled=.*/X-GNOME-Autostart-enabled=false/' "$AUTOSTART_DIR/xui-dashboard.desktop" 2>/dev/null || true
   fi
   if command -v systemctl >/dev/null 2>&1; then
     if systemctl --user daemon-reload >/dev/null 2>&1; then
       systemctl --user enable --now xui-dashboard.service xui-joy.service || true
       systemctl --user enable --now xui-battery-monitor.service || true
-      info "Attempted to enable user services: xui-dashboard, xui-joy, xui-battery-monitor"
+      systemctl --user enable --now xui-power-opt.service || true
+      info "Attempted to enable user services: xui-dashboard, xui-joy, xui-battery-monitor, xui-power-opt"
     else
       warn "systemctl --user daemon-reload failed; using desktop autostart only"
     fi
