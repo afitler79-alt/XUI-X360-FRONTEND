@@ -8124,6 +8124,7 @@ import random
 import shutil
 import subprocess
 import sys
+import time
 from datetime import date
 from pathlib import Path
 from PyQt5 import QtCore, QtGui, QtWidgets
@@ -8141,6 +8142,9 @@ from xui_game_lib import (
 DATA_HOME = Path.home() / '.xui' / 'data'
 STORE_FILE = DATA_HOME / 'store.json'
 XUI_BIN = Path.home() / '.xui' / 'bin'
+COVER_CACHE = Path.home() / '.xui' / 'cache' / 'store_covers'
+EXTERNAL_STORE_FILE = DATA_HOME / 'store_external.json'
+EXTERNAL_STALE_SECONDS = 6 * 60 * 60
 DAILY_ACTIVE_COUNT = 360
 ALWAYS_VISIBLE_IDS = {
     'game_fnae_fangame',
@@ -8174,8 +8178,11 @@ def _norm_item(raw):
     it['price'] = round(max(0.0, price), 2)
     it['desc'] = str(it.get('desc', '')).strip()
     it['category'] = str(it.get('category', 'Apps')).strip() or 'Apps'
+    it['source'] = str(it.get('source', 'XUI')).strip() or 'XUI'
     it['launch'] = str(it.get('launch', '')).strip()
     it['install'] = str(it.get('install', '')).strip()
+    it['cover'] = str(it.get('cover', '')).strip()
+    it['cover_local'] = str(it.get('cover_local', '')).strip()
     return it
 
 
@@ -8186,6 +8193,7 @@ def _curated_items():
             'name': 'XUI Web Browser',
             'price': 0,
             'category': 'Browser',
+            'source': 'XUI',
             'desc': 'Custom Chromium-based browser with Xbox style web hub.',
             'launch': str(XUI_BIN / 'xui_browser.sh') + ' --hub https://www.xbox.com',
         },
@@ -8194,6 +8202,7 @@ def _curated_items():
             'name': "Five Night's At Epstein's",
             'price': 85,
             'category': 'Games',
+            'source': 'XUI',
             'desc': 'Fangame package with Linux/Windows detection and launcher.',
             'install': str(XUI_BIN / 'xui_install_fnae.sh'),
             'launch': str(XUI_BIN / 'xui_run_fnae.sh'),
@@ -8235,6 +8244,7 @@ def _curated_items():
             'name': 'Steam Integration',
             'price': 10,
             'category': 'Apps',
+            'source': 'XUI',
             'desc': 'Launch and integrate Steam.',
             'install': str(XUI_BIN / 'xui_install_steam.sh'),
             'launch': str(XUI_BIN / 'xui_steam.sh'),
@@ -8244,6 +8254,7 @@ def _curated_items():
             'name': 'RetroArch Integration',
             'price': 10,
             'category': 'Apps',
+            'source': 'XUI',
             'desc': 'Install and launch RetroArch.',
             'install': str(XUI_BIN / 'xui_install_retroarch.sh'),
             'launch': str(XUI_BIN / 'xui_retroarch.sh'),
@@ -8253,6 +8264,7 @@ def _curated_items():
             'name': 'Lutris Integration',
             'price': 10,
             'category': 'Apps',
+            'source': 'XUI',
             'desc': 'Install and launch Lutris.',
             'install': str(XUI_BIN / 'xui_install_lutris.sh'),
             'launch': str(XUI_BIN / 'xui_lutris.sh'),
@@ -8262,9 +8274,29 @@ def _curated_items():
             'name': 'Heroic Integration',
             'price': 10,
             'category': 'Apps',
+            'source': 'XUI',
             'desc': 'Install and launch Heroic Games Launcher.',
             'install': str(XUI_BIN / 'xui_install_heroic.sh'),
             'launch': str(XUI_BIN / 'xui_heroic.sh'),
+        },
+        {
+            'id': 'platform_itch',
+            'name': 'Itch.io App',
+            'price': 0,
+            'category': 'Apps',
+            'source': 'Itch.io',
+            'desc': 'Install and launch the Itch desktop app (Flathub).',
+            'install': str(XUI_BIN / 'xui_install_itch.sh'),
+            'launch': str(XUI_BIN / 'xui_itch.sh'),
+        },
+        {
+            'id': 'platform_gamejolt',
+            'name': 'Game Jolt Hub',
+            'price': 0,
+            'category': 'Browser',
+            'source': 'Game Jolt',
+            'desc': 'Browse Game Jolt titles inside XUI browser hub.',
+            'launch': str(XUI_BIN / 'xui_browser.sh') + ' --hub https://gamejolt.com/games',
         },
         {
             'id': 'hub_legal_steam_free',
@@ -8342,6 +8374,7 @@ def _filler_items(current_ids, target_count=520):
             'name': f'{pref} {suf} {idx:03d}',
             'price': price,
             'category': cat,
+            'source': 'XUI',
             'desc': f'{cat} item auto-generated for XUI store catalog.',
             'launch': str(XUI_BIN / 'xui_browser.sh') + f' --hub https://www.xbox.com/en-US/search?q={rid}',
         })
@@ -8379,7 +8412,32 @@ def _daily_rotated_items(all_items, keep_ids=None, active_count=DAILY_ACTIVE_COU
     return active, day_key
 
 
+def _load_external_items():
+    try:
+        data = json.loads(EXTERNAL_STORE_FILE.read_text(encoding='utf-8', errors='ignore'))
+        items = data.get('items', [])
+        return items if isinstance(items, list) else []
+    except Exception:
+        return []
+
+
+def _maybe_background_sync_external():
+    script = XUI_BIN / 'xui_store_sync_sources.sh'
+    if not script.exists():
+        return
+    try:
+        stale = True
+        if EXTERNAL_STORE_FILE.exists():
+            age = max(0.0, time.time() - EXTERNAL_STORE_FILE.stat().st_mtime)
+            stale = age > EXTERNAL_STALE_SECONDS
+        if stale:
+            subprocess.Popen(['/bin/sh', '-lc', str(script)], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    except Exception:
+        pass
+
+
 def ensure_catalog_minimum(min_count=620):
+    _maybe_background_sync_external()
     data = load_store()
     if not isinstance(data, dict):
         data = {}
@@ -8398,6 +8456,14 @@ def ensure_catalog_minimum(min_count=620):
         seen.add(iid)
         items.append(item)
     for raw in _curated_items():
+        item = _norm_item(raw)
+        if item is None:
+            continue
+        if item['id'] in seen:
+            continue
+        seen.add(item['id'])
+        items.append(item)
+    for raw in _load_external_items():
         item = _norm_item(raw)
         if item is None:
             continue
@@ -8474,6 +8540,12 @@ class StoreTile(QtWidgets.QFrame):
             'color:rgba(255,255,255,0.86);'
             'font-size:12px;font-weight:700;letter-spacing:1px;border:none;}'
         )
+        cover_local = str(self.item.get('cover_local', '')).strip()
+        if cover_local and Path(cover_local).exists():
+            pix = QtGui.QPixmap(cover_local)
+            if not pix.isNull():
+                self.hero.setPixmap(pix.scaled(244, 122, QtCore.Qt.KeepAspectRatioByExpanding, QtCore.Qt.SmoothTransformation))
+                self.hero.setText('')
         root.addWidget(self.hero, 1)
 
         meta = QtWidgets.QFrame()
@@ -8498,10 +8570,13 @@ class StoreTile(QtWidgets.QFrame):
         self.title_lbl.setWordWrap(True)
         self.desc_lbl = QtWidgets.QLabel(self._short_desc(self.item.get('desc', '')))
         self.desc_lbl.setObjectName('tile_desc')
+        self.src_lbl = QtWidgets.QLabel(str(self.item.get('source', 'XUI')).upper())
+        self.src_lbl.setObjectName('tile_source')
 
         m.addLayout(top)
         m.addWidget(self.title_lbl, 0)
         m.addWidget(self.desc_lbl, 0)
+        m.addWidget(self.src_lbl, 0)
         root.addWidget(meta, 0)
 
     def _apply_style(self):
@@ -8540,6 +8615,11 @@ class StoreTile(QtWidgets.QFrame):
             QLabel#tile_desc {{
                 color:#b8c2cf;
                 font-size:11px;
+            }}
+            QLabel#tile_source {{
+                color:#78ad45;
+                font-size:10px;
+                font-weight:700;
             }}
             '''
         )
@@ -8662,6 +8742,7 @@ class StoreWindow(QtWidgets.QMainWindow):
         self.selected_item_id = ''
         self.cat_buttons = {}
         self.tile_widgets = []
+        self.sync_proc = None
         self._gamepad = None
         self._gamepad_timer = None
         self._pad_prev = {}
@@ -8796,18 +8877,21 @@ class StoreWindow(QtWidgets.QMainWindow):
         self.launch_btn = QtWidgets.QPushButton('Launch')
         inv_btn = QtWidgets.QPushButton('Inventory')
         refresh_btn = QtWidgets.QPushButton('Refresh')
+        sync_btn = QtWidgets.QPushButton('Sync Sources')
         close_btn = QtWidgets.QPushButton('Close')
         self.buy_btn.clicked.connect(self.buy_selected)
         self.install_btn.clicked.connect(self.install_selected)
         self.launch_btn.clicked.connect(self.launch_selected)
         inv_btn.clicked.connect(self.show_inventory)
         refresh_btn.clicked.connect(self.reload)
+        sync_btn.clicked.connect(self.sync_sources)
         close_btn.clicked.connect(self.close)
         actions.addWidget(self.buy_btn)
         actions.addWidget(self.install_btn)
         actions.addWidget(self.launch_btn)
         actions.addWidget(inv_btn)
         actions.addWidget(refresh_btn)
+        actions.addWidget(sync_btn)
         actions.addStretch(1)
         actions.addWidget(close_btn)
 
@@ -8956,6 +9040,34 @@ class StoreWindow(QtWidgets.QMainWindow):
             }
         ''')
         self._update_cat_styles()
+
+    def _set_busy(self, busy=True):
+        state = not bool(busy)
+        for b in (self.buy_btn, self.install_btn, self.launch_btn):
+            b.setEnabled(state and b.isEnabled())
+        self.search.setEnabled(state)
+
+    def sync_sources(self):
+        if self.sync_proc and self.sync_proc.state() != QtCore.QProcess.NotRunning:
+            self.info_lbl.setText('Source sync already running...')
+            return
+        script = str(XUI_BIN / 'xui_store_sync_sources.sh')
+        if not Path(script).exists():
+            self.info_lbl.setText('Missing source sync script.')
+            return
+        self.info_lbl.setText('Syncing Flathub / Itch.io / Game Jolt...')
+        self.sync_proc = QtCore.QProcess(self)
+        self.sync_proc.setProgram('/bin/sh')
+        self.sync_proc.setArguments(['-lc', script])
+        self.sync_proc.finished.connect(self._on_sync_finished)
+        self.sync_proc.start()
+
+    def _on_sync_finished(self, code, status):
+        ok = (int(code) == 0 and status == QtCore.QProcess.NormalExit)
+        if ok:
+            self.reload('Sources synced. New games/apps imported.')
+        else:
+            self.reload('Source sync failed. Check xui_store_sync_sources.sh.')
 
     def _on_global_nav(self, name):
         key = str(name or '').strip()
@@ -9121,9 +9233,10 @@ class StoreWindow(QtWidgets.QMainWindow):
         price_txt = 'FREE' if price <= 0 else f'EUR {price:.2f}'
         owned = iid in self._inventory_ids()
         state = 'OWNED' if owned else 'NOT OWNED'
+        source = str(item.get('source', 'XUI'))
 
         self.sel_name.setText(name)
-        self.sel_meta.setText(f'{cat} | {price_txt} | {state}')
+        self.sel_meta.setText(f'{cat} | {source} | {price_txt} | {state}')
         self.sel_desc.setText(desc)
         self.buy_btn.setEnabled(not owned)
         self.install_btn.setEnabled(bool(str(item.get('install', '')).strip()))
@@ -9473,6 +9586,192 @@ echo "Store moderna no instalada. Ejecuta: bash xui11.sh.fixed.sh --refresh-stor
 exit 1
 BASH
   chmod +x "$BIN_DIR/xui_store.sh"
+
+  cat > "$BIN_DIR/xui_install_flatpak_game.sh" <<'BASH'
+#!/usr/bin/env bash
+set -euo pipefail
+APP_ID="${1:-}"
+if [ -z "$APP_ID" ]; then
+  echo "Usage: $0 <flatpak.app.id>" >&2
+  exit 1
+fi
+if ! command -v flatpak >/dev/null 2>&1; then
+  echo "flatpak not found. Install flatpak first." >&2
+  exit 1
+fi
+if ! flatpak remote-list 2>/dev/null | grep -q '^flathub'; then
+  flatpak remote-add --if-not-exists flathub https://flathub.org/repo/flathub.flatpakrepo || true
+fi
+flatpak install -y flathub "$APP_ID"
+echo "Installed: $APP_ID"
+BASH
+  chmod +x "$BIN_DIR/xui_install_flatpak_game.sh"
+
+  cat > "$BIN_DIR/xui_install_itch.sh" <<'BASH'
+#!/usr/bin/env bash
+set -euo pipefail
+if ! command -v flatpak >/dev/null 2>&1; then
+  echo "flatpak not found. Install flatpak first." >&2
+  exit 1
+fi
+if ! flatpak remote-list 2>/dev/null | grep -q '^flathub'; then
+  flatpak remote-add --if-not-exists flathub https://flathub.org/repo/flathub.flatpakrepo || true
+fi
+flatpak install -y flathub io.itch.itch
+echo "Itch installed."
+BASH
+  chmod +x "$BIN_DIR/xui_install_itch.sh"
+
+  cat > "$BIN_DIR/xui_itch.sh" <<'BASH'
+#!/usr/bin/env bash
+set -euo pipefail
+if command -v flatpak >/dev/null 2>&1 && flatpak info io.itch.itch >/dev/null 2>&1; then
+  exec flatpak run io.itch.itch "$@"
+fi
+echo "Itch app not installed. Run: $HOME/.xui/bin/xui_install_itch.sh" >&2
+exit 1
+BASH
+  chmod +x "$BIN_DIR/xui_itch.sh"
+
+  cat > "$BIN_DIR/xui_store_sync_sources.sh" <<'BASH'
+#!/usr/bin/env bash
+set -euo pipefail
+XUI="$HOME/.xui"
+mkdir -p "$XUI/data" "$XUI/cache/store_covers"
+python3 - <<'PY'
+import hashlib
+import json
+import re
+import time
+import urllib.request
+from pathlib import Path
+
+XUI = Path.home() / '.xui'
+DATA = XUI / 'data'
+COVERS = XUI / 'cache' / 'store_covers'
+OUT = DATA / 'store_external.json'
+BIN = XUI / 'bin'
+DATA.mkdir(parents=True, exist_ok=True)
+COVERS.mkdir(parents=True, exist_ok=True)
+
+UA = {'User-Agent': 'xui-store-sync/1.0'}
+
+def get_json(url, timeout=20):
+    req = urllib.request.Request(url, headers=UA)
+    with urllib.request.urlopen(req, timeout=timeout) as r:
+        return json.loads(r.read().decode('utf-8', errors='ignore'))
+
+def safe_name(text):
+    return re.sub(r'[^a-zA-Z0-9._-]+', '_', str(text or 'item')).strip('_') or 'item'
+
+def cache_cover(url, rid):
+    if not url:
+        return ''
+    ext = '.jpg'
+    low = str(url).lower()
+    if '.png' in low:
+        ext = '.png'
+    elif '.webp' in low:
+        ext = '.webp'
+    name = safe_name(rid) + '_' + hashlib.sha1(str(url).encode('utf-8', errors='ignore')).hexdigest()[:10] + ext
+    dst = COVERS / name
+    if dst.exists() and dst.stat().st_size > 1024:
+        return str(dst)
+    try:
+        req = urllib.request.Request(url, headers=UA)
+        with urllib.request.urlopen(req, timeout=20) as r:
+            data = r.read()
+        if data and len(data) > 1024:
+            dst.write_bytes(data)
+            return str(dst)
+    except Exception:
+        return ''
+    return ''
+
+def flathub_items(limit=260):
+    items = []
+    try:
+        apps = get_json('https://flathub.org/api/v2/apps')
+        if not isinstance(apps, list):
+            return items
+        for app in apps:
+            if len(items) >= limit:
+                break
+            app_id = str(app.get('flatpakAppId') or app.get('app_id') or '').strip()
+            if not app_id:
+                continue
+            cats = app.get('categories') or []
+            cat_names = {str(c.get('name', c)).lower() for c in cats if c}
+            if 'game' not in cat_names and 'games' not in cat_names:
+                continue
+            name = str(app.get('name') or app_id).strip()
+            summary = str(app.get('summary') or 'Flathub game').strip()
+            icon = str(app.get('iconDesktopUrl') or app.get('iconMobileUrl') or '').strip()
+            rid = f'flathub_{app_id}'
+            cover_local = cache_cover(icon, rid)
+            items.append({
+                'id': rid,
+                'name': name,
+                'price': 0,
+                'category': 'Games',
+                'source': 'Flathub',
+                'desc': summary,
+                'cover': icon,
+                'cover_local': cover_local,
+                'install': str(BIN / 'xui_install_flatpak_game.sh') + f' {app_id}',
+                'launch': f'flatpak run {app_id}',
+            })
+    except Exception:
+        return items
+    return items
+
+def curated_web_sources():
+    seeds = [
+        ('itch_hub_free', 'Itch.io Free Games', 'https://img.itch.zone/aW1hZ2UvMjA4Nzg2MS8xMjI5NjUwOS5wbmc=/original/%2ByxL7h.png', 'https://itch.io/games/free', 'Browse free games on Itch.io.'),
+        ('itch_hub_popular', 'Itch.io Popular', 'https://img.itch.zone/aW1nLzExODQ1MjM2LnBuZw==/original/QndcCe.png', 'https://itch.io/games/popular', 'Browse popular games on Itch.io.'),
+        ('gamejolt_hub_games', 'Game Jolt Games', 'https://m.gjcdn.net/assets/favicons/favicon-196x196.png', 'https://gamejolt.com/games', 'Browse Game Jolt games.'),
+        ('gamejolt_hub_store', 'Game Jolt Marketplace', 'https://m.gjcdn.net/assets/favicons/favicon-196x196.png', 'https://gamejolt.com/marketplace', 'Browse Game Jolt marketplace content.'),
+    ]
+    out = []
+    for rid, name, cover, url, desc in seeds:
+        cover_local = cache_cover(cover, rid)
+        out.append({
+            'id': rid,
+            'name': name,
+            'price': 0,
+            'category': 'Browser',
+            'source': 'Itch.io' if 'itch' in rid else 'Game Jolt',
+            'desc': desc,
+            'cover': cover,
+            'cover_local': cover_local,
+            'launch': str(BIN / 'xui_browser.sh') + f' --hub {url}',
+        })
+    return out
+
+items = []
+items.extend(flathub_items(limit=260))
+items.extend(curated_web_sources())
+
+# Deduplicate IDs, keep first.
+seen = set()
+clean = []
+for it in items:
+    iid = str(it.get('id', '')).strip()
+    if not iid or iid in seen:
+        continue
+    seen.add(iid)
+    clean.append(it)
+
+payload = {
+    'generated_at': int(time.time()),
+    'count': len(clean),
+    'items': clean,
+}
+OUT.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding='utf-8')
+print(f'External sources synced: {len(clean)} items')
+PY
+BASH
+  chmod +x "$BIN_DIR/xui_store_sync_sources.sh"
 
   cat > "$GAMES_DIR/gem_match.py" <<'PY'
 #!/usr/bin/env python3
