@@ -1042,6 +1042,7 @@ FRIENDS_FILE = DATA_HOME / 'friends.json'
 PROFILE_FILE = DATA_HOME / 'profile.json'
 PEERS_FILE = DATA_HOME / 'social_peers.json'
 WORLD_CHAT_FILE = DATA_HOME / 'world_chat.json'
+SOCIAL_MESSAGES_FILE = DATA_HOME / 'social_messages_recent.json'
 
 sys.path.insert(0, str(XUI_HOME / 'bin'))
 try:
@@ -1735,6 +1736,18 @@ class SocialOverlay(QtWidgets.QDialog):
 
     def _append_chat(self, who, text):
         self._append_line(f"[{time.strftime('%H:%M:%S')}] {who}: {text}")
+        self._push_recent_message(who, text)
+
+    def _push_recent_message(self, who, text):
+        who_txt = str(who or '').strip() or 'Unknown'
+        body = str(text or '').strip()
+        if not body:
+            return
+        arr = safe_json_read(SOCIAL_MESSAGES_FILE, [])
+        if not isinstance(arr, list):
+            arr = []
+        arr.insert(0, {'ts': int(time.time()), 'from': who_txt[:48], 'text': body[:320]})
+        safe_json_write(SOCIAL_MESSAGES_FILE, arr[:80])
 
     def _peer_row(self, peer):
         if str(peer.get('source')) == 'WORLD':
@@ -2013,6 +2026,7 @@ class SocialOverlay(QtWidgets.QDialog):
             elif kind == 'world_chat':
                 _kind, sender, text = evt
                 self._append_line(f"[{time.strftime('%H:%M:%S')}] {sender} [WORLD]: {text}")
+                self._push_recent_message(f'{sender} [WORLD]', text)
             elif kind == 'world_status':
                 _kind, enabled, room = evt
                 self._update_world_toggle_button()
@@ -3194,6 +3208,7 @@ class XboxGuideMenu(QtWidgets.QDialog):
             'Logros',
             'Premios',
             'Reciente',
+            'Mensajes recientes',
             'Mis juegos',
             'Descargas activas',
             'Canjear codigo',
@@ -3642,6 +3657,9 @@ class WebKioskWindow(QtWidgets.QMainWindow):
     def __init__(self, url, parent=None, sfx_cb=None):
         super().__init__(parent)
         self._play_sfx = sfx_cb
+        self._gp = None
+        self._gp_prev = {}
+        self._gp_timer = None
         self.setWindowTitle(url)
         self.resize(1280, 720)
         self.setStyleSheet('background:#000;')
@@ -3656,6 +3674,11 @@ class WebKioskWindow(QtWidgets.QMainWindow):
         self._kbd.activated.connect(self._open_virtual_keyboard_for_page)
         self._kbd2 = QtWidgets.QShortcut(QtGui.QKeySequence('Ctrl+K'), self)
         self._kbd2.activated.connect(self._open_virtual_keyboard_for_page)
+        self._guide = QtWidgets.QShortcut(QtGui.QKeySequence(QtCore.Qt.Key_F1), self)
+        self._guide.activated.connect(self._show_guide)
+        self._guide2 = QtWidgets.QShortcut(QtGui.QKeySequence(QtCore.Qt.Key_Home), self)
+        self._guide2.activated.connect(self._show_guide)
+        self._setup_gamepad()
 
     def _sfx(self, name='select'):
         if callable(self._play_sfx):
@@ -3724,10 +3747,124 @@ class WebKioskWindow(QtWidgets.QMainWindow):
         QtWidgets.QApplication.postEvent(self.view, press)
         QtWidgets.QApplication.postEvent(self.view, rel)
 
+    def _show_guide(self):
+        parent = self.parentWidget()
+        gamertag = 'Player1'
+        if parent is not None and hasattr(parent, '_gamertag'):
+            try:
+                gamertag = str(parent._gamertag())
+            except Exception:
+                pass
+        d = XboxGuideMenu(gamertag, self)
+        if d.exec_() != QtWidgets.QDialog.Accepted:
+            return
+        sel = str(d.selected() or '').strip()
+        if not sel:
+            return
+        if sel == 'Cerrar app actual':
+            self.close()
+            return
+        if parent is not None and hasattr(parent, '_handle_xbox_guide_action'):
+            try:
+                parent._handle_xbox_guide_action(sel)
+            except Exception:
+                pass
+
+    def _setup_gamepad(self):
+        if QtGamepad is None:
+            return
+        try:
+            mgr = QtGamepad.QGamepadManager.instance()
+            ids = list(mgr.connectedGamepads())
+            if not ids:
+                return
+            self._gp = QtGamepad.QGamepad(ids[0], self)
+            self._gp_timer = QtCore.QTimer(self)
+            self._gp_timer.timeout.connect(self._poll_gamepad)
+            self._gp_timer.start(75)
+        except Exception:
+            self._gp = None
+
+    def _gpv(self, name, default=0.0):
+        gp = self._gp
+        if gp is None:
+            return default
+        v = getattr(gp, name, None)
+        try:
+            return v() if callable(v) else v
+        except Exception:
+            return default
+
+    def _send_key_to_view(self, key):
+        self.view.setFocus()
+        press = QtGui.QKeyEvent(QtCore.QEvent.KeyPress, key, QtCore.Qt.NoModifier)
+        rel = QtGui.QKeyEvent(QtCore.QEvent.KeyRelease, key, QtCore.Qt.NoModifier)
+        QtWidgets.QApplication.postEvent(self.view, press)
+        QtWidgets.QApplication.postEvent(self.view, rel)
+
+    def _go_back(self):
+        self.view.back()
+
+    def _go_forward(self):
+        self.view.forward()
+
+    def _poll_gamepad(self):
+        gp = self._gp
+        if gp is None:
+            return
+        cur = {
+            'left': bool(self._gpv('buttonLeft', False)) or float(self._gpv('axisLeftX', 0.0)) < -0.6,
+            'right': bool(self._gpv('buttonRight', False)) or float(self._gpv('axisLeftX', 0.0)) > 0.6,
+            'up': bool(self._gpv('buttonUp', False)) or float(self._gpv('axisLeftY', 0.0)) < -0.6,
+            'down': bool(self._gpv('buttonDown', False)) or float(self._gpv('axisLeftY', 0.0)) > 0.6,
+            'a': bool(self._gpv('buttonA', False)),
+            'b': bool(self._gpv('buttonB', False)),
+            'x': bool(self._gpv('buttonX', False)),
+            'y': bool(self._gpv('buttonY', False)),
+            'guide': bool(self._gpv('buttonGuide', False)),
+            'lb': bool(self._gpv('buttonL1', False)),
+            'rb': bool(self._gpv('buttonR1', False)),
+        }
+
+        def pressed(name):
+            return cur.get(name, False) and not self._gp_prev.get(name, False)
+
+        if pressed('guide') or pressed('y'):
+            self._show_guide()
+        elif pressed('b'):
+            self.close()
+        elif pressed('x'):
+            self._open_virtual_keyboard_for_page()
+        elif pressed('lb'):
+            self._go_back()
+        elif pressed('rb'):
+            self._go_forward()
+        elif pressed('a'):
+            self._forward_enter_to_view()
+        elif pressed('left'):
+            self._send_key_to_view(QtCore.Qt.Key_Left)
+        elif pressed('right'):
+            self._send_key_to_view(QtCore.Qt.Key_Right)
+        elif pressed('up'):
+            self._send_key_to_view(QtCore.Qt.Key_Up)
+        elif pressed('down'):
+            self._send_key_to_view(QtCore.Qt.Key_Down)
+        self._gp_prev = cur
+
     def keyPressEvent(self, e):
         k = e.key()
         if k in (QtCore.Qt.Key_Escape, QtCore.Qt.Key_Back):
             self.close()
+            return
+        guide_keys = {QtCore.Qt.Key_F1, QtCore.Qt.Key_Home, QtCore.Qt.Key_Meta}
+        key_super_l = getattr(QtCore.Qt, 'Key_Super_L', None)
+        key_super_r = getattr(QtCore.Qt, 'Key_Super_R', None)
+        if key_super_l is not None:
+            guide_keys.add(key_super_l)
+        if key_super_r is not None:
+            guide_keys.add(key_super_r)
+        if k in guide_keys:
+            self._show_guide()
             return
         if k in (QtCore.Qt.Key_Return, QtCore.Qt.Key_Enter):
             self._open_keyboard_if_editable()
@@ -5107,6 +5244,20 @@ class Dashboard(QtWidgets.QMainWindow):
             lines.append(f'{i:02d}. {item}')
         return '\n'.join(lines)
 
+    def _xbox_guide_recent_messages_text(self):
+        arr = safe_json_read(SOCIAL_MESSAGES_FILE, [])
+        if not isinstance(arr, list) or not arr:
+            return 'No hay mensajes recientes todavia.'
+        lines = []
+        for i, item in enumerate(arr[:18], 1):
+            if isinstance(item, dict):
+                who = str(item.get('from', 'Unknown'))
+                txt = str(item.get('text', ''))
+                lines.append(f'{i:02d}. {who}: {txt}')
+            else:
+                lines.append(f'{i:02d}. {item}')
+        return '\n'.join(lines)
+
     def _xbox_guide_downloads_text(self):
         cmd = (
             "/bin/sh -c \"ps -eo comm,args 2>/dev/null | "
@@ -5141,6 +5292,9 @@ class Dashboard(QtWidgets.QMainWindow):
             return
         if name == 'Reciente':
             self._msg('Reciente', self._xbox_guide_recent_text())
+            return
+        if name == 'Mensajes recientes':
+            self._msg('Mensajes recientes', self._xbox_guide_recent_messages_text())
             return
         if name == 'Mis juegos':
             if 'games' in self.tabs:
@@ -6305,9 +6459,11 @@ LOG_FILE = os.path.expanduser('~/.xui/logs/joy_listener.log')
 DEADZONE = int(os.environ.get('XUI_JOY_DEADZONE', '12000'))
 REPEAT_SEC = float(os.environ.get('XUI_JOY_REPEAT_SEC', '0.22'))
 RESCAN_SEC = float(os.environ.get('XUI_JOY_RESCAN_SEC', '2.5'))
+GUIDE_COOLDOWN_SEC = float(os.environ.get('XUI_GUIDE_COOLDOWN_SEC', '0.85'))
 NINTENDO_AB_SWAP = os.environ.get('XUI_JOY_NINTENDO_AB_SWAP', '1').lower() not in ('0', 'false', 'no')
 JOY_PROFILE = os.environ.get('XUI_JOY_PROFILE', 'auto').strip().lower()
 XDOTOOL = shutil.which('xdotool')
+GUIDE_SCRIPT = os.path.expanduser('~/.xui/bin/xui_global_guide.sh')
 NINTENDO_VENDOR = 0x057E
 MICROSOFT_VENDOR = 0x045E
 HYPERKIN_VENDOR = 0x2E24
@@ -6579,6 +6735,24 @@ class ControllerBridge:
         self.axis_state = {}
         self.axis_last_emit = {}
         self.key_last_emit = {}
+        self.last_guide_open = 0.0
+
+    def _open_global_guide(self):
+        now = time.monotonic()
+        if (now - self.last_guide_open) < GUIDE_COOLDOWN_SEC:
+            return True
+        self.last_guide_open = now
+        if not os.path.exists(GUIDE_SCRIPT):
+            return False
+        try:
+            subprocess.Popen(
+                ['/bin/sh', '-lc', f'"{GUIDE_SCRIPT}"'],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL
+            )
+            return True
+        except Exception:
+            return False
 
     def _mapping_for_kind(self, kind):
         mapping = dict(COMMON_BUTTON_MAP)
@@ -6698,6 +6872,9 @@ class ControllerBridge:
     def _handle_key(self, dev, ev):
         if ev.value not in (1, 2):
             return
+        if int(ev.code) in GUIDE_FALLBACK_CODES and ev.value == 1:
+            if self._open_global_guide():
+                return
         mapping = self.device_map.get(dev.path) or COMMON_BUTTON_MAP
         mapped = mapping.get(int(ev.code))
         if not mapped and int(ev.code) in GUIDE_FALLBACK_CODES:
@@ -6709,6 +6886,9 @@ class ControllerBridge:
         last = self.key_last_emit.get(key, 0.0)
         if ev.value == 2 and (now - last) < REPEAT_SEC:
             return
+        if str(mapped).upper() == 'F1':
+            if self._open_global_guide():
+                return
         emit_key(mapped)
         self.key_last_emit[key] = now
 
@@ -8398,12 +8578,25 @@ def _daily_rotated_items(all_items, keep_ids=None, active_count=DAILY_ACTIVE_COU
     day_key = _rotation_key()
     keep = []
     pool = []
+    external_priority = []
     for item in all_items:
         iid = str(item.get('id', '')).strip()
+        src = str(item.get('source', 'XUI')).strip().lower()
+        cat = str(item.get('category', 'Apps')).strip().lower()
         if iid and iid in keep_ids:
             keep.append(item)
+        elif src in ('flathub', 'itch.io', 'game jolt') and cat in ('games', 'minigames'):
+            external_priority.append(item)
         else:
             pool.append(item)
+    # Keep a visible slice of external catalog every day.
+    ext_keep = external_priority[:140]
+    keep_ids2 = {str(x.get('id', '')).strip() for x in keep}
+    for x in ext_keep:
+        xid = str(x.get('id', '')).strip()
+        if xid and xid not in keep_ids2:
+            keep.append(x)
+            keep_ids2.add(xid)
     rnd = random.Random(_stable_seed(day_key))
     rnd.shuffle(pool)
     target = max(int(active_count), len(keep))
@@ -9726,20 +9919,52 @@ def flathub_items(limit=260):
     return items
 
 def curated_web_sources():
-    seeds = [
-        ('itch_hub_free', 'Itch.io Free Games', 'https://img.itch.zone/aW1hZ2UvMjA4Nzg2MS8xMjI5NjUwOS5wbmc=/original/%2ByxL7h.png', 'https://itch.io/games/free', 'Browse free games on Itch.io.'),
-        ('itch_hub_popular', 'Itch.io Popular', 'https://img.itch.zone/aW1nLzExODQ1MjM2LnBuZw==/original/QndcCe.png', 'https://itch.io/games/popular', 'Browse popular games on Itch.io.'),
-        ('gamejolt_hub_games', 'Game Jolt Games', 'https://m.gjcdn.net/assets/favicons/favicon-196x196.png', 'https://gamejolt.com/games', 'Browse Game Jolt games.'),
-        ('gamejolt_hub_store', 'Game Jolt Marketplace', 'https://m.gjcdn.net/assets/favicons/favicon-196x196.png', 'https://gamejolt.com/marketplace', 'Browse Game Jolt marketplace content.'),
+    # Curated playable catalog cards from Itch.io / Game Jolt pages.
+    # Purchase unlocks launcher tile; launch opens game page in XUI browser.
+    games = [
+        ('itch_a_short_hike', 'A Short Hike (Itch)', 'https://itch.io/games/tag-short/tag-adventure', 18, 'https://img.itch.zone/aW1nLzE2MzQyMDQucG5n/315x250%23c/DIp%2B2m.png'),
+        ('itch_celeste_classic', 'Celeste Classic (Itch)', 'https://itch.io/games/tag-platformer', 12, 'https://img.itch.zone/aW1nLzIyMzg4NDUucG5n/315x250%23c/Kpq6cF.png'),
+        ('itch_deltarune_ch1', 'DELTARUNE Chapter 1 (Itch)', 'https://itch.io/games/free/tag-rpg', 24, 'https://img.itch.zone/aW1nLzE5OTI1MTMucG5n/315x250%23c/uX9zCi.png'),
+        ('itch_rhythm_doctor', 'Rhythm Doctor (Itch)', 'https://itch.io/games/tag-rhythm', 22, 'https://img.itch.zone/aW1nLzMyMjk3MjYucG5n/315x250%23c/0zLw8F.png'),
+        ('itch_fps_collection', 'FPS Picks (Itch)', 'https://itch.io/games/tag-fps', 10, 'https://img.itch.zone/aW1nLzQwNzYzOTQucG5n/315x250%23c/RWWE95.png'),
+        ('itch_horror_collection', 'Horror Picks (Itch)', 'https://itch.io/games/tag-horror', 14, 'https://img.itch.zone/aW1nLzQxNjg3NDQucG5n/315x250%23c/4oPwjf.png'),
+        ('itch_racing_collection', 'Racing Picks (Itch)', 'https://itch.io/games/tag-racing', 9, 'https://img.itch.zone/aW1nLzMxNDY2MDEucG5n/315x250%23c/rL3I6r.png'),
+        ('itch_strategy_collection', 'Strategy Picks (Itch)', 'https://itch.io/games/tag-strategy', 11, 'https://img.itch.zone/aW1nLzI0NTkwNzYucG5n/315x250%23c/tjPF6Q.png'),
+        ('gj_horror_games', 'Game Jolt Horror', 'https://gamejolt.com/games?tags=horror', 13, 'https://m.gjcdn.net/assets/favicons/favicon-196x196.png'),
+        ('gj_platformer_games', 'Game Jolt Platformers', 'https://gamejolt.com/games?tags=platformer', 12, 'https://m.gjcdn.net/assets/favicons/favicon-196x196.png'),
+        ('gj_rpg_games', 'Game Jolt RPG', 'https://gamejolt.com/games?tags=rpg', 15, 'https://m.gjcdn.net/assets/favicons/favicon-196x196.png'),
+        ('gj_action_games', 'Game Jolt Action', 'https://gamejolt.com/games?tags=action', 16, 'https://m.gjcdn.net/assets/favicons/favicon-196x196.png'),
+        ('gj_fnaf_games', 'Game Jolt FNAF Fan Games', 'https://gamejolt.com/games?tags=fnaf', 20, 'https://m.gjcdn.net/assets/favicons/favicon-196x196.png'),
+        ('gj_multiplayer_games', 'Game Jolt Multiplayer', 'https://gamejolt.com/games?tags=multiplayer', 17, 'https://m.gjcdn.net/assets/favicons/favicon-196x196.png'),
     ]
     out = []
-    for rid, name, cover, url, desc in seeds:
+    for rid, name, url, price, cover in games:
+        src = 'Itch.io' if rid.startswith('itch_') else 'Game Jolt'
         cover_local = cache_cover(cover, rid)
         out.append({
             'id': rid,
             'name': name,
-            'price': 0,
-            'category': 'Browser',
+            'price': float(max(0, price)),
+            'category': 'Games',
+            'source': src,
+            'desc': f'{src} catalog game card. Buy to unlock quick launch from Store.',
+            'cover': cover,
+            'cover_local': cover_local,
+            'launch': str(BIN / 'xui_browser.sh') + f' --hub {url}',
+        })
+    # Keep access hubs too, but as Games so they appear under Games filters.
+    hubs = [
+        ('itch_hub_free', 'Itch.io Free Games Hub', 'https://img.itch.zone/aW1hZ2UvMjA4Nzg2MS8xMjI5NjUwOS5wbmc=/original/%2ByxL7h.png', 'https://itch.io/games/free', 'Browse free games on Itch.io.'),
+        ('itch_hub_popular', 'Itch.io Popular Hub', 'https://img.itch.zone/aW1nLzExODQ1MjM2LnBuZw==/original/QndcCe.png', 'https://itch.io/games/popular', 'Browse popular games on Itch.io.'),
+        ('gamejolt_hub_games', 'Game Jolt Games Hub', 'https://m.gjcdn.net/assets/favicons/favicon-196x196.png', 'https://gamejolt.com/games', 'Browse Game Jolt games.'),
+    ]
+    for rid, name, cover, url, desc in hubs:
+        cover_local = cache_cover(cover, rid)
+        out.append({
+            'id': rid,
+            'name': name,
+            'price': 0.0,
+            'category': 'Games',
             'source': 'Itch.io' if 'itch' in rid else 'Game Jolt',
             'desc': desc,
             'cover': cover,
@@ -9751,6 +9976,36 @@ def curated_web_sources():
 items = []
 items.extend(flathub_items(limit=260))
 items.extend(curated_web_sources())
+
+# Add synthetic pages for Itch/Game Jolt listings so they are always visible in Games grid.
+for i in range(1, 101):
+    url = f'https://itch.io/games/new-and-popular?page={i}'
+    rid = f'itch_page_{i:03d}'
+    items.append({
+        'id': rid,
+        'name': f'Itch Games Page {i}',
+        'price': float(6 + (i % 14)),
+        'category': 'Games',
+        'source': 'Itch.io',
+        'desc': 'Curated Itch.io page for buying and launching games from the XUI store.',
+        'cover': '',
+        'cover_local': '',
+        'launch': str(BIN / 'xui_browser.sh') + f' --hub {url}',
+    })
+for i in range(1, 81):
+    url = f'https://gamejolt.com/games?sort=hot&page={i}'
+    rid = f'gamejolt_page_{i:03d}'
+    items.append({
+        'id': rid,
+        'name': f'Game Jolt Page {i}',
+        'price': float(7 + (i % 16)),
+        'category': 'Games',
+        'source': 'Game Jolt',
+        'desc': 'Curated Game Jolt page for buying and launching games from the XUI store.',
+        'cover': '',
+        'cover_local': '',
+        'launch': str(BIN / 'xui_browser.sh') + f' --hub {url}',
+    })
 
 # Deduplicate IDs, keep first.
 seen = set()
@@ -11988,10 +12243,15 @@ try:
     from PyQt5 import QtWebEngineWidgets
 except Exception:
     QtWebEngineWidgets = None
+try:
+    from PyQt5 import QtGamepad
+except Exception:
+    QtGamepad = None
 
 DATA_HOME = Path.home() / '.xui' / 'data'
 RECENT_FILE = DATA_HOME / 'webhub_recent.json'
 FAV_FILE = DATA_HOME / 'webhub_favorites.json'
+SOCIAL_MESSAGES_FILE = DATA_HOME / 'social_messages_recent.json'
 MAX_RECENT = 24
 
 
@@ -12096,11 +12356,15 @@ class WebHub(QtWidgets.QMainWindow):
         self.kiosk = bool(kiosk)
         self.pending_url = normalize_url(url)
         self._kbd_opening = False
+        self._gp = None
+        self._gp_prev = {}
+        self._gp_timer = None
         self.setWindowTitle('XUI Web Hub')
         self.resize(1366, 768)
         self._build()
         self._load_hub_lists()
         self.open_url(self.pending_url)
+        self._setup_gamepad()
 
     def _build(self):
         self.setStyleSheet('''
@@ -12224,9 +12488,139 @@ class WebHub(QtWidgets.QMainWindow):
         QtWidgets.QShortcut(QtGui.QKeySequence('Alt+Left'), self, activated=self._go_back)
         QtWidgets.QShortcut(QtGui.QKeySequence('Alt+Right'), self, activated=self._go_forward)
         QtWidgets.QShortcut(QtGui.QKeySequence('Ctrl+L'), self, activated=self._focus_addr_with_keyboard)
-        QtWidgets.QShortcut(QtGui.QKeySequence(QtCore.Qt.Key_F1), self, activated=self._show_hub)
+        QtWidgets.QShortcut(QtGui.QKeySequence(QtCore.Qt.Key_F1), self, activated=self._show_guide)
+        QtWidgets.QShortcut(QtGui.QKeySequence(QtCore.Qt.Key_Home), self, activated=self._show_guide)
         QtWidgets.QShortcut(QtGui.QKeySequence(QtCore.Qt.Key_F2), self, activated=self._open_virtual_keyboard_contextual)
         QtWidgets.QShortcut(QtGui.QKeySequence('Ctrl+K'), self, activated=self._open_virtual_keyboard_contextual)
+
+    def _recent_messages_text(self):
+        arr = safe_read(SOCIAL_MESSAGES_FILE, [])
+        if not isinstance(arr, list) or not arr:
+            return 'No recent messages.'
+        out = []
+        for i, item in enumerate(arr[:16], 1):
+            if isinstance(item, dict):
+                out.append(f"{i:02d}. {item.get('from', 'Unknown')}: {item.get('text', '')}")
+            else:
+                out.append(f'{i:02d}. {item}')
+        return '\n'.join(out)
+
+    def _show_guide(self):
+        opts = [
+            'Recent Messages',
+            'Recent Web',
+            'Virtual Keyboard',
+            'Toggle Hub',
+            'Close Current App',
+        ]
+        d = QtWidgets.QDialog(self)
+        d.setWindowTitle('Xbox Guide')
+        d.setModal(True)
+        d.resize(700, 420)
+        d.setStyleSheet('QDialog{background:#d8dde3;} QListWidget{font-size:24px;font-weight:700;}')
+        lay = QtWidgets.QVBoxLayout(d)
+        lw = QtWidgets.QListWidget()
+        lw.addItems(opts)
+        lw.setCurrentRow(0)
+        lay.addWidget(lw, 1)
+        hint = QtWidgets.QLabel('A/ENTER select | B/ESC back')
+        lay.addWidget(hint)
+        lw.itemActivated.connect(lambda *_: d.accept())
+        if d.exec_() != QtWidgets.QDialog.Accepted:
+            return
+        cur = lw.currentItem()
+        choice = cur.text() if cur else ''
+        if choice == 'Close Current App':
+            self.close()
+        elif choice == 'Toggle Hub':
+            self._show_hub()
+        elif choice == 'Virtual Keyboard':
+            self._open_virtual_keyboard_contextual()
+        elif choice == 'Recent Messages':
+            QtWidgets.QMessageBox.information(self, 'Recent Messages', self._recent_messages_text())
+        elif choice == 'Recent Web':
+            rec = safe_read(RECENT_FILE, [])
+            if not isinstance(rec, list) or not rec:
+                QtWidgets.QMessageBox.information(self, 'Recent Web', 'No recent web activity.')
+            else:
+                QtWidgets.QMessageBox.information(self, 'Recent Web', '\n'.join(str(x) for x in rec[:20]))
+
+    def _setup_gamepad(self):
+        if QtGamepad is None:
+            return
+        try:
+            mgr = QtGamepad.QGamepadManager.instance()
+            ids = list(mgr.connectedGamepads())
+            if not ids:
+                return
+            self._gp = QtGamepad.QGamepad(ids[0], self)
+            self._gp_timer = QtCore.QTimer(self)
+            self._gp_timer.timeout.connect(self._poll_gamepad)
+            self._gp_timer.start(75)
+        except Exception:
+            self._gp = None
+
+    def _gpv(self, name, default=0.0):
+        gp = self._gp
+        if gp is None:
+            return default
+        v = getattr(gp, name, None)
+        try:
+            return v() if callable(v) else v
+        except Exception:
+            return default
+
+    def _send_key_focus(self, key):
+        w = QtWidgets.QApplication.focusWidget() or self
+        press = QtGui.QKeyEvent(QtCore.QEvent.KeyPress, key, QtCore.Qt.NoModifier)
+        rel = QtGui.QKeyEvent(QtCore.QEvent.KeyRelease, key, QtCore.Qt.NoModifier)
+        QtWidgets.QApplication.postEvent(w, press)
+        QtWidgets.QApplication.postEvent(w, rel)
+
+    def _poll_gamepad(self):
+        gp = self._gp
+        if gp is None:
+            return
+        cur = {
+            'left': bool(self._gpv('buttonLeft', False)) or float(self._gpv('axisLeftX', 0.0)) < -0.6,
+            'right': bool(self._gpv('buttonRight', False)) or float(self._gpv('axisLeftX', 0.0)) > 0.6,
+            'up': bool(self._gpv('buttonUp', False)) or float(self._gpv('axisLeftY', 0.0)) < -0.6,
+            'down': bool(self._gpv('buttonDown', False)) or float(self._gpv('axisLeftY', 0.0)) > 0.6,
+            'a': bool(self._gpv('buttonA', False)),
+            'b': bool(self._gpv('buttonB', False)),
+            'x': bool(self._gpv('buttonX', False)),
+            'guide': bool(self._gpv('buttonGuide', False)),
+            'lb': bool(self._gpv('buttonL1', False)),
+            'rb': bool(self._gpv('buttonR1', False)),
+        }
+
+        def pressed(name):
+            return cur.get(name, False) and not self._gp_prev.get(name, False)
+
+        if pressed('guide'):
+            self._show_guide()
+        elif pressed('x'):
+            self._open_virtual_keyboard_contextual()
+        elif pressed('b'):
+            if self.stack.currentWidget() is self.hub:
+                self.close()
+            else:
+                self._go_back()
+        elif pressed('lb'):
+            self._go_back()
+        elif pressed('rb'):
+            self._go_forward()
+        elif pressed('a'):
+            self._send_key_focus(QtCore.Qt.Key_Return)
+        elif pressed('left'):
+            self._send_key_focus(QtCore.Qt.Key_Left)
+        elif pressed('right'):
+            self._send_key_focus(QtCore.Qt.Key_Right)
+        elif pressed('up'):
+            self._send_key_focus(QtCore.Qt.Key_Up)
+        elif pressed('down'):
+            self._send_key_focus(QtCore.Qt.Key_Down)
+        self._gp_prev = cur
 
     def _focus_addr_with_keyboard(self):
         self.addr.setFocus()
@@ -12486,10 +12880,11 @@ exit 1
 BASH
     chmod +x "$BIN_DIR/xui_browser.sh"
 
-    cat > "$BIN_DIR/xui_close_active_app.sh" <<'BASH'
+  cat > "$BIN_DIR/xui_close_active_app.sh" <<'BASH'
 #!/usr/bin/env bash
 set -euo pipefail
 PID_FILE="$HOME/.xui/data/active_game.pid"
+PAUSED_FILE="$HOME/.xui/data/active_paused.pid"
 if [ -f "$PID_FILE" ]; then
   pid="$(cat "$PID_FILE" 2>/dev/null || true)"
   if [ -n "${pid:-}" ] && kill -0 "$pid" 2>/dev/null; then
@@ -12497,6 +12892,7 @@ if [ -f "$PID_FILE" ]; then
     sleep 0.3
     kill -9 "$pid" >/dev/null 2>&1 || true
     rm -f "$PID_FILE"
+    rm -f "$PAUSED_FILE"
     echo "Closed tracked game process $pid"
     exit 0
   fi
@@ -12523,9 +12919,260 @@ if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
   sleep 0.2
   kill -9 "$pid" >/dev/null 2>&1 || true
 fi
+rm -f "$PAUSED_FILE"
 echo "Close requested for window $wid"
 BASH
     chmod +x "$BIN_DIR/xui_close_active_app.sh"
+
+    cat > "$BIN_DIR/xui_resume_active_app.sh" <<'BASH'
+#!/usr/bin/env bash
+set -euo pipefail
+PAUSED_FILE="$HOME/.xui/data/active_paused.pid"
+if [ ! -f "$PAUSED_FILE" ]; then
+  exit 0
+fi
+pid="$(cat "$PAUSED_FILE" 2>/dev/null || true)"
+if [ -n "${pid:-}" ] && kill -0 "$pid" 2>/dev/null; then
+  kill -CONT "$pid" >/dev/null 2>&1 || true
+fi
+rm -f "$PAUSED_FILE"
+BASH
+    chmod +x "$BIN_DIR/xui_resume_active_app.sh"
+
+    cat > "$BIN_DIR/xui_global_guide.py" <<'PY'
+#!/usr/bin/env python3
+import os
+import signal
+import subprocess
+import sys
+import time
+from pathlib import Path
+from PyQt5 import QtCore, QtGui, QtWidgets
+
+DATA = Path.home() / '.xui' / 'data'
+PAUSED_FILE = DATA / 'active_paused.pid'
+ACTIVE_FILE = DATA / 'active_game.pid'
+SOCIAL_FILE = DATA / 'social_messages_recent.json'
+LOCK_FILE = DATA / 'guide_global.lock'
+
+
+def _json_read(path, default):
+    try:
+        import json
+        return json.loads(Path(path).read_text(encoding='utf-8', errors='ignore'))
+    except Exception:
+        return default
+
+
+def _cmdline_of(pid):
+    try:
+        return Path(f'/proc/{int(pid)}/cmdline').read_text(encoding='utf-8', errors='ignore').replace('\x00', ' ').lower()
+    except Exception:
+        return ''
+
+
+def _is_dashboard_pid(pid):
+    cl = _cmdline_of(pid)
+    return any(t in cl for t in ('pyqt_dashboard_improved.py', 'xui-dashboard.service', 'xui dashboard'))
+
+
+def _active_window_pid():
+    try:
+        wid = subprocess.check_output(['xdotool', 'getactivewindow'], text=True, stderr=subprocess.DEVNULL).strip()
+        if not wid:
+            return None
+        pid = subprocess.check_output(['xdotool', 'getwindowpid', wid], text=True, stderr=subprocess.DEVNULL).strip()
+        return int(pid) if pid else None
+    except Exception:
+        return None
+
+
+def _pick_target_pid():
+    try:
+        if ACTIVE_FILE.exists():
+            pid = int((ACTIVE_FILE.read_text(encoding='utf-8', errors='ignore') or '0').strip() or '0')
+            if pid > 1 and not _is_dashboard_pid(pid):
+                return pid
+    except Exception:
+        pass
+    pid = _active_window_pid()
+    if pid and pid > 1 and not _is_dashboard_pid(pid):
+        return pid
+    return None
+
+
+def _pause_pid(pid):
+    try:
+        os.kill(int(pid), signal.SIGSTOP)
+        DATA.mkdir(parents=True, exist_ok=True)
+        PAUSED_FILE.write_text(str(int(pid)), encoding='utf-8')
+        return True
+    except Exception:
+        return False
+
+
+def _resume_paused():
+    if not PAUSED_FILE.exists():
+        return
+    try:
+        pid = int((PAUSED_FILE.read_text(encoding='utf-8', errors='ignore') or '0').strip() or '0')
+    except Exception:
+        pid = 0
+    try:
+        if pid > 1:
+            os.kill(pid, signal.SIGCONT)
+    except Exception:
+        pass
+    try:
+        PAUSED_FILE.unlink()
+    except Exception:
+        pass
+
+
+class Guide(QtWidgets.QDialog):
+    def __init__(self, paused_pid=None):
+        super().__init__()
+        self.paused_pid = paused_pid
+        self.action = 'resume'
+        self.setWindowTitle('Xbox Guide')
+        self.setWindowFlags(QtCore.Qt.Dialog | QtCore.Qt.FramelessWindowHint | QtCore.Qt.WindowStaysOnTopHint)
+        self.setModal(True)
+        self.resize(760, 460)
+        self.setStyleSheet('''
+            QDialog { background:#d7dde4; border:2px solid #edf2f7; }
+            QLabel#title { background:#606a75; color:#f6fbff; font-size:42px; font-weight:800; padding:8px 12px; }
+            QLabel#meta { color:#1f2933; font-size:18px; font-weight:700; padding:4px 2px; }
+            QListWidget { background:#ecf1f5; color:#1c232b; font-size:30px; font-weight:700; border:1px solid #8f9cab; }
+            QListWidget::item { padding:7px 10px; }
+            QListWidget::item:selected { background:#57b93c; color:white; }
+            QLabel#hint { color:#2d3742; font-size:16px; font-weight:700; }
+        ''')
+        v = QtWidgets.QVBoxLayout(self)
+        v.setContentsMargins(0, 0, 0, 0)
+        t = QtWidgets.QLabel('Guia Xbox')
+        t.setObjectName('title')
+        v.addWidget(t, 0)
+        meta = QtWidgets.QLabel(f'Paused app PID: {paused_pid or "-"}')
+        meta.setObjectName('meta')
+        meta.setContentsMargins(12, 8, 12, 4)
+        v.addWidget(meta, 0)
+        self.listw = QtWidgets.QListWidget()
+        self.listw.addItems([
+            'Resume Game/App',
+            'Close Current App',
+            'Recent Messages',
+            'Back to Dashboard',
+        ])
+        self.listw.setCurrentRow(0)
+        self.listw.itemActivated.connect(self._accept_current)
+        v.addWidget(self.listw, 1)
+        hint = QtWidgets.QLabel('A/ENTER Select | B/ESC Back')
+        hint.setObjectName('hint')
+        hint.setContentsMargins(12, 6, 12, 10)
+        v.addWidget(hint, 0)
+
+    def _accept_current(self, *_):
+        it = self.listw.currentItem()
+        txt = it.text() if it else ''
+        if txt == 'Resume Game/App':
+            self.action = 'resume'
+        elif txt == 'Close Current App':
+            self.action = 'close'
+        elif txt == 'Recent Messages':
+            self.action = 'messages'
+        elif txt == 'Back to Dashboard':
+            self.action = 'dashboard'
+        else:
+            self.action = 'resume'
+        self.accept()
+
+    def keyPressEvent(self, e):
+        if e.key() in (QtCore.Qt.Key_Escape, QtCore.Qt.Key_Back):
+            self.action = 'resume'
+            self.accept()
+            return
+        if e.key() in (QtCore.Qt.Key_Return, QtCore.Qt.Key_Enter):
+            self._accept_current()
+            return
+        super().keyPressEvent(e)
+
+
+def _show_messages(parent=None):
+    arr = _json_read(SOCIAL_FILE, [])
+    if not isinstance(arr, list) or not arr:
+        QtWidgets.QMessageBox.information(parent, 'Recent Messages', 'No recent messages.')
+        return
+    lines = []
+    for i, item in enumerate(arr[:18], 1):
+        if isinstance(item, dict):
+            who = str(item.get('from', 'Unknown'))
+            txt = str(item.get('text', ''))
+            lines.append(f'{i:02d}. {who}: {txt}')
+        else:
+            lines.append(f'{i:02d}. {item}')
+    QtWidgets.QMessageBox.information(parent, 'Recent Messages', '\n'.join(lines))
+
+
+def main():
+    DATA.mkdir(parents=True, exist_ok=True)
+    # simple single-instance lock with staleness recovery
+    now = int(time.time())
+    if LOCK_FILE.exists():
+        try:
+            old = int((LOCK_FILE.read_text(encoding='utf-8', errors='ignore') or '0').strip() or '0')
+            if now - old < 8:
+                return 0
+        except Exception:
+            pass
+    LOCK_FILE.write_text(str(now), encoding='utf-8')
+    app = QtWidgets.QApplication(sys.argv)
+    app.setQuitOnLastWindowClosed(True)
+    pid = _pick_target_pid()
+    if pid:
+        _pause_pid(pid)
+    d = Guide(paused_pid=pid)
+    try:
+        d.showFullScreen()
+    except Exception:
+        d.show()
+    d.exec_()
+    act = d.action
+    if act == 'messages':
+        _show_messages(d)
+        _resume_paused()
+    elif act == 'close':
+        subprocess.getoutput('/bin/sh -c "$HOME/.xui/bin/xui_close_active_app.sh"')
+    elif act == 'dashboard':
+        _resume_paused()
+        try:
+            subprocess.Popen(['/bin/sh', '-lc', 'xdotool search --name "XUI" windowactivate 2>/dev/null || true'])
+        except Exception:
+            pass
+    else:
+        _resume_paused()
+    try:
+        LOCK_FILE.unlink()
+    except Exception:
+        pass
+    return 0
+
+
+if __name__ == '__main__':
+    raise SystemExit(main())
+PY
+    chmod +x "$BIN_DIR/xui_global_guide.py"
+
+    cat > "$BIN_DIR/xui_global_guide.sh" <<'BASH'
+#!/usr/bin/env bash
+set -euo pipefail
+PYRUN="$HOME/.xui/bin/xui_python.sh"
+APP="$HOME/.xui/bin/xui_global_guide.py"
+if [ -x "$PYRUN" ] && [ -f "$APP" ]; then
+  exec "$PYRUN" "$APP" "$@"
+fi
+exec python3 "$APP" "$@"
+BASH
+    chmod +x "$BIN_DIR/xui_global_guide.sh"
 
     # Quick notes
     cat > "$BIN_DIR/xui_note.sh" <<'BASH'
