@@ -3744,6 +3744,9 @@ class Dashboard(QtWidgets.QMainWindow):
         self._achievement_toast = None
         self._startup_update_checked = False
         self._mandatory_update_in_progress = False
+        self._mandatory_update_proc = None
+        self._mandatory_update_progress = None
+        self._mandatory_update_output = ''
         self._games_inline = None
         self.sfx = {
             'hover': 'hover.mp3',
@@ -4162,9 +4165,126 @@ class Dashboard(QtWidgets.QMainWindow):
         if not checker.exists():
             QtWidgets.QApplication.quit()
             return
+        if self._mandatory_update_proc is not None:
+            if self._mandatory_update_proc.state() != QtCore.QProcess.NotRunning:
+                return
         self._mandatory_update_in_progress = True
-        self._run_terminal(f'"{checker}" apply')
-        QtCore.QTimer.singleShot(120, QtWidgets.QApplication.quit)
+        self._mandatory_update_output = ''
+        self._play_sfx('open')
+
+        progress = QtWidgets.QProgressDialog(
+            'Applying mandatory update from GitHub...\nPlease wait...',
+            '',
+            0,
+            0,
+            self,
+        )
+        progress.setWindowTitle('Applying Update')
+        progress.setWindowModality(QtCore.Qt.ApplicationModal)
+        progress.setCancelButton(None)
+        progress.setAutoClose(False)
+        progress.setAutoReset(False)
+        progress.setMinimumDuration(0)
+        progress.setRange(0, 0)
+        progress.show()
+        self._mandatory_update_progress = progress
+
+        proc = QtCore.QProcess(self)
+        env = QtCore.QProcessEnvironment.systemEnvironment()
+        env.insert('AUTO_CONFIRM', '1')
+        env.insert('XUI_SKIP_LAUNCH_PROMPT', '1')
+        proc.setProcessEnvironment(env)
+        proc.setProgram('/bin/sh')
+        proc.setArguments(['-lc', f'"{checker}" apply'])
+        proc.setProcessChannelMode(QtCore.QProcess.MergedChannels)
+        proc.readyReadStandardOutput.connect(self._on_mandatory_update_output)
+        proc.finished.connect(self._on_mandatory_update_finished)
+        proc.errorOccurred.connect(self._on_mandatory_update_error)
+        self._mandatory_update_proc = proc
+        proc.start()
+
+    def _close_mandatory_update_progress(self):
+        dlg = self._mandatory_update_progress
+        self._mandatory_update_progress = None
+        if dlg is None:
+            return
+        try:
+            dlg.hide()
+        except Exception:
+            pass
+        try:
+            dlg.deleteLater()
+        except Exception:
+            pass
+
+    def _on_mandatory_update_output(self):
+        proc = self._mandatory_update_proc
+        if proc is None:
+            return
+        try:
+            chunk = bytes(proc.readAllStandardOutput()).decode('utf-8', errors='ignore')
+        except Exception:
+            chunk = ''
+        if not chunk:
+            return
+        self._mandatory_update_output = (self._mandatory_update_output + chunk)[-22000:]
+        dlg = self._mandatory_update_progress
+        if dlg is None:
+            return
+        lines = [ln.strip() for ln in self._mandatory_update_output.splitlines() if ln.strip()]
+        tail = lines[-1][:160] if lines else 'Applying mandatory update from GitHub...'
+        dlg.setLabelText('Applying mandatory update from GitHub...\n' + tail)
+
+    def _restart_dashboard_after_update(self):
+        cmd = (
+            'if command -v systemctl >/dev/null 2>&1; then '
+            'systemctl --user daemon-reload >/dev/null 2>&1 || true; '
+            'systemctl --user restart xui-dashboard.service >/dev/null 2>&1 && exit 0; '
+            'fi; '
+            'nohup "$HOME/.xui/bin/xui_startup_and_dashboard.sh" >/dev/null 2>&1 &'
+        )
+        QtCore.QProcess.startDetached('/bin/sh', ['-lc', cmd])
+        QtCore.QTimer.singleShot(220, QtWidgets.QApplication.quit)
+
+    def _on_mandatory_update_error(self, err):
+        self._on_mandatory_update_output()
+        self._close_mandatory_update_progress()
+        proc = self._mandatory_update_proc
+        self._mandatory_update_proc = None
+        if proc is not None:
+            proc.deleteLater()
+        self._mandatory_update_in_progress = False
+        try:
+            err_code = int(err)
+        except Exception:
+            err_code = str(err)
+        self._msg('Update Failed', f'Updater process error: {err_code}')
+        QtCore.QTimer.singleShot(250, self._check_mandatory_update_gate)
+
+    def _on_mandatory_update_finished(self, code, status):
+        self._on_mandatory_update_output()
+        self._close_mandatory_update_progress()
+        proc = self._mandatory_update_proc
+        self._mandatory_update_proc = None
+        if proc is not None:
+            proc.deleteLater()
+        self._mandatory_update_in_progress = False
+        ok = (status == QtCore.QProcess.NormalExit and int(code) == 0)
+        if ok:
+            self._msg('Update', 'Mandatory update installed. Restarting dashboard...')
+            self._restart_dashboard_after_update()
+            return
+        lines = [ln for ln in self._mandatory_update_output.splitlines() if ln.strip()]
+        tail = '\n'.join(lines[-14:]).strip()
+        if not tail:
+            tail = f'Updater finished with exit code: {int(code)}'
+        self._msg(
+            'Update Failed',
+            'Could not apply mandatory update.\n\n'
+            + tail
+            + '\n\nFix network/git access and try again.',
+        )
+        QtCore.QTimer.singleShot(250, self._check_mandatory_update_gate)
 
     def _check_mandatory_update_gate(self):
         if self._mandatory_update_in_progress:
@@ -5617,6 +5737,18 @@ NINTENDO_VENDOR = 0x057E
 MICROSOFT_VENDOR = 0x045E
 
 
+def _default_display():
+    if os.environ.get('DISPLAY'):
+        return os.environ.get('DISPLAY')
+    for idx in range(4):
+        if os.path.exists(f'/tmp/.X11-unix/X{idx}'):
+            return f':{idx}'
+    return ':0'
+
+
+os.environ.setdefault('DISPLAY', _default_display())
+
+
 def _c(name, default):
     return getattr(ecodes, name, default)
 
@@ -5745,12 +5877,19 @@ ABS_MAP = {
 def emit_key(key):
     if not XDOTOOL:
         return False
-    subprocess.run(
-        [XDOTOOL, 'key', '--clearmodifiers', str(key)],
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-        check=False,
-    )
+    try:
+        r = subprocess.run(
+            [XDOTOOL, 'key', '--clearmodifiers', str(key)],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            check=False,
+        )
+        if int(getattr(r, 'returncode', 1) or 1) != 0:
+            logging.warning('xdotool failed key=%s rc=%s display=%s', key, r.returncode, os.environ.get('DISPLAY', ''))
+            return False
+    except Exception as exc:
+        logging.warning('xdotool exception for key=%s: %s', key, exc)
+        return False
     return True
 
 
@@ -5780,7 +5919,10 @@ def classify_controller(dev):
         return 'joycon_r'
     if any(token in name for token in ('joy-con', 'joycon', 'nintendo switch', 'pro controller', 'switch')):
         return 'nintendo'
-    if any(token in name for token in ('xbox', 'x-input', 'xinput', 'x-pad', 'xpadneo')):
+    if any(token in name for token in (
+        'xbox', 'x-input', 'xinput', 'x-pad', 'xpadneo',
+        'xenon', 'hyperkin', 'microsoft x-box', 'x-box one', 'xbox one'
+    )):
         return 'xbox'
     return 'generic'
 
@@ -5797,7 +5939,8 @@ def is_controller_device(dev):
     has_dpad = bool(key_caps & DPAD_BUTTON_CODES) or bool(abs_caps & HAT_CODES) or bool(key_caps & set(TRIGGER_HAPPY_MAP))
     has_axis = bool(abs_caps & ANALOG_AXIS_CODES)
     named_as_pad = any(token in name for token in (
-        'xbox', 'x-input', 'xinput', 'x-pad', 'joy-con', 'joycon',
+        'xbox', 'x-input', 'xinput', 'x-pad', 'xenon', 'hyperkin',
+        'joy-con', 'joycon',
         'nintendo switch', 'pro controller', 'hid-nintendo',
         'wireless controller', 'gamepad', 'joystick'
     ))
@@ -5805,7 +5948,9 @@ def is_controller_device(dev):
         return True
     if has_face and (has_axis or has_dpad):
         return True
-    return has_dpad and has_axis
+    if has_face and len(key_caps) >= 8:
+        return True
+    return has_dpad and (has_axis or has_face)
 
 
 def device_signature(dev):
@@ -5877,6 +6022,9 @@ class ControllerBridge:
     def _open_device(self, path):
         try:
             dev = InputDevice(path)
+        except PermissionError as exc:
+            logging.warning('permission denied opening %s: %s', path, exc)
+            return None
         except Exception:
             return None
         if not is_controller_device(dev):
@@ -6048,6 +6196,9 @@ if __name__ == '__main__':
         format='%(asctime)s %(levelname)s %(message)s'
     )
     logging.info('xui joy bridge starting (profile=%s, nintendo_ab_swap=%s)', JOY_PROFILE, NINTENDO_AB_SWAP)
+    if os.environ.get('XDG_SESSION_TYPE', '').lower() == 'wayland':
+        logging.warning('Wayland detected: xdotool key injection may fail; X11 session is recommended')
+    logging.info('controller bridge display=%s', os.environ.get('DISPLAY', ''))
     if not XDOTOOL:
         logging.warning('xdotool not found, controller input cannot be injected')
     bridge = ControllerBridge()
@@ -6117,6 +6268,14 @@ BASH
 set -euo pipefail
 echo "=== XUI Controller Probe ==="
 echo "Date: $(date)"
+echo "DISPLAY=${DISPLAY:-<unset>}"
+echo "XDG_SESSION_TYPE=${XDG_SESSION_TYPE:-<unset>}"
+echo
+if command -v xdotool >/dev/null 2>&1; then
+  echo "[xdotool] OK ($(command -v xdotool))"
+else
+  echo "[xdotool] MISSING"
+fi
 echo
 if [ -f "$HOME/.xui/data/controller_profile.env" ]; then
   echo "[profile env]"
@@ -6143,6 +6302,9 @@ if not paths:
 for p in paths:
     try:
         d = InputDevice(p)
+    except PermissionError as exc:
+        print(f'{p}: permission denied ({exc})')
+        continue
     except Exception:
         continue
     name = (d.name or '').lower()
@@ -6158,6 +6320,11 @@ fi
 echo
 echo "[XUI joy listener log tail]"
 tail -n 60 "$HOME/.xui/logs/joy_listener.log" 2>/dev/null || echo "No joy listener log yet."
+echo
+if command -v systemctl >/dev/null 2>&1; then
+  echo "[xui-joy.service]"
+  systemctl --user status xui-joy.service --no-pager -n 20 2>/dev/null || echo "xui-joy.service not running"
+fi
 
 echo
 echo "[Qt input modules]"
@@ -6187,6 +6354,18 @@ echo "=== XUI L4T Controller Fix ==="
 echo "Target: Kubuntu L4T / Switch (Joy-Con + Xbox pads)"
 echo
 
+if getent group input >/dev/null 2>&1; then
+  if id -nG "$USER" | tr ' ' '\n' | grep -qx input; then
+    echo "group input: user already included"
+  else
+    if as_root usermod -aG input "$USER" >/dev/null 2>&1; then
+      echo "group input: added user '$USER' (logout/login required)"
+    else
+      echo "group input: could not add user '$USER'"
+    fi
+  fi
+fi
+
 for mod in joydev uinput hid_nintendo xpad; do
   if lsmod | awk '{print $1}' | grep -qx "$mod"; then
     echo "module $mod: already loaded"
@@ -6204,6 +6383,12 @@ if command -v systemctl >/dev/null 2>&1; then
     as_root systemctl enable --now joycond.service >/dev/null 2>&1 || true
     echo "joycond.service: enabled/started (best effort)"
   fi
+fi
+
+if command -v systemctl >/dev/null 2>&1; then
+  systemctl --user daemon-reload >/dev/null 2>&1 || true
+  systemctl --user restart xui-joy.service >/dev/null 2>&1 || true
+  echo "xui-joy.service: restarted"
 fi
 
 echo
@@ -9135,15 +9320,21 @@ UNIT
   cat > "$SYSTEMD_USER_DIR/xui-joy.service" <<UNIT
 [Unit]
 Description=XUI Joy Listener (user)
+After=graphical-session-pre.target
+PartOf=graphical-session.target
 
 [Service]
 Type=simple
+Environment=DISPLAY=:0
+Environment=XDG_RUNTIME_DIR=/run/user/%U
+Environment=XAUTHORITY=%h/.Xauthority
 EnvironmentFile=-%h/.xui/data/controller_profile.env
 ExecStart=%h/.xui/bin/xui_python.sh %h/.xui/bin/xui_joy_listener.py
 Restart=on-failure
+RestartSec=0.4
 
 [Install]
-WantedBy=default.target
+WantedBy=graphical-session.target
 UNIT
 
   cat > "$BIN_DIR/xui_first_setup.py" <<'PY'
@@ -10409,18 +10600,38 @@ apply_update(){
     exit 1
   fi
 
+  clone_fresh_repo(){
+    local tmp="${SRC}.tmp.$$"
+    rm -rf "$tmp"
+    git clone "https://github.com/$REPO.git" "$tmp"
+    rm -rf "$SRC"
+    mv "$tmp" "$SRC"
+  }
+
   mkdir -p "$(dirname "$SRC")"
   if [ ! -d "$SRC/.git" ]; then
-    git clone "https://github.com/$REPO.git" "$SRC"
+    clone_fresh_repo
   fi
 
-  git -C "$SRC" fetch --all --prune
-  if git -C "$SRC" show-ref --verify --quiet "refs/heads/$branch"; then
-    git -C "$SRC" checkout "$branch"
-  else
+  if ! git -C "$SRC" fetch --all --prune; then
+    echo "Fetch failed, recloning source..."
+    clone_fresh_repo
+    git -C "$SRC" fetch --all --prune
+  fi
+  if ! git -C "$SRC" checkout -B "$branch" "origin/$branch" >/dev/null 2>&1; then
+    echo "Checkout failed, recloning source..."
+    clone_fresh_repo
+    git -C "$SRC" fetch --all --prune
     git -C "$SRC" checkout -B "$branch" "origin/$branch"
   fi
-  git -C "$SRC" pull --ff-only origin "$branch"
+  if ! git -C "$SRC" reset --hard "origin/$branch" >/dev/null 2>&1; then
+    echo "Reset failed, recloning source..."
+    clone_fresh_repo
+    git -C "$SRC" fetch --all --prune
+    git -C "$SRC" checkout -B "$branch" "origin/$branch"
+    git -C "$SRC" reset --hard "origin/$branch"
+  fi
+  git -C "$SRC" clean -fd >/dev/null 2>&1 || true
 
   local installer=""
   for c in "$INSTALLER_NAME" "xui11.sh.fixed.sh" "xui11.sh.fixed" "xui11.sh"; do
