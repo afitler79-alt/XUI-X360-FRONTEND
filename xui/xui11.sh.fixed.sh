@@ -8127,6 +8127,10 @@ import sys
 from datetime import date
 from pathlib import Path
 from PyQt5 import QtCore, QtGui, QtWidgets
+try:
+    from PyQt5 import QtGamepad
+except Exception:
+    QtGamepad = None
 
 sys.path.insert(0, str(Path.home() / '.xui' / 'bin'))
 from xui_game_lib import (
@@ -8553,6 +8557,89 @@ class StoreTile(QtWidgets.QFrame):
         super().mousePressEvent(event)
 
 
+class VirtualKeyboardDialog(QtWidgets.QDialog):
+    def __init__(self, parent=None, initial=''):
+        super().__init__(parent)
+        self.setWindowTitle('Virtual Keyboard')
+        self.setModal(True)
+        self.resize(860, 340)
+        self.text = str(initial or '')
+        self._build()
+        self.line.setText(self.text)
+        self.line.setFocus()
+
+    def _build(self):
+        root = QtWidgets.QVBoxLayout(self)
+        root.setContentsMargins(12, 12, 12, 12)
+        root.setSpacing(8)
+
+        self.line = QtWidgets.QLineEdit()
+        self.line.setPlaceholderText('Type text...')
+        self.line.returnPressed.connect(self.accept)
+        root.addWidget(self.line, 0)
+
+        grid_wrap = QtWidgets.QFrame()
+        grid = QtWidgets.QGridLayout(grid_wrap)
+        grid.setContentsMargins(0, 0, 0, 0)
+        grid.setHorizontalSpacing(6)
+        grid.setVerticalSpacing(6)
+
+        rows = [
+            list('1234567890'),
+            list('QWERTYUIOP'),
+            list('ASDFGHJKL'),
+            list('ZXCVBNM'),
+        ]
+        r = 0
+        for chars in rows:
+            c = 0
+            for ch in chars:
+                b = QtWidgets.QPushButton(ch)
+                b.setMinimumHeight(38)
+                b.clicked.connect(lambda _=False, ch=ch: self.line.insert(ch))
+                grid.addWidget(b, r, c, 1, 1)
+                c += 1
+            r += 1
+        root.addWidget(grid_wrap, 1)
+
+        actions = QtWidgets.QHBoxLayout()
+        actions.setSpacing(8)
+        btn_space = QtWidgets.QPushButton('Space')
+        btn_back = QtWidgets.QPushButton('Backspace')
+        btn_clear = QtWidgets.QPushButton('Clear')
+        btn_ok = QtWidgets.QPushButton('OK')
+        btn_cancel = QtWidgets.QPushButton('Cancel')
+        btn_space.clicked.connect(lambda: self.line.insert(' '))
+        btn_back.clicked.connect(self.line.backspace)
+        btn_clear.clicked.connect(self.line.clear)
+        btn_ok.clicked.connect(self.accept)
+        btn_cancel.clicked.connect(self.reject)
+        actions.addWidget(btn_space, 0)
+        actions.addWidget(btn_back, 0)
+        actions.addWidget(btn_clear, 0)
+        actions.addStretch(1)
+        actions.addWidget(btn_ok, 0)
+        actions.addWidget(btn_cancel, 0)
+        root.addLayout(actions, 0)
+
+        self.setStyleSheet('''
+            QDialog { background:#e8edf1; }
+            QLineEdit {
+                background:#ffffff; color:#1f2b37; border:1px solid #6e8a55;
+                padding:8px; font-size:18px; font-weight:700;
+            }
+            QPushButton {
+                background:#58ac34; color:#ffffff; border:1px solid #45872a;
+                padding:6px 8px; font-size:16px; font-weight:800;
+            }
+            QPushButton:focus { border:2px solid #ffffff; }
+            QPushButton:hover { background:#48952a; }
+        ''')
+
+    def get_text(self):
+        return self.line.text().strip()
+
+
 class StoreWindow(QtWidgets.QMainWindow):
     FILTER_MAP = {
         'All': None,
@@ -8575,6 +8662,9 @@ class StoreWindow(QtWidgets.QMainWindow):
         self.selected_item_id = ''
         self.cat_buttons = {}
         self.tile_widgets = []
+        self._gamepad = None
+        self._gamepad_timer = None
+        self._pad_prev = {}
         self.reflow_timer = QtCore.QTimer(self)
         self.reflow_timer.setSingleShot(True)
         self.reflow_timer.timeout.connect(self._rebuild_tile_grid)
@@ -8584,6 +8674,7 @@ class StoreWindow(QtWidgets.QMainWindow):
         except Exception:
             pass
         self.reload()
+        self._setup_gamepad()
 
     def _build(self):
         root = QtWidgets.QWidget()
@@ -8636,8 +8727,12 @@ class StoreWindow(QtWidgets.QMainWindow):
         search_btn = QtWidgets.QPushButton('Search')
         search_btn.setObjectName('search_btn')
         search_btn.clicked.connect(lambda: self.set_search(self.search.text()))
+        kb_btn = QtWidgets.QPushButton('Keyboard')
+        kb_btn.setObjectName('search_btn')
+        kb_btn.clicked.connect(self.open_virtual_keyboard)
         nav_l.addWidget(self.search, 0)
         nav_l.addWidget(search_btn, 0)
+        nav_l.addWidget(kb_btn, 0)
         v.addWidget(nav, 0)
 
         page = QtWidgets.QWidget()
@@ -8942,6 +9037,12 @@ class StoreWindow(QtWidgets.QMainWindow):
         self.search_text = str(text or '')
         self._refresh_tiles()
 
+    def open_virtual_keyboard(self):
+        d = VirtualKeyboardDialog(self, self.search.text())
+        if d.exec_() == QtWidgets.QDialog.Accepted:
+            self.search.setText(d.get_text())
+            self.search.setFocus()
+
     def _tile_columns(self):
         viewport_w = max(1, self.scroll.viewport().width())
         return max(1, min(6, viewport_w // 260))
@@ -9089,31 +9190,7 @@ class StoreWindow(QtWidgets.QMainWindow):
 
         mission = complete_mission(mission_id='m3')
         install_cmd = str(item.get('install', '')).strip()
-        extra = ''
-        if install_cmd:
-            q = QtWidgets.QMessageBox.question(
-                self,
-                'Install',
-                f'Install "{name}" now?',
-                QtWidgets.QMessageBox.Yes | QtWidgets.QMessageBox.No,
-                QtWidgets.QMessageBox.Yes
-            )
-            if q == QtWidgets.QMessageBox.Yes:
-                if iid == 'game_fnae_fangame':
-                    rc, out = subprocess.getstatusoutput(f'/bin/sh -lc "{install_cmd}"')
-                    if rc != 0:
-                        # Rollback ownership and refund if install failed.
-                        if price > 0:
-                            bal = change_balance(price)
-                        self.inventory['items'] = [x for x in self.inventory.get('items', []) if str(x.get('id', '')) != iid]
-                        save_inventory(self.inventory)
-                        fail_msg = (out or 'Installer failed.').strip()
-                        self.reload(f'Purchase cancelled: {name} | Installer error: {fail_msg}')
-                        return
-                    extra = ' | game installed'
-                else:
-                    self._run_terminal(install_cmd)
-                    extra = ' | installer started'
+        extra = ' | Use Install to complete setup' if install_cmd else ''
         if mission.get('completed'):
             bal = float(mission.get('balance', bal))
             reward = float(mission.get('reward', 0))
@@ -9227,6 +9304,9 @@ class StoreWindow(QtWidgets.QMainWindow):
         if k in (QtCore.Qt.Key_Escape, QtCore.Qt.Key_Back):
             self.close()
             return
+        if k == QtCore.Qt.Key_F2:
+            self.open_virtual_keyboard()
+            return
         if k == QtCore.Qt.Key_F5:
             self.reload('Marketplace refreshed.')
             return
@@ -9245,6 +9325,18 @@ class StoreWindow(QtWidgets.QMainWindow):
         if k in (QtCore.Qt.Key_Return, QtCore.Qt.Key_Enter):
             self.launch_selected()
             return
+        if k == QtCore.Qt.Key_X:
+            self.buy_selected()
+            return
+        if k == QtCore.Qt.Key_Y:
+            self.show_inventory()
+            return
+        if k == QtCore.Qt.Key_B:
+            self.close()
+            return
+        if k == QtCore.Qt.Key_A:
+            self.launch_selected()
+            return
         if k == QtCore.Qt.Key_Space:
             self.buy_selected()
             return
@@ -9252,6 +9344,75 @@ class StoreWindow(QtWidgets.QMainWindow):
             self.show_inventory()
             return
         super().keyPressEvent(e)
+
+    def _setup_gamepad(self):
+        if QtGamepad is None:
+            return
+        try:
+            mgr = QtGamepad.QGamepadManager.instance()
+            ids = list(mgr.connectedGamepads())
+            if not ids:
+                return
+            self._gamepad = QtGamepad.QGamepad(ids[0], self)
+            self._gamepad_timer = QtCore.QTimer(self)
+            self._gamepad_timer.timeout.connect(self._poll_gamepad)
+            self._gamepad_timer.start(70)
+            self.info_lbl.setText('Controller connected: A=Launch X=Buy Y=Inventory B=Back F2=Keyboard.')
+        except Exception:
+            self._gamepad = None
+
+    def _gp_read(self, name, default=0.0):
+        gp = self._gamepad
+        if gp is None:
+            return default
+        attr = getattr(gp, name, None)
+        try:
+            return attr() if callable(attr) else attr
+        except Exception:
+            return default
+
+    def _poll_gamepad(self):
+        gp = self._gamepad
+        if gp is None:
+            return
+        left = bool(self._gp_read('buttonLeft', False)) or float(self._gp_read('axisLeftX', 0.0)) < -0.6
+        right = bool(self._gp_read('buttonRight', False)) or float(self._gp_read('axisLeftX', 0.0)) > 0.6
+        up = bool(self._gp_read('buttonUp', False)) or float(self._gp_read('axisLeftY', 0.0)) < -0.6
+        down = bool(self._gp_read('buttonDown', False)) or float(self._gp_read('axisLeftY', 0.0)) > 0.6
+        a = bool(self._gp_read('buttonA', False))
+        b = bool(self._gp_read('buttonB', False))
+        x = bool(self._gp_read('buttonX', False))
+        y = bool(self._gp_read('buttonY', False))
+        start = bool(self._gp_read('buttonStart', False))
+
+        curr = {
+            'left': left, 'right': right, 'up': up, 'down': down,
+            'a': a, 'b': b, 'x': x, 'y': y, 'start': start,
+        }
+
+        def pressed(key):
+            return curr.get(key, False) and not self._pad_prev.get(key, False)
+
+        if pressed('left'):
+            self._move_selection(0, -1)
+        elif pressed('right'):
+            self._move_selection(0, 1)
+        elif pressed('up'):
+            self._move_selection(-1, 0)
+        elif pressed('down'):
+            self._move_selection(1, 0)
+        elif pressed('a'):
+            self.launch_selected()
+        elif pressed('x'):
+            self.buy_selected()
+        elif pressed('y'):
+            self.show_inventory()
+        elif pressed('start'):
+            self.open_virtual_keyboard()
+        elif pressed('b'):
+            self.close()
+
+        self._pad_prev = curr
 
 
 def main():
