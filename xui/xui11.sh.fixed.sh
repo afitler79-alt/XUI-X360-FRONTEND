@@ -1020,6 +1020,9 @@ import queue
 import socket
 import threading
 import uuid
+import urllib.request
+import urllib.parse
+import urllib.error
 from pathlib import Path
 from PyQt5 import QtWidgets, QtGui, QtCore
 try:
@@ -1034,6 +1037,7 @@ RECENT_FILE = DATA_HOME / 'recent.json'
 FRIENDS_FILE = DATA_HOME / 'friends.json'
 PROFILE_FILE = DATA_HOME / 'profile.json'
 PEERS_FILE = DATA_HOME / 'social_peers.json'
+WORLD_CHAT_FILE = DATA_HOME / 'world_chat.json'
 
 sys.path.insert(0, str(XUI_HOME / 'bin'))
 try:
@@ -1206,12 +1210,42 @@ class InlineSocialEngine:
         self.node_id = uuid.uuid4().hex[:12]
         self.chat_port = self._find_open_port(chat_base, 24)
         self.discovery_port = int(discovery_port)
+        self.world_relay = os.environ.get('XUI_WORLD_RELAY_URL', 'https://ntfy.sh').strip().rstrip('/')
+        self.world_topic = self._sanitize_topic(
+            os.environ.get('XUI_WORLD_TOPIC', 'xui-world-global')
+        )
+        self.world_enabled = True
         self.events = queue.Queue()
         self.running = False
         self.threads = []
         self.peers = {}
         self.lock = threading.Lock()
         self.local_ips = set(local_ipv4_addresses())
+        self._seen_world_ids = set()
+
+    def _sanitize_topic(self, text):
+        raw = ''.join(ch.lower() if ch.isalnum() or ch in ('-', '_', '.') else '-' for ch in str(text or '').strip())
+        while '--' in raw:
+            raw = raw.replace('--', '-')
+        raw = raw.strip('-._')
+        return raw or 'xui-world-global'
+
+    def set_world_topic(self, topic):
+        new_topic = self._sanitize_topic(topic)
+        if new_topic == self.world_topic:
+            return
+        self.world_topic = new_topic
+        self._seen_world_ids.clear()
+        self.events.put(('world_room', self.world_topic))
+        self.events.put(('status', f'World chat room set to: {self.world_topic}'))
+
+    def set_world_enabled(self, enabled):
+        self.world_enabled = bool(enabled)
+        self.events.put(('world_status', self.world_enabled, self.world_topic))
+        if self.world_enabled:
+            self.events.put(('status', f'World chat connected: {self.world_topic}'))
+        else:
+            self.events.put(('status', 'World chat disconnected'))
 
     def _find_open_port(self, base, span):
         for port in range(int(base), int(base) + int(span)):
@@ -1228,7 +1262,13 @@ class InlineSocialEngine:
 
     def start(self):
         self.running = True
-        for fn in (self._tcp_server_loop, self._udp_discovery_listener, self._udp_discovery_sender, self._peer_gc_loop):
+        for fn in (
+            self._tcp_server_loop,
+            self._udp_discovery_listener,
+            self._udp_discovery_sender,
+            self._peer_gc_loop,
+            self._world_recv_loop,
+        ):
             t = threading.Thread(target=fn, daemon=True)
             self.threads.append(t)
             t.start()
@@ -1236,6 +1276,7 @@ class InlineSocialEngine:
             self.events.put(('status', f'Chat TCP listening on port {self.chat_port}'))
         else:
             self.events.put(('status', 'No free TCP chat port available'))
+        self.events.put(('world_status', self.world_enabled, self.world_topic))
 
     def stop(self):
         self.running = False
@@ -1254,6 +1295,33 @@ class InlineSocialEngine:
         body = (json.dumps(payload, ensure_ascii=False) + '\n').encode('utf-8', errors='ignore')
         with socket.create_connection((str(host), int(port)), timeout=4.0) as s:
             s.sendall(body)
+
+    def _world_url(self, suffix=''):
+        topic = urllib.parse.quote(self.world_topic, safe='')
+        return f'{self.world_relay}/{topic}{suffix}'
+
+    def send_world_chat(self, text):
+        msg = {
+            'kind': 'xui_world_chat',
+            'node_id': self.node_id,
+            'from': self.nickname,
+            'text': str(text or ''),
+            'room': self.world_topic,
+            'ts': time.time(),
+        }
+        data = json.dumps(msg, ensure_ascii=False).encode('utf-8', errors='ignore')
+        req = urllib.request.Request(
+            self._world_url(''),
+            data=data,
+            method='POST',
+            headers={
+                'Content-Type': 'text/plain; charset=utf-8',
+                'User-Agent': 'xui-dashboard-world-chat',
+                'X-Title': f'XUI:{self.nickname}',
+            },
+        )
+        with urllib.request.urlopen(req, timeout=8) as r:
+            _ = r.read(256)
 
     def _peer_key(self, host, port):
         return f'{host}:{int(port)}'
@@ -1455,6 +1523,73 @@ class InlineSocialEngine:
                     self.events.put(('chat', sender, text))
         srv.close()
 
+    def _world_recv_loop(self):
+        backoff = 1.2
+        while self.running:
+            if not self.world_enabled:
+                time.sleep(0.4)
+                continue
+            url = self._world_url('/json')
+            req = urllib.request.Request(
+                url,
+                headers={
+                    'User-Agent': 'xui-dashboard-world-chat',
+                    'Cache-Control': 'no-cache',
+                    'Connection': 'keep-alive',
+                },
+            )
+            try:
+                with urllib.request.urlopen(req, timeout=30) as resp:
+                    backoff = 1.2
+                    while self.running and self.world_enabled:
+                        raw = resp.readline()
+                        if not raw:
+                            break
+                        line = raw.decode('utf-8', errors='ignore').strip()
+                        if not line:
+                            continue
+                        try:
+                            evt = json.loads(line)
+                        except Exception:
+                            continue
+                        if str(evt.get('event') or '') != 'message':
+                            continue
+                        msg_id = str(evt.get('id') or '')
+                        if msg_id:
+                            if msg_id in self._seen_world_ids:
+                                continue
+                            self._seen_world_ids.add(msg_id)
+                            if len(self._seen_world_ids) > 1200:
+                                self._seen_world_ids = set(list(self._seen_world_ids)[-600:])
+                        body = str(evt.get('message') or '').strip()
+                        if not body:
+                            continue
+                        try:
+                            payload = json.loads(body)
+                        except Exception:
+                            payload = {
+                                'kind': 'xui_world_chat',
+                                'node_id': '',
+                                'from': str(evt.get('title') or 'WORLD'),
+                                'text': body,
+                                'room': self.world_topic,
+                                'ts': evt.get('time', time.time()),
+                            }
+                        if str(payload.get('kind') or '') != 'xui_world_chat':
+                            continue
+                        if str(payload.get('room') or self.world_topic) != self.world_topic:
+                            continue
+                        if str(payload.get('node_id') or '') == self.node_id:
+                            continue
+                        who = str(payload.get('from') or 'WORLD')
+                        txt = str(payload.get('text') or '').strip()
+                        if txt:
+                            self.events.put(('world_chat', who, txt))
+            except Exception as exc:
+                self.events.put(('status', f'World relay reconnecting: {exc}'))
+                time.sleep(min(8.0, backoff))
+                backoff = min(8.0, backoff * 1.5)
+
 
 class SocialOverlay(QtWidgets.QDialog):
     def __init__(self, parent=None):
@@ -1468,11 +1603,14 @@ class SocialOverlay(QtWidgets.QDialog):
         self.setAttribute(QtCore.Qt.WA_TranslucentBackground, True)
         self._build()
         self._load_manual_peers()
+        self._load_world_settings()
         self.engine.start()
+        self._refresh_world_peer()
         self.timer = QtCore.QTimer(self)
         self.timer.timeout.connect(self._poll_events)
         self.timer.start(120)
         self._append_system('LAN autodiscovery enabled (broadcast + probe). Add peer for Internet P2P.')
+        self._append_system(f"World chat ready via relay ({self.engine.world_relay}) room: {self.engine.world_topic}")
 
     def _build(self):
         self.setStyleSheet('''
@@ -1517,21 +1655,27 @@ class SocialOverlay(QtWidgets.QDialog):
 
         body = QtWidgets.QHBoxLayout()
         left = QtWidgets.QVBoxLayout()
-        left_lbl = QtWidgets.QLabel('Peers (LAN / P2P)')
+        left_lbl = QtWidgets.QLabel('Peers (LAN / P2P / WORLD)')
         left_lbl.setStyleSheet('font-size:24px; font-weight:700; color:#f4f8fa;')
         self.peers = QtWidgets.QListWidget()
         self.peers.setMinimumWidth(360)
         self.btn_add = QtWidgets.QPushButton('Add Peer ID')
         self.btn_ids = QtWidgets.QPushButton('My Peer IDs')
         self.btn_lan = QtWidgets.QPushButton('LAN Status')
+        self.btn_world_toggle = QtWidgets.QPushButton('World Chat: ON')
+        self.btn_world_room = QtWidgets.QPushButton('World Room')
         self.btn_add.clicked.connect(self._add_peer)
         self.btn_ids.clicked.connect(self._show_peer_ids)
         self.btn_lan.clicked.connect(self._show_lan_status)
+        self.btn_world_toggle.clicked.connect(self._toggle_world_chat)
+        self.btn_world_room.clicked.connect(self._change_world_room)
         left.addWidget(left_lbl)
         left.addWidget(self.peers, 1)
         left.addWidget(self.btn_add)
         left.addWidget(self.btn_ids)
         left.addWidget(self.btn_lan)
+        left.addWidget(self.btn_world_toggle)
+        left.addWidget(self.btn_world_room)
 
         right = QtWidgets.QVBoxLayout()
         self.chat = QtWidgets.QPlainTextEdit()
@@ -1553,7 +1697,7 @@ class SocialOverlay(QtWidgets.QDialog):
         body.addLayout(left)
         body.addLayout(right, 1)
         root.addLayout(body, 1)
-        bottom = QtWidgets.QLabel('ENTER = send | ESC/BACK = close | Use peer format alias@host:port')
+        bottom = QtWidgets.QLabel('ENTER = send | ESC/BACK = close | Use alias@host:port or select WORLD room')
         bottom.setObjectName('social_hint')
         root.addWidget(bottom)
 
@@ -1589,18 +1733,23 @@ class SocialOverlay(QtWidgets.QDialog):
         self._append_line(f"[{time.strftime('%H:%M:%S')}] {who}: {text}")
 
     def _peer_row(self, peer):
+        if str(peer.get('source')) == 'WORLD':
+            return f"{peer['name']}  [global relay]  (WORLD)"
         return f"{peer['name']}  [{peer['host']}:{peer['port']}]  ({peer['source']})"
 
     def _upsert_peer(self, peer, persist=False):
-        key = f"{peer['host']}:{int(peer['port'])}"
+        key = f"{peer['host']}:{int(peer.get('port', 0) or 0)}:{peer.get('source', '')}"
         data = {
             'name': str(peer.get('name') or peer.get('host')),
             'host': str(peer.get('host')),
             'port': int(peer.get('port') or 0),
             'source': str(peer.get('source') or 'LAN'),
             'node_id': str(peer.get('node_id') or ''),
+            '_world': bool(peer.get('_world', False)),
         }
-        if data['port'] <= 0 or not data['host']:
+        if not data['host']:
+            return
+        if data['source'] != 'WORLD' and data['port'] <= 0:
             return
         if key in self.peer_items:
             self.peer_data[key].update(data)
@@ -1649,6 +1798,8 @@ class SocialOverlay(QtWidgets.QDialog):
         weighted = []
         for key, p in self.peer_data.items():
             host = str(p.get('host') or '')
+            if str(p.get('source') or '') == 'WORLD':
+                continue
             try:
                 port = int(p.get('port') or 0)
             except Exception:
@@ -1726,6 +1877,72 @@ class SocialOverlay(QtWidgets.QDialog):
         out = subprocess.getoutput('ip -brief -4 addr 2>/dev/null || ip -4 addr show 2>/dev/null || true')
         QtWidgets.QMessageBox.information(self, 'LAN Status', out or 'No network data.')
 
+    def _load_world_settings(self):
+        cfg = safe_json_read(WORLD_CHAT_FILE, {})
+        room = str(cfg.get('room', '')).strip()
+        enabled = bool(cfg.get('enabled', True))
+        if room:
+            self.engine.set_world_topic(room)
+        self.engine.set_world_enabled(enabled)
+        self._update_world_toggle_button()
+
+    def _save_world_settings(self):
+        safe_json_write(
+            WORLD_CHAT_FILE,
+            {
+                'room': self.engine.world_topic,
+                'enabled': bool(self.engine.world_enabled),
+                'relay': self.engine.world_relay,
+            },
+        )
+
+    def _world_peer_payload(self):
+        return {
+            'name': f"WORLD #{self.engine.world_topic}",
+            'host': self.engine.world_relay,
+            'port': 0,
+            'source': 'WORLD',
+            'node_id': f'world:{self.engine.world_topic}',
+            '_world': True,
+        }
+
+    def _refresh_world_peer(self):
+        existing = None
+        for key, p in list(self.peer_data.items()):
+            if str(p.get('source')) == 'WORLD' or bool(p.get('_world')):
+                existing = key
+                break
+        if existing is not None:
+            self._remove_peer(existing)
+        if self.engine.world_enabled:
+            self._upsert_peer(self._world_peer_payload(), persist=False)
+        self._update_world_toggle_button()
+
+    def _update_world_toggle_button(self):
+        if self.engine.world_enabled:
+            self.btn_world_toggle.setText('World Chat: ON')
+        else:
+            self.btn_world_toggle.setText('World Chat: OFF')
+
+    def _toggle_world_chat(self):
+        self.engine.set_world_enabled(not self.engine.world_enabled)
+        self._refresh_world_peer()
+        self._save_world_settings()
+
+    def _change_world_room(self):
+        d = EscInputDialog(self)
+        d.setWindowTitle('World Chat Room')
+        d.setLabelText('Room/topic name (letters, numbers, -, _, .)')
+        d.setInputMode(QtWidgets.QInputDialog.TextInput)
+        d.setTextValue(self.engine.world_topic)
+        if d.exec_() != QtWidgets.QDialog.Accepted:
+            return
+        raw = d.textValue()
+        self.engine.set_world_topic(raw)
+        self._refresh_world_peer()
+        self._save_world_settings()
+        self._append_system(f'World room changed to: {self.engine.world_topic}')
+
     def _send_current(self):
         peer = self._selected_peer()
         if not peer:
@@ -1733,6 +1950,15 @@ class SocialOverlay(QtWidgets.QDialog):
             return
         txt = self.input.text().strip()
         if not txt:
+            return
+        if str(peer.get('source')) == 'WORLD':
+            try:
+                self.engine.send_world_chat(txt)
+                self._append_line(f"[{time.strftime('%H:%M:%S')}] You -> WORLD: {txt}")
+                self.status.setText(f"World sent to room {self.engine.world_topic}")
+                self.input.clear()
+            except Exception as e:
+                self.status.setText(f'World send failed: {e}')
             return
         last_err = None
         used = None
@@ -1780,12 +2006,28 @@ class SocialOverlay(QtWidgets.QDialog):
             elif kind == 'chat':
                 _kind, sender, text = evt
                 self._append_chat(sender, text)
+            elif kind == 'world_chat':
+                _kind, sender, text = evt
+                self._append_line(f"[{time.strftime('%H:%M:%S')}] {sender} [WORLD]: {text}")
+            elif kind == 'world_status':
+                _kind, enabled, room = evt
+                self._update_world_toggle_button()
+                if bool(enabled):
+                    self.status.setText(f'World chat connected ({room})')
+                else:
+                    self.status.setText('World chat disconnected')
+                self._refresh_world_peer()
+            elif kind == 'world_room':
+                _kind, room = evt
+                self._refresh_world_peer()
+                self.status.setText(f'World room: {room}')
 
     def closeEvent(self, e):
         try:
             self.timer.stop()
         except Exception:
             pass
+        self._save_world_settings()
         self.engine.stop()
         super().closeEvent(e)
 
@@ -9019,8 +9261,8 @@ set -euo pipefail
 XUI_HOME="$HOME/.xui"
 APP_HOME="$XUI_HOME/apps/fnae"
 DATA_FILE="$XUI_HOME/data/fnae_paths.json"
-LINUX_MEDIAFIRE_URL="https://www.mediafire.com/file/a4q4l09vdfqzzws/Five+Nights+At+Epsteins+Linux.tar/file"
-WINDOWS_MEDIAFIRE_URL="https://www.mediafire.com/file/6tj1rd7kmsxv4oe/Five+Nights+At+Epstein's.zip/file"
+LINUX_MEDIAFIRE_URL="https://www.mediafire.com/file/a4q4l09vdfqzzws/Five_Nights_At_Epsteins_Linux.tar/file"
+WINDOWS_MEDIAFIRE_URL="https://www.mediafire.com/file/6tj1rd7kmsxv4oe/Five_Nights_At_Epstein%2527s.zip/file"
 mkdir -p "$APP_HOME/linux" "$APP_HOME/windows" "$XUI_HOME/data"
 
 find_first_existing(){
@@ -9045,39 +9287,91 @@ find_by_name_in_dirs(){
   return 1
 }
 
+is_html_file(){
+  local f="$1"
+  [ -f "$f" ] || return 0
+  if command -v file >/dev/null 2>&1; then
+    file -b "$f" 2>/dev/null | grep -Eiq 'html|xml' && return 0
+  fi
+  head -c 2048 "$f" 2>/dev/null | grep -Eiq '<!doctype html|<html|<head|<body|mediafire' && return 0
+  return 1
+}
+
+fetch_url_to_file(){
+  local url="$1"
+  local out="$2"
+  local ref="${3:-}"
+  if command -v curl >/dev/null 2>&1; then
+    if [ -n "$ref" ]; then
+      curl -fL --retry 3 --retry-delay 1 -A "Mozilla/5.0" -e "$ref" "$url" -o "$out" >/dev/null 2>&1
+    else
+      curl -fL --retry 3 --retry-delay 1 -A "Mozilla/5.0" "$url" -o "$out" >/dev/null 2>&1
+    fi
+    return $?
+  fi
+  if command -v wget >/dev/null 2>&1; then
+    if [ -n "$ref" ]; then
+      wget -q --tries=3 --waitretry=1 --user-agent="Mozilla/5.0" --referer="$ref" -O "$out" "$url"
+    else
+      wget -q --tries=3 --waitretry=1 --user-agent="Mozilla/5.0" -O "$out" "$url"
+    fi
+    return $?
+  fi
+  return 1
+}
+
+extract_mediafire_direct(){
+  local html="$1"
+  local direct=""
+  direct="$(grep -Eo 'https://download[0-9]*\.mediafire\.com/[^"'"'"' <>]+' "$html" | head -n1 || true)"
+  if [ -z "$direct" ]; then
+    direct="$(grep -Eo 'https://[a-z0-9.-]*mediafire\.com/[^"'"'"' <>]*download[^"'"'"' <>]*' "$html" | head -n1 || true)"
+  fi
+  if [ -z "$direct" ]; then
+    direct="$(sed -n 's/.*href="\([^"]*download[^"]*\)".*/\1/p' "$html" | grep -E '^https?://.*mediafire' | head -n1 || true)"
+  fi
+  if [ -z "$direct" ]; then
+    direct="$(sed -n "s/.*href='\([^']*download[^']*\)'.*/\1/p" "$html" | grep -E '^https?://.*mediafire' | head -n1 || true)"
+  fi
+  if [ -n "$direct" ]; then
+    direct="$(printf '%s' "$direct" | sed -e 's/&amp;/\&/g' -e 's#\\/#/#g')"
+    printf '%s\n' "$direct"
+    return 0
+  fi
+  return 1
+}
+
 download_from_mediafire(){
   local page_url="$1"
   local out_file="$2"
-  local tmp_html direct
+  local tmp_html tmp_dl direct
   tmp_html="$(mktemp)"
+  tmp_dl="$(mktemp)"
   rm -f "$out_file"
 
-  if command -v curl >/dev/null 2>&1; then
-    curl -fL -A "Mozilla/5.0" "$page_url" -o "$tmp_html" >/dev/null 2>&1 || { rm -f "$tmp_html"; return 1; }
-    direct="$(grep -Eo 'https://download[^\" ]+' "$tmp_html" | head -n1 | sed 's/&amp;/\&/g' || true)"
-    if [ -n "$direct" ]; then
-      curl -fL -A "Mozilla/5.0" "$direct" -o "$out_file" >/dev/null 2>&1 || { rm -f "$tmp_html" "$out_file"; return 1; }
-    else
-      cp -f "$tmp_html" "$out_file" >/dev/null 2>&1 || { rm -f "$tmp_html" "$out_file"; return 1; }
-    fi
-    rm -f "$tmp_html"
-    return 0
+  fetch_url_to_file "$page_url" "$tmp_html" || { rm -f "$tmp_html" "$tmp_dl"; return 1; }
+  direct="$(extract_mediafire_direct "$tmp_html" || true)"
+  if [ -z "$direct" ]; then
+    # fallback: some links work with /download suffix
+    fetch_url_to_file "${page_url%/}/download" "$tmp_html" "$page_url" || true
+    direct="$(extract_mediafire_direct "$tmp_html" || true)"
   fi
-
-  if command -v wget >/dev/null 2>&1; then
-    wget -qO "$tmp_html" "$page_url" || { rm -f "$tmp_html"; return 1; }
-    direct="$(grep -Eo 'https://download[^\" ]+' "$tmp_html" | head -n1 | sed 's/&amp;/\&/g' || true)"
-    if [ -n "$direct" ]; then
-      wget -qO "$out_file" "$direct" || { rm -f "$tmp_html" "$out_file"; return 1; }
-    else
-      cp -f "$tmp_html" "$out_file" >/dev/null 2>&1 || { rm -f "$tmp_html" "$out_file"; return 1; }
-    fi
-    rm -f "$tmp_html"
-    return 0
+  if [ -z "$direct" ]; then
+    rm -f "$tmp_html" "$tmp_dl"
+    return 1
   fi
-
+  fetch_url_to_file "$direct" "$tmp_dl" "$page_url" || { rm -f "$tmp_html" "$tmp_dl"; return 1; }
+  if is_html_file "$tmp_dl"; then
+    rm -f "$tmp_html" "$tmp_dl"
+    return 1
+  fi
+  if [ ! -s "$tmp_dl" ]; then
+    rm -f "$tmp_html" "$tmp_dl"
+    return 1
+  fi
+  mv -f "$tmp_dl" "$out_file"
   rm -f "$tmp_html"
-  return 1
+  return 0
 }
 
 validate_tar(){
@@ -9110,33 +9404,63 @@ PY
 
 tar_candidates=(
   "$HOME/.xui/cache/games/Five Nights At Epsteins Linux.tar"
+  "$HOME/.xui/cache/games/Five_Nights_At_Epsteins_Linux.tar"
   "$HOME/.xui/GAMES/Five Nights At Epsteins Linux.tar"
+  "$HOME/.xui/GAMES/Five_Nights_At_Epsteins_Linux.tar"
   "$PWD/GAMES/Five Nights At Epsteins Linux.tar"
+  "$PWD/GAMES/Five_Nights_At_Epsteins_Linux.tar"
   "$PWD/Five Nights At Epsteins Linux.tar"
+  "$PWD/Five_Nights_At_Epsteins_Linux.tar"
   "$HOME/GAMES/Five Nights At Epsteins Linux.tar"
+  "$HOME/GAMES/Five_Nights_At_Epsteins_Linux.tar"
   "$HOME/Downloads/Five Nights At Epsteins Linux.tar"
+  "$HOME/Downloads/Five_Nights_At_Epsteins_Linux.tar"
   "$HOME/Desktop/Five Nights At Epsteins Linux.tar"
+  "$HOME/Desktop/Five_Nights_At_Epsteins_Linux.tar"
   "/mnt/c/Users/Usuario/Downloads/xui/xui/GAMES/Five Nights At Epsteins Linux.tar"
+  "/mnt/c/Users/Usuario/Downloads/xui/xui/GAMES/Five_Nights_At_Epsteins_Linux.tar"
   "/mnt/c/Users/Usuario/Downloads/Five Nights At Epsteins Linux.tar"
+  "/mnt/c/Users/Usuario/Downloads/Five_Nights_At_Epsteins_Linux.tar"
   "/mnt/c/Users/$USER/Downloads/xui/xui/GAMES/Five Nights At Epsteins Linux.tar"
+  "/mnt/c/Users/$USER/Downloads/xui/xui/GAMES/Five_Nights_At_Epsteins_Linux.tar"
   "/mnt/c/Users/$USER/Downloads/Five Nights At Epsteins Linux.tar"
+  "/mnt/c/Users/$USER/Downloads/Five_Nights_At_Epsteins_Linux.tar"
 )
 zip_candidates=(
   "$HOME/.xui/cache/games/Five Nights At Epstein's.zip"
+  "$HOME/.xui/cache/games/Five_Nights_At_Epstein's.zip"
   "$HOME/.xui/GAMES/Five Nights At Epstein's.zip"
+  "$HOME/.xui/GAMES/Five_Nights_At_Epstein's.zip"
   "$PWD/GAMES/Five Nights At Epstein's.zip"
+  "$PWD/GAMES/Five_Nights_At_Epstein's.zip"
   "$PWD/Five Nights At Epstein's.zip"
+  "$PWD/Five_Nights_At_Epstein's.zip"
   "$HOME/GAMES/Five Nights At Epstein's.zip"
+  "$HOME/GAMES/Five_Nights_At_Epstein's.zip"
   "$HOME/Downloads/Five Nights At Epstein's.zip"
+  "$HOME/Downloads/Five_Nights_At_Epstein's.zip"
   "$HOME/Desktop/Five Nights At Epstein's.zip"
+  "$HOME/Desktop/Five_Nights_At_Epstein's.zip"
   "/mnt/c/Users/Usuario/Downloads/xui/xui/GAMES/Five Nights At Epstein's.zip"
+  "/mnt/c/Users/Usuario/Downloads/xui/xui/GAMES/Five_Nights_At_Epstein's.zip"
   "/mnt/c/Users/Usuario/Downloads/Five Nights At Epstein's.zip"
+  "/mnt/c/Users/Usuario/Downloads/Five_Nights_At_Epstein's.zip"
   "/mnt/c/Users/$USER/Downloads/xui/xui/GAMES/Five Nights At Epstein's.zip"
+  "/mnt/c/Users/$USER/Downloads/xui/xui/GAMES/Five_Nights_At_Epstein's.zip"
   "/mnt/c/Users/$USER/Downloads/Five Nights At Epstein's.zip"
+  "/mnt/c/Users/$USER/Downloads/Five_Nights_At_Epstein's.zip"
 )
 
 TAR_SRC="$(find_first_existing "${tar_candidates[@]}" || true)"
 ZIP_SRC="$(find_first_existing "${zip_candidates[@]}" || true)"
+if [ -n "$TAR_SRC" ] && ! validate_tar "$TAR_SRC"; then
+  echo "Ignoring invalid TAR candidate: $TAR_SRC"
+  TAR_SRC=""
+fi
+if [ -n "$ZIP_SRC" ] && ! validate_zip "$ZIP_SRC"; then
+  echo "Ignoring invalid ZIP candidate: $ZIP_SRC"
+  ZIP_SRC=""
+fi
 
 # Fallback scan by filename in common roots if direct candidates failed.
 if [ -z "$TAR_SRC" ]; then
@@ -9146,8 +9470,22 @@ if [ -z "$TAR_SRC" ]; then
     "/mnt/c/Users/$USER/Downloads/xui/xui/GAMES" "/mnt/c/Users/$USER/Downloads" \
     2>/dev/null || true)"
 fi
+if [ -z "$TAR_SRC" ]; then
+  TAR_SRC="$(find_by_name_in_dirs "Five_Nights_At_Epsteins_Linux.tar" \
+    "$HOME/.xui/cache/games" "$HOME/.xui/GAMES" "$PWD" "$HOME/Downloads" "$HOME/Desktop" "$HOME/GAMES" \
+    "/mnt/c/Users/Usuario/Downloads/xui/xui/GAMES" "/mnt/c/Users/Usuario/Downloads" \
+    "/mnt/c/Users/$USER/Downloads/xui/xui/GAMES" "/mnt/c/Users/$USER/Downloads" \
+    2>/dev/null || true)"
+fi
 if [ -z "$ZIP_SRC" ]; then
   ZIP_SRC="$(find_by_name_in_dirs "Five Nights At Epstein's.zip" \
+    "$HOME/.xui/cache/games" "$HOME/.xui/GAMES" "$PWD" "$HOME/Downloads" "$HOME/Desktop" "$HOME/GAMES" \
+    "/mnt/c/Users/Usuario/Downloads/xui/xui/GAMES" "/mnt/c/Users/Usuario/Downloads" \
+    "/mnt/c/Users/$USER/Downloads/xui/xui/GAMES" "/mnt/c/Users/$USER/Downloads" \
+    2>/dev/null || true)"
+fi
+if [ -z "$ZIP_SRC" ]; then
+  ZIP_SRC="$(find_by_name_in_dirs "Five_Nights_At_Epstein's.zip" \
     "$HOME/.xui/cache/games" "$HOME/.xui/GAMES" "$PWD" "$HOME/Downloads" "$HOME/Desktop" "$HOME/GAMES" \
     "/mnt/c/Users/Usuario/Downloads/xui/xui/GAMES" "/mnt/c/Users/Usuario/Downloads" \
     "/mnt/c/Users/$USER/Downloads/xui/xui/GAMES" "/mnt/c/Users/$USER/Downloads" \
