@@ -137,8 +137,11 @@ BASH
         apt_safe_update || warn "apt update failed"
         # Install critical runtime first (must succeed for dashboard)
         apt_safe_install \
-            python3 python3-pip python3-venv python3-pyqt5 python3-pyqt5.qtmultimedia python3-pil python3-evdev || warn "Core apt dependencies failed"
+            python3 python3-pip python3-venv python3-pyqt5 python3-pyqt5.qtmultimedia python3-pyqt5.qtgamepad python3-pil python3-evdev || warn "Core apt dependencies failed"
         apt_safe_install python3-pyqt5.qtwebengine || warn "Optional apt package missing: python3-pyqt5.qtwebengine"
+        for pkg in qml-module-qtgamepad libqt5gamepad5; do
+            apt_safe_install "$pkg" || true
+        done
         # Optional tools (can fail without breaking dashboard runtime)
         apt_safe_install \
             ffmpeg mpv jq xdotool curl ca-certificates iproute2 bc \
@@ -162,6 +165,9 @@ BASH
             ffmpeg mpv jq xdotool curl iproute bc \
             xclip xsel rofi feh scrot udisks2 p7zip joystick joycond retroarch lutris || warn "Some dnf packages failed to install"
         run_as_root dnf install -y python3-qt5-webengine || true
+        for pkg in python3-qt5-gamepad qt5-qtgamepad qt5-qtgamepad-devel; do
+            run_as_root dnf install -y "$pkg" || true
+        done
         run_as_root dnf install -y wine winetricks || true
         for pkg in flatpak steam box64 fex-emu qemu-user-static retroarch lutris heroic-games-launcher joycond; do
             run_as_root dnf install -y "$pkg" || true
@@ -172,6 +178,9 @@ BASH
             ffmpeg mpv jq xdotool curl iproute2 bc \
             xclip xsel rofi feh scrot maim udisks2 p7zip joystick joycond retroarch lutris || warn "Some pacman packages failed to install"
         run_as_root pacman -S --noconfirm python-pyqt5-webengine || true
+        for pkg in qt5-gamepad; do
+            run_as_root pacman -S --noconfirm "$pkg" || true
+        done
         run_as_root pacman -S --noconfirm wine winetricks || true
         for pkg in flatpak steam box64 qemu-user-static retroarch lutris heroic-games-launcher joycond; do
             run_as_root pacman -S --noconfirm "$pkg" || true
@@ -2029,45 +2038,64 @@ class GamesShowcasePanel(QtWidgets.QFrame):
         blades = QtWidgets.QFrame()
         blades.setObjectName('games_blades')
         blades_l = QtWidgets.QVBoxLayout(blades)
-        blades_l.setContentsMargins(8, 8, 8, 8)
-        blades_l.setSpacing(6)
+        blades_l.setContentsMargins(6, 6, 6, 6)
+        blades_l.setSpacing(4)
         self.btn_my_games = QtWidgets.QPushButton('My Games')
-        self.btn_market = QtWidgets.QPushButton('Marketplace')
-        for b in (self.btn_my_games, self.btn_market):
+        self.btn_browse_games = QtWidgets.QPushButton('Browse Games')
+        self.btn_search_games = QtWidgets.QPushButton('Search Games')
+        for b in (self.btn_my_games, self.btn_browse_games, self.btn_search_games):
             b.setObjectName('games_blade_btn')
             blades_l.addWidget(b)
         blades_l.addStretch(1)
         self.btn_my_games.clicked.connect(lambda: self.clicked.emit('My Games'))
-        self.btn_market.clicked.connect(lambda: self.clicked.emit('Games Marketplace'))
+        self.btn_browse_games.clicked.connect(lambda: self.clicked.emit('Browse Games'))
+        self.btn_search_games.clicked.connect(lambda: self.clicked.emit('Search Games'))
         body.addWidget(blades, 1)
 
         right = QtWidgets.QVBoxLayout()
         right.setSpacing(8)
 
+        covers = QtWidgets.QHBoxLayout()
+        covers.setSpacing(8)
         self.featured = QtWidgets.QFrame()
         self.featured.setObjectName('games_featured')
         ft_l = QtWidgets.QVBoxLayout(self.featured)
-        ft_l.setContentsMargins(14, 10, 14, 10)
-        ft_l.setSpacing(4)
-        self.featured_tag = QtWidgets.QLabel('FEATURED')
+        ft_l.setContentsMargins(10, 8, 10, 8)
+        ft_l.setSpacing(2)
+        self.featured_tag = QtWidgets.QLabel('HIGHLIGHT')
         self.featured_tag.setObjectName('games_featured_tag')
-        self.featured_name = QtWidgets.QLabel('My Games Collection')
+        self.featured_name = QtWidgets.QLabel('Halo 4')
         self.featured_name.setObjectName('games_featured_name')
-        self.featured_sub = QtWidgets.QLabel('Open your installed games and services')
+        self.featured_sub = QtWidgets.QLabel('Open your collection and continue playing')
         self.featured_sub.setObjectName('games_featured_sub')
         ft_l.addWidget(self.featured_tag, 0, QtCore.Qt.AlignLeft)
         ft_l.addStretch(1)
         ft_l.addWidget(self.featured_name, 0, QtCore.Qt.AlignLeft)
         ft_l.addWidget(self.featured_sub, 0, QtCore.Qt.AlignLeft)
-        right.addWidget(self.featured, 1)
+        covers.addWidget(self.featured, 2)
 
-        strip = QtWidgets.QHBoxLayout()
-        strip.setSpacing(8)
-        for label in ('Forza', 'FIFA', 'Halo', 'COD'):
+        mini_col = QtWidgets.QVBoxLayout()
+        mini_col.setSpacing(8)
+        for label in ('Forza 4', 'Gears', 'FIFA', 'MW3'):
             card = self._make_mini_card(label)
             self._cards.append(card)
-            strip.addWidget(card, 1)
-        right.addLayout(strip)
+            mini_col.addWidget(card, 1)
+        covers.addLayout(mini_col, 1)
+        right.addLayout(covers, 1)
+
+        rec = QtWidgets.QFrame()
+        rec.setObjectName('games_recommend')
+        rec_l = QtWidgets.QVBoxLayout(rec)
+        rec_l.setContentsMargins(10, 6, 10, 6)
+        rec_l.setSpacing(2)
+        rec_tag = QtWidgets.QLabel('RECOMMENDATIONS')
+        rec_tag.setObjectName('games_recommend_tag')
+        rec_text = QtWidgets.QLabel('Popular now: Runner, Gem Match, FNAE')
+        rec_text.setObjectName('games_recommend_text')
+        rec_l.addWidget(rec_tag, 0, QtCore.Qt.AlignLeft)
+        rec_l.addWidget(rec_text, 0, QtCore.Qt.AlignLeft)
+        right.addWidget(rec, 0)
+
         body.addLayout(right, 4)
 
         root.addLayout(body, 1)
@@ -2094,7 +2122,7 @@ class GamesShowcasePanel(QtWidgets.QFrame):
         self.sub_label.setStyleSheet(f'color:rgba(235,242,244,0.78); font-size:{sub_fs}px; font-weight:600;')
 
         blade_h = max(40, int(58 * s * compact_factor))
-        for b in (self.btn_my_games, self.btn_market):
+        for b in (self.btn_my_games, self.btn_browse_games, self.btn_search_games):
             b.setMinimumHeight(blade_h)
             b.setStyleSheet(
                 'QPushButton#games_blade_btn {'
@@ -2142,6 +2170,21 @@ class GamesShowcasePanel(QtWidgets.QFrame):
                 background:qlineargradient(x1:0,y1:0,x2:1,y2:1, stop:0 #4f5962, stop:1 #3b444d);
                 border:1px solid rgba(223,232,239,0.5);
                 border-radius:2px;
+            }}
+            QFrame#games_recommend {{
+                background:qlineargradient(x1:0,y1:0,x2:1,y2:0, stop:0 #d8dde3, stop:1 #c8ced5);
+                border:1px solid rgba(117,126,136,0.5);
+                border-radius:2px;
+            }}
+            QLabel#games_recommend_tag {{
+                color:#3f4a56;
+                font-size:11px;
+                font-weight:800;
+            }}
+            QLabel#games_recommend_text {{
+                color:#2f3944;
+                font-size:14px;
+                font-weight:700;
             }}
             '''
         )
@@ -2537,6 +2580,165 @@ class GamesHubMenu(QtWidgets.QDialog):
 
     def keyPressEvent(self, e):
         if e.key() in (QtCore.Qt.Key_Escape, QtCore.Qt.Key_Back):
+            self.reject()
+            return
+        if e.key() in (QtCore.Qt.Key_Return, QtCore.Qt.Key_Enter):
+            self._accept_current()
+            return
+        super().keyPressEvent(e)
+
+
+class MandatoryUpdateDialog(QtWidgets.QDialog):
+    def __init__(self, payload=None, parent=None):
+        super().__init__(parent)
+        self.payload = payload if isinstance(payload, dict) else {}
+        self._choice = 'No'
+        self._open_anim = None
+        self.setWindowTitle('Update Required')
+        self.setWindowFlags(QtCore.Qt.Dialog | QtCore.Qt.FramelessWindowHint)
+        self.setAttribute(QtCore.Qt.WA_TranslucentBackground, True)
+        self.setModal(True)
+        self.resize(760, 460)
+        self.setStyleSheet('''
+            QFrame#upd_panel {
+                background:#cfd4d9;
+                border:2px solid rgba(239,244,248,0.78);
+                border-radius:4px;
+            }
+            QFrame#upd_header {
+                background:qlineargradient(x1:0,y1:0,x2:1,y2:0, stop:0 #69717a, stop:1 #505860);
+                border:none;
+            }
+            QLabel#upd_header_title {
+                color:#edf2f6;
+                font-size:28px;
+                font-weight:800;
+            }
+            QLabel#upd_body_txt {
+                color:#232b33;
+                font-size:21px;
+                font-weight:600;
+            }
+            QListWidget#upd_choices {
+                background:#e3e7eb;
+                color:#1f252c;
+                font-size:30px;
+                border:1px solid rgba(76,86,96,0.4);
+                outline:none;
+            }
+            QListWidget#upd_choices::item {
+                padding:6px 10px;
+                margin:1px 0px;
+            }
+            QListWidget#upd_choices::item:selected {
+                background:qlineargradient(x1:0,y1:0,x2:1,y2:0, stop:0 #5abc3e, stop:1 #3e9132);
+                color:#f4fff1;
+                border:1px solid rgba(249,255,248,0.4);
+            }
+            QLabel#upd_hint {
+                color:#1f252c;
+                font-size:16px;
+                font-weight:700;
+            }
+        ''')
+        outer = QtWidgets.QVBoxLayout(self)
+        outer.setContentsMargins(0, 0, 0, 0)
+        panel = QtWidgets.QFrame()
+        panel.setObjectName('upd_panel')
+        outer.addWidget(panel)
+        root = QtWidgets.QVBoxLayout(panel)
+        root.setContentsMargins(0, 0, 0, 0)
+        root.setSpacing(0)
+
+        header = QtWidgets.QFrame()
+        header.setObjectName('upd_header')
+        h_l = QtWidgets.QHBoxLayout(header)
+        h_l.setContentsMargins(12, 8, 12, 8)
+        title = QtWidgets.QLabel('Update Required')
+        title.setObjectName('upd_header_title')
+        h_l.addWidget(title)
+        h_l.addStretch(1)
+        root.addWidget(header)
+
+        body = QtWidgets.QWidget()
+        b_l = QtWidgets.QVBoxLayout(body)
+        b_l.setContentsMargins(14, 12, 14, 10)
+        b_l.setSpacing(10)
+        repo = str(self.payload.get('repo', 'afitler79-alt/XUI-X360-FRONTEND'))
+        remote = str(self.payload.get('remote_commit', 'unknown'))[:10]
+        txt = (
+            'A mandatory system update is available from GitHub.\n'
+            'If you decline, you will not be able to continue into the dashboard.\n\n'
+            f'Repository: {repo}\n'
+            f'Latest build: {remote}\n\n'
+            'Do you want to apply the update now?'
+        )
+        message = QtWidgets.QLabel(txt)
+        message.setObjectName('upd_body_txt')
+        message.setWordWrap(True)
+        b_l.addWidget(message, 1)
+
+        self.choices = QtWidgets.QListWidget()
+        self.choices.setObjectName('upd_choices')
+        self.choices.addItems(['Yes', 'No'])
+        self.choices.setCurrentRow(0)
+        self.choices.itemActivated.connect(self._accept_current)
+        b_l.addWidget(self.choices, 0)
+
+        hint = QtWidgets.QLabel('A/ENTER = Select | B/ESC = Back')
+        hint.setObjectName('upd_hint')
+        b_l.addWidget(hint, 0)
+        root.addWidget(body, 1)
+
+    def selected_choice(self):
+        return str(self._choice or 'No')
+
+    def _accept_current(self, *_):
+        it = self.choices.currentItem()
+        if it is None:
+            self._choice = 'No'
+        else:
+            self._choice = str(it.text()).strip() or 'No'
+        self.accept()
+
+    def showEvent(self, e):
+        super().showEvent(e)
+        parent = self.parentWidget()
+        if parent is not None:
+            w = min(max(760, int(parent.width() * 0.54)), max(760, parent.width() - 120))
+            h = min(max(440, int(parent.height() * 0.56)), max(440, parent.height() - 120))
+            self.resize(w, h)
+            x = parent.x() + (parent.width() - w) // 2
+            y = parent.y() + (parent.height() - h) // 2
+            self.move(max(0, x), max(0, y))
+        self._animate_open()
+
+    def _animate_open(self):
+        effect = QtWidgets.QGraphicsOpacityEffect(self)
+        self.setGraphicsEffect(effect)
+        effect.setOpacity(0.0)
+        end_rect = self.geometry()
+        start_rect = QtCore.QRect(end_rect.x(), end_rect.y() + max(18, end_rect.height() // 20), end_rect.width(), end_rect.height())
+        self.setGeometry(start_rect)
+        self._open_anim = QtCore.QParallelAnimationGroup(self)
+        fade = QtCore.QPropertyAnimation(effect, b'opacity', self)
+        fade.setDuration(170)
+        fade.setStartValue(0.0)
+        fade.setEndValue(1.0)
+        fade.setEasingCurve(QtCore.QEasingCurve.OutCubic)
+        slide = QtCore.QPropertyAnimation(self, b'geometry', self)
+        slide.setDuration(210)
+        slide.setStartValue(start_rect)
+        slide.setEndValue(end_rect)
+        slide.setEasingCurve(QtCore.QEasingCurve.OutCubic)
+        self._open_anim.addAnimation(fade)
+        self._open_anim.addAnimation(slide)
+        self._open_anim.finished.connect(lambda: self.setGraphicsEffect(None))
+        self._open_anim.start(QtCore.QAbstractAnimation.DeleteWhenStopped)
+
+    def keyPressEvent(self, e):
+        if e.key() in (QtCore.Qt.Key_Escape, QtCore.Qt.Key_Back):
+            self._choice = 'No'
             self.reject()
             return
         if e.key() in (QtCore.Qt.Key_Return, QtCore.Qt.Key_Enter):
@@ -3102,10 +3304,10 @@ class Dashboard(QtWidgets.QMainWindow):
                 'hero_action': 'Games Hub',
                 'hero_variant': 'games',
                 'hero_title': 'games',
-                'hero_subtitle': 'my games and marketplace',
+                'hero_subtitle': 'play now',
                 'left': [
-                    ('My Games', 'My Games', (320, 170)),
-                    ('Games Marketplace', 'Marketplace', (320, 170)),
+                    ('Casino', 'Casino', (320, 170)),
+                    ('Runner', 'Runner', (320, 170)),
                     ('Missions', 'Missions', (320, 205)),
                 ],
                 'right': [
@@ -3204,6 +3406,8 @@ class Dashboard(QtWidgets.QMainWindow):
         self._stage_layout = None
         self._achievement_queue = []
         self._achievement_toast = None
+        self._startup_update_checked = False
+        self._mandatory_update_in_progress = False
         self.sfx = {
             'hover': 'hover.mp3',
             'open': 'open.mp3',
@@ -3336,6 +3540,9 @@ class Dashboard(QtWidgets.QMainWindow):
     def showEvent(self, e):
         super().showEvent(e)
         QtCore.QTimer.singleShot(0, self._apply_responsive_layout)
+        if not self._startup_update_checked:
+            self._startup_update_checked = True
+            QtCore.QTimer.singleShot(260, self._check_mandatory_update_gate)
 
     def resizeEvent(self, e):
         super().resizeEvent(e)
@@ -3538,6 +3745,56 @@ class Dashboard(QtWidgets.QMainWindow):
                 self.handle_action(action)
         else:
             self._play_sfx('back')
+
+    def _extract_json_blob(self, text):
+        raw = str(text or '').strip()
+        if not raw:
+            return None
+        a = raw.find('{')
+        b = raw.rfind('}')
+        if a < 0 or b < 0 or b <= a:
+            return None
+        try:
+            return json.loads(raw[a:b+1])
+        except Exception:
+            return None
+
+    def _mandatory_update_payload(self):
+        checker = XUI_HOME / 'bin' / 'xui_update_check.sh'
+        if not checker.exists():
+            return None
+        cmd = f'/bin/sh -c "{checker} mandatory --json"'
+        out = subprocess.getoutput(cmd)
+        return self._extract_json_blob(out)
+
+    def _launch_mandatory_updater_and_quit(self):
+        checker = XUI_HOME / 'bin' / 'xui_update_check.sh'
+        if not checker.exists():
+            QtWidgets.QApplication.quit()
+            return
+        self._mandatory_update_in_progress = True
+        self._run_terminal(f'"{checker}" apply')
+        QtCore.QTimer.singleShot(120, QtWidgets.QApplication.quit)
+
+    def _check_mandatory_update_gate(self):
+        if self._mandatory_update_in_progress:
+            return
+        payload = self._mandatory_update_payload()
+        if not isinstance(payload, dict):
+            return
+        if not bool(payload.get('checked', False)):
+            return
+        if not bool(payload.get('update_required', False)):
+            return
+        self._play_sfx('open')
+        d = MandatoryUpdateDialog(payload, self)
+        selected = 'No'
+        if d.exec_() == QtWidgets.QDialog.Accepted:
+            selected = d.selected_choice()
+        if str(selected).strip().lower() == 'yes':
+            self._launch_mandatory_updater_and_quit()
+            return
+        QtWidgets.QApplication.quit()
 
     def _save_recent(self, action):
         try:
@@ -4093,6 +4350,8 @@ class Dashboard(QtWidgets.QMainWindow):
             'Heroic': 'Launch Heroic Games Launcher.',
             'Games Integrations': 'Manage Steam/RetroArch/Lutris/Heroic from one place.',
             'My Games': 'Open your personal games list (installed and ready to launch).',
+            'Browse Games': 'Open catalog and browse game offers.',
+            'Search Games': 'Search game titles in store.',
             'Games Marketplace': 'Open Games marketplace tiles and offers.',
             'Recently Played': 'Show recently used games and apps.',
             'Arcade Picks': 'Quick access to arcade style games.',
@@ -4134,7 +4393,7 @@ class Dashboard(QtWidgets.QMainWindow):
             'Controller L4T Fix': 'Load L4T controller modules/services (hid_nintendo/xpad/joycond).',
             'Controller Profile': 'Select controller mapping profile (auto/xbox360/switch).',
             'Diagnostics': 'Run diagnostics helper.',
-            'Update Check': 'Checks if updates are available.',
+            'Update Check': 'Checks mandatory GitHub update status (repo afitler79-alt/XUI-X360-FRONTEND).',
             'System Update': 'Runs distro package update flow.',
         }
         out = {}
@@ -4163,6 +4422,13 @@ class Dashboard(QtWidgets.QMainWindow):
             self._menu('My Pins', ['Casino', 'Runner', 'Gem Match', 'FNAE', 'Store', 'Web Browser', 'System Info', 'Web Control'])
         elif action == 'My Games':
             self._menu('My Games', ['Runner', 'Casino', 'Gem Match', 'FNAE', 'Steam', 'RetroArch', 'Games Integrations'])
+        elif action in ('Browse Games', 'Browse'):
+            self._run('/bin/sh', ['-c', f'{xui}/bin/xui_store.sh'])
+        elif action in ('Search Games', 'Games Search'):
+            q, ok = self._input_text('Search Games', 'Game or app:', '')
+            if ok and str(q).strip():
+                self._run('/bin/sh', ['-c', f'{xui}/bin/xui_store.sh'])
+                self._msg('Search Games', f'Store opened. Use search: {str(q).strip()}')
         elif action in ('Games Marketplace', 'Games Market'):
             self._run('/bin/sh', ['-c', f'{xui}/bin/xui_store.sh'])
         elif action == 'Recently Played':
@@ -4464,7 +4730,7 @@ class Dashboard(QtWidgets.QMainWindow):
         elif action == 'Battery Saver':
             self._run('/bin/sh', ['-c', f'{xui}/bin/xui_battery_saver.sh toggle'])
         elif action == 'Update Check':
-            self._msg('Update', subprocess.getoutput(f'/bin/sh -c "{xui}/bin/xui_update_check.sh status"'))
+            self._msg('Update', subprocess.getoutput(f'/bin/sh -c "{xui}/bin/xui_update_check.sh mandatory"'))
         elif action == 'System Update':
             self._run_terminal(f'"{xui}/bin/xui_update_system.sh"')
         elif action == 'Family':
@@ -5000,12 +5266,26 @@ XBOX_BUTTON_MAP = {
     _c('BTN_THUMBR', 318): 'F1',
 }
 
+GUIDE_FALLBACK_CODES = {
+    _c('BTN_MODE', 316),
+    _c('KEY_HOMEPAGE', 172),
+    _c('KEY_HOME', 102),
+    _c('KEY_MENU', 139),
+    _c('BTN_BASE', 294),
+    _c('BTN_BASE2', 295),
+    _c('BTN_BASE3', 296),
+    _c('BTN_BASE4', 297),
+}
+
 JOYCON_LEFT_BUTTON_MAP = {
     _c('BTN_TL', 310): 'Tab',
     _c('BTN_TL2', 312): 'Escape',
     _c('BTN_START', 315): 'Return',
     _c('BTN_SELECT', 314): 'Escape',
     _c('BTN_MODE', 316): 'F1',
+    _c('KEY_HOMEPAGE', 172): 'F1',
+    _c('KEY_HOME', 102): 'F1',
+    _c('KEY_MENU', 139): 'F1',
 }
 
 JOYCON_RIGHT_BUTTON_MAP = {
@@ -5014,6 +5294,9 @@ JOYCON_RIGHT_BUTTON_MAP = {
     _c('BTN_START', 315): 'Return',
     _c('BTN_SELECT', 314): 'Escape',
     _c('BTN_MODE', 316): 'F1',
+    _c('KEY_HOMEPAGE', 172): 'F1',
+    _c('KEY_HOME', 102): 'F1',
+    _c('KEY_MENU', 139): 'F1',
 }
 
 XBOX360_PROFILE_MAP = {
@@ -5024,6 +5307,9 @@ XBOX360_PROFILE_MAP = {
     _c('BTN_START', 315): 'Return',
     _c('BTN_SELECT', 314): 'Escape',
     _c('BTN_MODE', 316): 'F1',
+    _c('KEY_HOMEPAGE', 172): 'F1',
+    _c('KEY_HOME', 102): 'F1',
+    _c('KEY_MENU', 139): 'F1',
     _c('BTN_TL', 310): 'Left',
     _c('BTN_TR', 311): 'Right',
     _c('BTN_TL2', 312): 'Tab',
@@ -5035,6 +5321,9 @@ SWITCH_PROFILE_MAP = {
     _c('BTN_SOUTH', 304): 'Escape',
     _c('BTN_NORTH', 307): 'space',
     _c('BTN_WEST', 308): 'Tab',
+    _c('KEY_HOMEPAGE', 172): 'F1',
+    _c('KEY_HOME', 102): 'F1',
+    _c('KEY_MENU', 139): 'F1',
 }
 
 ABS_MAP = {
@@ -5279,6 +5568,8 @@ class ControllerBridge:
             return
         mapping = self.device_map.get(dev.path) or COMMON_BUTTON_MAP
         mapped = mapping.get(int(ev.code))
+        if not mapped and int(ev.code) in GUIDE_FALLBACK_CODES:
+            mapped = 'F1'
         if not mapped:
             return
         now = time.monotonic()
@@ -5461,6 +5752,18 @@ fi
 echo
 echo "[XUI joy listener log tail]"
 tail -n 60 "$HOME/.xui/logs/joy_listener.log" 2>/dev/null || echo "No joy listener log yet."
+
+echo
+echo "[Qt input modules]"
+python3 - <<'PY' 2>/dev/null || true
+mods = ["PyQt5.QtGamepad", "PyQt5.QtCore"]
+for m in mods:
+    try:
+        __import__(m)
+        print(f"{m}: OK")
+    except Exception as exc:
+        print(f"{m}: FAIL ({exc})")
+PY
 BASH
   chmod +x "$BIN_DIR/xui_controller_probe.sh"
 
@@ -6650,6 +6953,7 @@ PY
 import json
 import random
 import shutil
+import subprocess
 import sys
 from datetime import date
 from pathlib import Path
@@ -7601,8 +7905,21 @@ class StoreWindow(QtWidgets.QMainWindow):
                 QtWidgets.QMessageBox.Yes
             )
             if q == QtWidgets.QMessageBox.Yes:
-                self._run_terminal(install_cmd)
-                extra = ' | installer started'
+                if iid == 'game_fnae_fangame':
+                    rc, out = subprocess.getstatusoutput(f'/bin/sh -lc "{install_cmd}"')
+                    if rc != 0:
+                        # Rollback ownership and refund if install failed.
+                        if price > 0:
+                            bal = change_balance(price)
+                        self.inventory['items'] = [x for x in self.inventory.get('items', []) if str(x.get('id', '')) != iid]
+                        save_inventory(self.inventory)
+                        fail_msg = (out or 'Installer failed.').strip()
+                        self.reload(f'Purchase cancelled: {name} | Installer error: {fail_msg}')
+                        return
+                    extra = ' | game installed'
+                else:
+                    self._run_terminal(install_cmd)
+                    extra = ' | installer started'
         if mission.get('completed'):
             bal = float(mission.get('balance', bal))
             reward = float(mission.get('reward', 0))
@@ -7924,6 +8241,8 @@ set -euo pipefail
 XUI_HOME="$HOME/.xui"
 APP_HOME="$XUI_HOME/apps/fnae"
 DATA_FILE="$XUI_HOME/data/fnae_paths.json"
+LINUX_MEDIAFIRE_URL="https://www.mediafire.com/file/a4q4l09vdfqzzws/Five+Nights+At+Epsteins+Linux.tar/file"
+WINDOWS_MEDIAFIRE_URL="https://www.mediafire.com/file/6tj1rd7kmsxv4oe/Five+Nights+At+Epstein's.zip/file"
 mkdir -p "$APP_HOME/linux" "$APP_HOME/windows" "$XUI_HOME/data"
 
 find_first_existing(){
@@ -7933,26 +8252,163 @@ find_first_existing(){
   return 1
 }
 
+find_by_name_in_dirs(){
+  local name="$1"
+  shift || true
+  for d in "$@"; do
+    [ -d "$d" ] || continue
+    local found=""
+    found="$(find "$d" -maxdepth 6 -type f -name "$name" 2>/dev/null | head -n1 || true)"
+    if [ -n "$found" ] && [ -f "$found" ]; then
+      echo "$found"
+      return 0
+    fi
+  done
+  return 1
+}
+
+download_from_mediafire(){
+  local page_url="$1"
+  local out_file="$2"
+  local tmp_html direct
+  tmp_html="$(mktemp)"
+  rm -f "$out_file"
+
+  if command -v curl >/dev/null 2>&1; then
+    curl -fL -A "Mozilla/5.0" "$page_url" -o "$tmp_html" >/dev/null 2>&1 || { rm -f "$tmp_html"; return 1; }
+    direct="$(grep -Eo 'https://download[^\" ]+' "$tmp_html" | head -n1 | sed 's/&amp;/\&/g' || true)"
+    if [ -n "$direct" ]; then
+      curl -fL -A "Mozilla/5.0" "$direct" -o "$out_file" >/dev/null 2>&1 || { rm -f "$tmp_html" "$out_file"; return 1; }
+    else
+      cp -f "$tmp_html" "$out_file" >/dev/null 2>&1 || { rm -f "$tmp_html" "$out_file"; return 1; }
+    fi
+    rm -f "$tmp_html"
+    return 0
+  fi
+
+  if command -v wget >/dev/null 2>&1; then
+    wget -qO "$tmp_html" "$page_url" || { rm -f "$tmp_html"; return 1; }
+    direct="$(grep -Eo 'https://download[^\" ]+' "$tmp_html" | head -n1 | sed 's/&amp;/\&/g' || true)"
+    if [ -n "$direct" ]; then
+      wget -qO "$out_file" "$direct" || { rm -f "$tmp_html" "$out_file"; return 1; }
+    else
+      cp -f "$tmp_html" "$out_file" >/dev/null 2>&1 || { rm -f "$tmp_html" "$out_file"; return 1; }
+    fi
+    rm -f "$tmp_html"
+    return 0
+  fi
+
+  rm -f "$tmp_html"
+  return 1
+}
+
+validate_tar(){
+  local f="$1"
+  [ -f "$f" ] || return 1
+  tar -tf "$f" >/dev/null 2>&1
+}
+
+validate_zip(){
+  local f="$1"
+  [ -f "$f" ] || return 1
+  if command -v unzip >/dev/null 2>&1; then
+    unzip -tq "$f" >/dev/null 2>&1
+    return $?
+  fi
+  if command -v python3 >/dev/null 2>&1; then
+    python3 - "$f" <<'PY'
+import sys, zipfile
+try:
+    with zipfile.ZipFile(sys.argv[1], 'r') as zf:
+        zf.testzip()
+except Exception:
+    raise SystemExit(1)
+raise SystemExit(0)
+PY
+    return $?
+  fi
+  return 0
+}
+
 tar_candidates=(
+  "$HOME/.xui/cache/games/Five Nights At Epsteins Linux.tar"
+  "$HOME/.xui/GAMES/Five Nights At Epsteins Linux.tar"
+  "$PWD/GAMES/Five Nights At Epsteins Linux.tar"
+  "$PWD/Five Nights At Epsteins Linux.tar"
+  "$HOME/GAMES/Five Nights At Epsteins Linux.tar"
   "$HOME/Downloads/Five Nights At Epsteins Linux.tar"
   "$HOME/Desktop/Five Nights At Epsteins Linux.tar"
+  "/mnt/c/Users/Usuario/Downloads/xui/xui/GAMES/Five Nights At Epsteins Linux.tar"
   "/mnt/c/Users/Usuario/Downloads/Five Nights At Epsteins Linux.tar"
+  "/mnt/c/Users/$USER/Downloads/xui/xui/GAMES/Five Nights At Epsteins Linux.tar"
   "/mnt/c/Users/$USER/Downloads/Five Nights At Epsteins Linux.tar"
 )
 zip_candidates=(
+  "$HOME/.xui/cache/games/Five Nights At Epstein's.zip"
+  "$HOME/.xui/GAMES/Five Nights At Epstein's.zip"
+  "$PWD/GAMES/Five Nights At Epstein's.zip"
+  "$PWD/Five Nights At Epstein's.zip"
+  "$HOME/GAMES/Five Nights At Epstein's.zip"
   "$HOME/Downloads/Five Nights At Epstein's.zip"
   "$HOME/Desktop/Five Nights At Epstein's.zip"
+  "/mnt/c/Users/Usuario/Downloads/xui/xui/GAMES/Five Nights At Epstein's.zip"
   "/mnt/c/Users/Usuario/Downloads/Five Nights At Epstein's.zip"
+  "/mnt/c/Users/$USER/Downloads/xui/xui/GAMES/Five Nights At Epstein's.zip"
   "/mnt/c/Users/$USER/Downloads/Five Nights At Epstein's.zip"
 )
 
 TAR_SRC="$(find_first_existing "${tar_candidates[@]}" || true)"
 ZIP_SRC="$(find_first_existing "${zip_candidates[@]}" || true)"
 
+# Fallback scan by filename in common roots if direct candidates failed.
+if [ -z "$TAR_SRC" ]; then
+  TAR_SRC="$(find_by_name_in_dirs "Five Nights At Epsteins Linux.tar" \
+    "$HOME/.xui/cache/games" "$HOME/.xui/GAMES" "$PWD" "$HOME/Downloads" "$HOME/Desktop" "$HOME/GAMES" \
+    "/mnt/c/Users/Usuario/Downloads/xui/xui/GAMES" "/mnt/c/Users/Usuario/Downloads" \
+    "/mnt/c/Users/$USER/Downloads/xui/xui/GAMES" "/mnt/c/Users/$USER/Downloads" \
+    2>/dev/null || true)"
+fi
+if [ -z "$ZIP_SRC" ]; then
+  ZIP_SRC="$(find_by_name_in_dirs "Five Nights At Epstein's.zip" \
+    "$HOME/.xui/cache/games" "$HOME/.xui/GAMES" "$PWD" "$HOME/Downloads" "$HOME/Desktop" "$HOME/GAMES" \
+    "/mnt/c/Users/Usuario/Downloads/xui/xui/GAMES" "/mnt/c/Users/Usuario/Downloads" \
+    "/mnt/c/Users/$USER/Downloads/xui/xui/GAMES" "/mnt/c/Users/$USER/Downloads" \
+    2>/dev/null || true)"
+fi
+
+mkdir -p "$XUI_HOME/cache/games"
+if [ -z "$TAR_SRC" ]; then
+  DL_TAR="$XUI_HOME/cache/games/Five Nights At Epsteins Linux.tar"
+  if download_from_mediafire "$LINUX_MEDIAFIRE_URL" "$DL_TAR" && validate_tar "$DL_TAR"; then
+    TAR_SRC="$DL_TAR"
+    echo "Downloaded FNAE Linux archive from MediaFire."
+  else
+    rm -f "$DL_TAR" >/dev/null 2>&1 || true
+  fi
+fi
+if [ -z "$ZIP_SRC" ]; then
+  DL_ZIP="$XUI_HOME/cache/games/Five Nights At Epstein's.zip"
+  if download_from_mediafire "$WINDOWS_MEDIAFIRE_URL" "$DL_ZIP" && validate_zip "$DL_ZIP"; then
+    ZIP_SRC="$DL_ZIP"
+    echo "Downloaded FNAE Windows archive from MediaFire."
+  else
+    rm -f "$DL_ZIP" >/dev/null 2>&1 || true
+  fi
+fi
+
 if [ -z "$TAR_SRC" ] && [ -z "$ZIP_SRC" ]; then
   echo "FNAE archives not found."
   echo "Expected: Five Nights At Epsteins Linux.tar and/or Five Nights At Epstein's.zip"
+  echo "Checked common locations and MediaFire download fallback."
   exit 1
+fi
+
+# Cache detected archives inside ~/.xui so store installation works after purchase.
+if [ -n "$TAR_SRC" ] && [ -f "$TAR_SRC" ]; then
+  cp -f "$TAR_SRC" "$XUI_HOME/cache/games/Five Nights At Epsteins Linux.tar" >/dev/null 2>&1 || true
+fi
+if [ -n "$ZIP_SRC" ] && [ -f "$ZIP_SRC" ]; then
+  cp -f "$ZIP_SRC" "$XUI_HOME/cache/games/Five Nights At Epstein's.zip" >/dev/null 2>&1 || true
 fi
 
 if [ -n "$TAR_SRC" ]; then
@@ -8002,6 +8458,30 @@ echo "Linux executable: ${LINUX_EXE:-not found}"
 echo "Windows executable: ${WIN_EXE:-not found}"
 BASH
   chmod +x "$BIN_DIR/xui_install_fnae.sh"
+
+  # Cache local FNAE archives from project GAMES folder so store purchases can install reliably.
+  mkdir -p "$XUI_DIR/cache/games"
+  script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+  for src in \
+    "$script_dir/GAMES/Five Nights At Epsteins Linux.tar" \
+    "$PWD/GAMES/Five Nights At Epsteins Linux.tar" \
+    "/mnt/c/Users/Usuario/Downloads/xui/xui/GAMES/Five Nights At Epsteins Linux.tar"; do
+    if [ -f "$src" ]; then
+      cp -f "$src" "$XUI_DIR/cache/games/Five Nights At Epsteins Linux.tar" || true
+      info "Cached FNAE Linux archive: $src"
+      break
+    fi
+  done
+  for src in \
+    "$script_dir/GAMES/Five Nights At Epstein's.zip" \
+    "$PWD/GAMES/Five Nights At Epstein's.zip" \
+    "/mnt/c/Users/Usuario/Downloads/xui/xui/GAMES/Five Nights At Epstein's.zip"; do
+    if [ -f "$src" ]; then
+      cp -f "$src" "$XUI_DIR/cache/games/Five Nights At Epstein's.zip" || true
+      info "Cached FNAE Windows archive: $src"
+      break
+    fi
+  done
 
   cat > "$BIN_DIR/xui_run_fnae.sh" <<'BASH'
 #!/usr/bin/env bash
@@ -9298,54 +9778,288 @@ write_auto_update(){
     cat > "$BIN_DIR/xui_update_check.sh" <<'BASH'
 #!/usr/bin/env bash
 set -euo pipefail
-MODE=${1:-status}
-SRC=${XUI_SOURCE_DIR:-$HOME/Descargas/xui}
-case "$MODE" in
-  status)
-    if [ -d "$SRC/.git" ]; then
-      git -C "$SRC" fetch --all --prune >/dev/null 2>&1 || true
-      git -C "$SRC" status -sb
+MODE="${1:-status}"
+shift || true
+JSON_OUT=0
+if [ "${1:-}" = "--json" ]; then
+  JSON_OUT=1
+  shift || true
+fi
+
+REPO="${XUI_UPDATE_REPO:-afitler79-alt/XUI-X360-FRONTEND}"
+SRC="${XUI_SOURCE_DIR:-$HOME/.xui/src/XUI-X360-FRONTEND}"
+INSTALLER_NAME="${XUI_UPDATE_INSTALLER:-xui11.sh.fixed.sh}"
+STATE_FILE="$HOME/.xui/data/update_state.json"
+mkdir -p "$(dirname "$STATE_FILE")"
+
+require_cmd(){
+  command -v "$1" >/dev/null 2>&1
+}
+
+now_iso(){
+  date -u +"%Y-%m-%dT%H:%M:%SZ"
+}
+
+read_state_commit(){
+  python3 - "$STATE_FILE" <<'PY'
+import json,sys,pathlib
+p=pathlib.Path(sys.argv[1])
+if not p.exists():
+    print("")
+    raise SystemExit(0)
+try:
+    d=json.loads(p.read_text(encoding='utf-8'))
+except Exception:
+    print("")
+    raise SystemExit(0)
+print(str(d.get('installed_commit','') or '').strip())
+PY
+}
+
+write_state(){
+  local commit="$1"
+  local branch="$2"
+  local remote_date="$3"
+  local src="$4"
+  python3 - "$STATE_FILE" "$commit" "$branch" "$remote_date" "$src" <<'PY'
+import json,sys,time,pathlib
+path=pathlib.Path(sys.argv[1])
+data={
+  "installed_commit": str(sys.argv[2] or ""),
+  "branch": str(sys.argv[3] or ""),
+  "remote_date": str(sys.argv[4] or ""),
+  "installed_at_epoch": int(time.time()),
+  "source_dir": str(sys.argv[5] or ""),
+  "version": 2,
+}
+path.parent.mkdir(parents=True, exist_ok=True)
+path.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding='utf-8')
+print("state-updated")
+PY
+}
+
+remote_meta_line(){
+  python3 - "$REPO" <<'PY'
+import json,sys,urllib.request,urllib.error
+repo=sys.argv[1]
+headers={
+  "Accept":"application/vnd.github+json",
+  "User-Agent":"xui-update-checker",
+}
+def fetch(url, timeout=10):
+  req=urllib.request.Request(url, headers=headers)
+  with urllib.request.urlopen(req, timeout=timeout) as r:
+    return json.loads(r.read().decode('utf-8', errors='ignore'))
+try:
+  repo_info=fetch(f"https://api.github.com/repos/{repo}")
+  branch=str(repo_info.get("default_branch") or "main").strip() or "main"
+  commit=fetch(f"https://api.github.com/repos/{repo}/commits/{branch}")
+  sha=str(commit.get("sha") or "").strip()
+  date=str((((commit.get("commit") or {}).get("committer") or {}).get("date")) or "")
+  html=str(commit.get("html_url") or "")
+  if not sha:
+    print("ERR\t\t\t\tmissing-remote-sha")
+    raise SystemExit(0)
+  print(f"OK\t{branch}\t{sha}\t{date}\t{html}")
+except Exception as exc:
+  msg=str(exc).replace("\t"," ").replace("\n"," ")
+  print(f"ERR\t\t\t\t{msg}")
+PY
+}
+
+emit_json(){
+  local checked="$1"
+  local required="$2"
+  local reason="$3"
+  local branch="$4"
+  local local_commit="$5"
+  local remote_commit="$6"
+  local remote_date="$7"
+  local remote_url="$8"
+  python3 - "$checked" "$required" "$reason" "$REPO" "$branch" "$local_commit" "$remote_commit" "$remote_date" "$remote_url" <<'PY'
+import json,sys
+checked = str(sys.argv[1]).strip() == "1"
+required = str(sys.argv[2]).strip() == "1"
+obj = {
+  "checked": checked,
+  "mandatory": True,
+  "update_required": required,
+  "reason": str(sys.argv[3]),
+  "repo": str(sys.argv[4]),
+  "branch": str(sys.argv[5]),
+  "local_commit": str(sys.argv[6]),
+  "remote_commit": str(sys.argv[7]),
+  "remote_date": str(sys.argv[8]),
+  "remote_url": str(sys.argv[9]),
+}
+print(json.dumps(obj, ensure_ascii=False))
+PY
+}
+
+compute_status(){
+  local line status branch remote_commit remote_date remote_url extra
+  local checked=0 required=0 reason="unknown"
+  local local_commit=""
+  local_commit="$(read_state_commit)"
+
+  line="$(remote_meta_line)"
+  IFS=$'\t' read -r status branch remote_commit remote_date remote_url extra <<<"$line"
+  if [ "$status" != "OK" ]; then
+    checked=0
+    required=0
+    reason="remote-unavailable:${extra:-unknown}"
+    branch="${branch:-main}"
+    remote_commit=""
+    remote_date=""
+    remote_url=""
+  else
+    checked=1
+    if [ -z "$local_commit" ]; then
+      required=1
+      reason="missing-local-version"
+    elif [ "$local_commit" != "$remote_commit" ]; then
+      required=1
+      reason="outdated"
     else
-      echo "No git repo at $SRC"
-      echo "Tip: export XUI_SOURCE_DIR=/path/to/repo"
+      required=0
+      reason="up-to-date"
     fi
+  fi
+
+  if [ "$JSON_OUT" = "1" ]; then
+    emit_json "$checked" "$required" "$reason" "$branch" "$local_commit" "$remote_commit" "$remote_date" "$remote_url"
+    return 0
+  fi
+
+  echo "Repo: $REPO"
+  echo "Branch: ${branch:-main}"
+  echo "Checked: $([ "$checked" = "1" ] && echo yes || echo no)"
+  echo "Mandatory: yes"
+  echo "Local commit: ${local_commit:-<none>}"
+  echo "Remote commit: ${remote_commit:-<unknown>}"
+  [ -n "$remote_date" ] && echo "Remote date: $remote_date"
+  [ -n "$remote_url" ] && echo "Remote URL: $remote_url"
+  echo "Update required: $([ "$required" = "1" ] && echo yes || echo no)"
+  echo "Reason: $reason"
+  if [ "$required" = "1" ]; then
+    return 10
+  fi
+  return 0
+}
+
+apply_update(){
+  local line status branch remote_commit remote_date remote_url extra
+  if ! require_cmd git; then
+    echo "git is required for apply mode"
+    exit 1
+  fi
+
+  line="$(remote_meta_line)"
+  IFS=$'\t' read -r status branch remote_commit remote_date remote_url extra <<<"$line"
+  if [ "$status" != "OK" ]; then
+    echo "Cannot reach GitHub metadata: ${extra:-unknown}"
+    exit 1
+  fi
+
+  mkdir -p "$(dirname "$SRC")"
+  if [ ! -d "$SRC/.git" ]; then
+    git clone "https://github.com/$REPO.git" "$SRC"
+  fi
+
+  git -C "$SRC" fetch --all --prune
+  if git -C "$SRC" show-ref --verify --quiet "refs/heads/$branch"; then
+    git -C "$SRC" checkout "$branch"
+  else
+    git -C "$SRC" checkout -B "$branch" "origin/$branch"
+  fi
+  git -C "$SRC" pull --ff-only origin "$branch"
+
+  local installer=""
+  for c in "$INSTALLER_NAME" "xui11.sh.fixed.sh" "xui11.sh.fixed" "xui11.sh"; do
+    if [ -f "$SRC/$c" ]; then
+      installer="$SRC/$c"
+      break
+    fi
+  done
+  if [ -z "$installer" ]; then
+    echo "Installer not found in repo: $SRC"
+    exit 1
+  fi
+
+  (
+    cd "$SRC"
+    AUTO_CONFIRM=1 XUI_SKIP_LAUNCH_PROMPT=1 bash "$installer" --no-auto-install --skip-apt-wait
+  )
+
+  local installed_commit=""
+  installed_commit="$(git -C "$SRC" rev-parse HEAD 2>/dev/null || true)"
+  if [ -z "$installed_commit" ]; then
+    installed_commit="$remote_commit"
+  fi
+  write_state "$installed_commit" "$branch" "$remote_date" "$SRC" >/dev/null
+  echo "update-applied"
+  echo "installed_commit=$installed_commit"
+}
+
+pull_only(){
+  if [ ! -d "$SRC/.git" ]; then
+    echo "No git repo at $SRC"
+    echo "Tip: run '$0 apply' to clone and install automatically."
+    exit 1
+  fi
+  git -C "$SRC" fetch --all --prune
+  git -C "$SRC" pull --ff-only
+}
+
+release_info(){
+  python3 - "$REPO" <<'PY'
+import json,sys,urllib.request
+repo=sys.argv[1]
+headers={"Accept":"application/vnd.github+json","User-Agent":"xui-update-checker"}
+req=urllib.request.Request(f"https://api.github.com/repos/{repo}/releases/latest", headers=headers)
+try:
+  with urllib.request.urlopen(req, timeout=10) as r:
+    d=json.loads(r.read().decode("utf-8", errors="ignore"))
+  print("Latest release:", d.get("tag_name","unknown"))
+except Exception as exc:
+  print("Could not query latest release:", exc)
+  raise SystemExit(1)
+PY
+}
+
+mark_current(){
+  if [ ! -d "$SRC/.git" ]; then
+    echo "No git repo at $SRC"
+    exit 1
+  fi
+  local commit branch
+  commit="$(git -C "$SRC" rev-parse HEAD)"
+  branch="$(git -C "$SRC" rev-parse --abbrev-ref HEAD)"
+  write_state "$commit" "$branch" "" "$SRC" >/dev/null
+  echo "marked-installed=$commit"
+}
+
+case "$MODE" in
+  status|mandatory)
+    compute_status
     ;;
   pull)
-    if [ -d "$SRC/.git" ]; then
-      git -C "$SRC" pull --ff-only
-    else
-      echo "No git repo at $SRC"
-      exit 1
-    fi
+    pull_only
+    ;;
+  apply)
+    apply_update
     ;;
   release)
-    REPO=${XUI_UPDATE_REPO:-}
-    if [ -z "$REPO" ]; then
-      echo "Set XUI_UPDATE_REPO=user/repo to query latest release"
-      exit 1
-    fi
-    if command -v curl >/dev/null 2>&1; then
-      curl -fsSL "https://api.github.com/repos/$REPO/releases/latest" | python3 - <<'PY'
-import json,sys
-try:
-  d=json.load(sys.stdin)
-  print("Latest release:", d.get("tag_name","unknown"))
-except Exception:
-  print("Could not parse release data")
-PY
-    else
-      echo "curl required"
-      exit 1
-    fi
+    release_info
+    ;;
+  mark)
+    mark_current
     ;;
   *)
-    echo "Usage: $0 {status|pull|release}"
+    echo "Usage: $0 {status|mandatory|pull|apply|release|mark} [--json]"
     exit 1
     ;;
 esac
-if [ "$MODE" = "status" ]; then
-  echo "OK"
-fi
 BASH
     chmod +x "$BIN_DIR/xui_update_check.sh"
 }
@@ -11922,7 +12636,9 @@ main(){
         write_battery_tools
         write_even_more_apps
   finish_setup
-  if confirm "Do you want to launch the dashboard now?"; then
+  if [ "${XUI_SKIP_LAUNCH_PROMPT:-0}" = "1" ]; then
+    info "Skipping launch prompt (XUI_SKIP_LAUNCH_PROMPT=1)"
+  elif confirm "Do you want to launch the dashboard now?"; then
     "$BIN_DIR/xui_start.sh"
   fi
 }
