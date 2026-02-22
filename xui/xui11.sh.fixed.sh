@@ -1029,6 +1029,10 @@ try:
     from PyQt5 import QtWebEngineWidgets
 except Exception:
     QtWebEngineWidgets = None
+try:
+    from PyQt5 import QtGamepad
+except Exception:
+    QtGamepad = None
 
 ASSETS = Path.home() / '.xui' / 'assets'
 XUI_HOME = Path.home() / '.xui'
@@ -3291,45 +3295,112 @@ class GamesInlineOverlay(QtWidgets.QFrame):
     def __init__(self, parent=None):
         super().__init__(parent)
         self._items = []
+        self._item_index = {}
         self.setObjectName('games_inline_overlay')
         self.setVisible(False)
         self.setFocusPolicy(QtCore.Qt.StrongFocus)
         self.setStyleSheet('''
             QFrame#games_inline_overlay {
-                background:qlineargradient(x1:0,y1:0,x2:1,y2:1, stop:0 #edf1f5, stop:1 #bcc4cd);
-                border:2px solid rgba(235,243,250,0.9);
+                background:qlineargradient(x1:0,y1:0,x2:1,y2:1, stop:0 #e9edf2, stop:1 #c0c8d2);
+                border:2px solid rgba(234,242,249,0.9);
                 border-radius:4px;
             }
-            QLabel#gio_title { color:#2b3440; font-size:34px; font-weight:800; }
-            QLabel#gio_hint { color:#2f3a46; font-size:14px; font-weight:700; }
-            QListWidget#gio_list {
-                background:#f7f9fb; border:1px solid #a8b1ba; color:#1f2832; outline:none;
-                font-size:19px; font-weight:700;
+            QLabel#gio_title { color:#27313d; font-size:38px; font-weight:900; }
+            QLabel#gio_hint { color:#2f3a46; font-size:16px; font-weight:700; }
+            QPushButton#gio_blade {
+                text-align:left;
+                padding:8px 10px;
+                min-height:44px;
+                background:qlineargradient(x1:0,y1:0,x2:1,y2:0, stop:0 #5dc044, stop:1 #3d9834);
+                border:1px solid rgba(241,249,241,0.42);
+                color:#f6fff6;
+                font-size:18px;
+                font-weight:800;
             }
-            QListWidget#gio_list::item { border:1px solid #c4ccd4; padding:6px; margin:4px; min-width:190px; min-height:116px; }
-            QListWidget#gio_list::item:selected { background:#66b340; color:#ffffff; border:2px solid #2d6f23; }
-            QLabel#gio_meta { color:#455363; font-size:15px; font-weight:700; }
+            QPushButton#gio_blade:hover, QPushButton#gio_blade:focus { background:#6bcf52; }
+            QListWidget#gio_list {
+                background:qlineargradient(x1:0,y1:0,x2:1,y2:1, stop:0 #dfe4e9, stop:1 #cfd6de);
+                border:1px solid #9aa4b0;
+                color:#1f2832;
+                outline:none;
+                font-size:24px;
+                font-weight:800;
+            }
+            QListWidget#gio_list::item {
+                background:qlineargradient(x1:0,y1:0,x2:1,y2:1, stop:0 #7d8792, stop:1 #59636f);
+                border:1px solid rgba(231,237,243,0.52);
+                padding:8px;
+                margin:4px;
+                min-width:186px;
+                min-height:210px;
+                color:#eef4f8;
+            }
+            QListWidget#gio_list::item:selected {
+                background:qlineargradient(x1:0,y1:0,x2:1,y2:1, stop:0 #f3f5f8, stop:1 #d6dce3);
+                color:#1e2a37;
+                border:2px solid #5cbc43;
+            }
+            QFrame#gio_featured {
+                background:qlineargradient(x1:0,y1:0,x2:1,y2:1, stop:0 #525d68, stop:1 #3e4751);
+                border:1px solid rgba(224,232,240,0.55);
+            }
+            QLabel#gio_featured_tag { color:rgba(224,233,240,0.95); font-size:13px; font-weight:800; }
+            QLabel#gio_featured_title { color:#f6fbff; font-size:40px; font-weight:900; }
+            QLabel#gio_featured_desc { color:rgba(236,244,251,0.92); font-size:22px; font-weight:700; }
+            QLabel#gio_meta { color:#2f4155; font-size:17px; font-weight:800; }
             QPushButton#gio_btn {
                 background:#4ea42a; color:#fff; border:1px solid #3b7f1f; padding:7px 12px; font-size:14px; font-weight:800;
             }
             QPushButton#gio_btn:hover, QPushButton#gio_btn:focus { background:#3f9120; }
         ''')
         root = QtWidgets.QVBoxLayout(self)
-        root.setContentsMargins(10, 10, 10, 8)
+        root.setContentsMargins(12, 10, 12, 8)
         root.setSpacing(8)
 
         self.title = QtWidgets.QLabel('My Games')
         self.title.setObjectName('gio_title')
         root.addWidget(self.title, 0, QtCore.Qt.AlignLeft)
 
+        blade_row = QtWidgets.QHBoxLayout()
+        blade_row.setSpacing(6)
+        self.blade_my_games = QtWidgets.QPushButton('My Games')
+        self.blade_browse = QtWidgets.QPushButton('Browse Games')
+        self.blade_search = QtWidgets.QPushButton('Search Games')
+        for b in (self.blade_my_games, self.blade_browse, self.blade_search):
+            b.setObjectName('gio_blade')
+            blade_row.addWidget(b, 0)
+        blade_row.addStretch(1)
+        root.addLayout(blade_row)
+
+        self.featured = QtWidgets.QFrame()
+        self.featured.setObjectName('gio_featured')
+        feat_l = QtWidgets.QVBoxLayout(self.featured)
+        feat_l.setContentsMargins(12, 9, 12, 9)
+        feat_l.setSpacing(3)
+        self.featured_tag = QtWidgets.QLabel('HIGHLIGHT')
+        self.featured_tag.setObjectName('gio_featured_tag')
+        self.featured_title = QtWidgets.QLabel('My Games')
+        self.featured_title.setObjectName('gio_featured_title')
+        self.featured_desc = QtWidgets.QLabel('Installed games and quick launch library.')
+        self.featured_desc.setObjectName('gio_featured_desc')
+        self.featured_desc.setWordWrap(True)
+        feat_l.addWidget(self.featured_tag, 0, QtCore.Qt.AlignLeft)
+        feat_l.addStretch(1)
+        feat_l.addWidget(self.featured_title, 0, QtCore.Qt.AlignLeft)
+        feat_l.addWidget(self.featured_desc, 0, QtCore.Qt.AlignLeft)
+        root.addWidget(self.featured, 0)
+
         self.listw = QtWidgets.QListWidget()
         self.listw.setObjectName('gio_list')
         self.listw.setViewMode(QtWidgets.QListView.IconMode)
+        self.listw.setFlow(QtWidgets.QListView.LeftToRight)
         self.listw.setMovement(QtWidgets.QListView.Static)
         self.listw.setResizeMode(QtWidgets.QListView.Adjust)
-        self.listw.setWrapping(True)
+        self.listw.setWrapping(False)
+        self.listw.setHorizontalScrollMode(QtWidgets.QAbstractItemView.ScrollPerPixel)
+        self.listw.setVerticalScrollBarPolicy(QtCore.Qt.ScrollBarAlwaysOff)
         self.listw.setSpacing(6)
-        self.listw.setGridSize(QtCore.QSize(208, 132))
+        self.listw.setGridSize(QtCore.QSize(226, 252))
         self.listw.itemActivated.connect(self._play_current)
         self.listw.currentRowChanged.connect(self._update_meta)
         root.addWidget(self.listw, 1)
@@ -3358,19 +3429,33 @@ class GamesInlineOverlay(QtWidgets.QFrame):
         self.install_btn.clicked.connect(self._install_current)
         self.uninstall_btn.clicked.connect(self._uninstall_current)
         self.close_btn.clicked.connect(self.close_overlay)
+        self.blade_my_games.clicked.connect(lambda: self._focus_label('My Games'))
+        self.blade_browse.clicked.connect(lambda: self.actionTriggered.emit('Browse Games'))
+        self.blade_search.clicked.connect(lambda: self.actionTriggered.emit('Search Games'))
 
     def set_items(self, items, title='My Games'):
         self._items = list(items or [])
+        self._item_index = {}
         self.title.setText(str(title or 'My Games'))
         self.listw.clear()
-        for item in self._items:
+        for idx, item in enumerate(self._items):
             label = str(item.get('label', 'Item'))
             it = QtWidgets.QListWidgetItem(label)
             it.setData(QtCore.Qt.UserRole, dict(item))
             self.listw.addItem(it)
+            self._item_index[label.strip().lower()] = idx
         if self.listw.count() > 0:
             self.listw.setCurrentRow(0)
         self._update_meta(self.listw.currentRow())
+
+    def _focus_label(self, label):
+        key = str(label or '').strip().lower()
+        idx = self._item_index.get(key)
+        if idx is None:
+            return
+        self.listw.setCurrentRow(int(idx))
+        self.listw.scrollToItem(self.listw.item(int(idx)), QtWidgets.QAbstractItemView.PositionAtCenter)
+        self.listw.setFocus()
 
     def _current_payload(self):
         it = self.listw.currentItem()
@@ -3381,8 +3466,11 @@ class GamesInlineOverlay(QtWidgets.QFrame):
 
     def _update_meta(self, _row):
         data = self._current_payload()
+        label = str(data.get('label', 'My Games')).strip() or 'My Games'
         desc = str(data.get('desc', 'Select a game/app tile.')).strip()
         self.meta.setText(desc or 'Select a game/app tile.')
+        self.featured_title.setText(label)
+        self.featured_desc.setText(desc or 'Select a game/app tile.')
 
     def _play_current(self):
         data = self._current_payload()
@@ -4084,6 +4172,8 @@ class Dashboard(QtWidgets.QMainWindow):
         self._mandatory_update_progress = None
         self._mandatory_update_output = ''
         self._games_inline = None
+        self._qgamepads = {}
+        self._gp_last_emit = {}
         self.sfx = {
             'hover': 'hover.mp3',
             'open': 'open.mp3',
@@ -4106,6 +4196,7 @@ class Dashboard(QtWidgets.QMainWindow):
             ensure_achievements(5000)
         except Exception:
             pass
+        self._setup_qt_gamepad_input()
         self._apply_responsive_layout()
         self.update_focus()
 
@@ -4229,10 +4320,13 @@ class Dashboard(QtWidgets.QMainWindow):
             return
         pw = max(640, parent.width())
         ph = max(420, parent.height())
-        w = int(pw * 0.74)
-        h = int(ph * 0.66)
-        x = int((pw - w) / 2)
-        y = int(max(80, ph * 0.18))
+        margin_x = max(18, int(pw * 0.035))
+        top = max(72, int(ph * 0.14))
+        bottom_margin = max(12, int(ph * 0.06))
+        w = max(920, pw - (margin_x * 2))
+        h = max(520, ph - top - bottom_margin)
+        x = margin_x
+        y = top
         self._games_inline.setGeometry(x, y, w, h)
 
     def showEvent(self, e):
@@ -4415,13 +4509,6 @@ class Dashboard(QtWidgets.QMainWindow):
                 'desc': 'Installed games and quick launch library.',
             },
             {
-                'label': 'FNAE',
-                'play': 'FNAE',
-                'install': 'FNAE',
-                'uninstall': 'Uninstall FNAE',
-                'desc': 'Five Nights At Epstein\'s: install, play or uninstall.',
-            },
-            {
                 'label': 'Steam',
                 'play': 'Steam',
                 'install': 'Install Steam',
@@ -4434,6 +4521,13 @@ class Dashboard(QtWidgets.QMainWindow):
                 'install': 'Install RetroArch',
                 'uninstall': '',
                 'desc': 'RetroArch integration for local ROM libraries.',
+            },
+            {
+                'label': 'FNAE',
+                'play': 'FNAE',
+                'install': 'FNAE',
+                'uninstall': 'Uninstall FNAE',
+                'desc': 'Five Nights At Epstein\'s: install, play or uninstall.',
             },
             {
                 'label': 'Gem Match',
@@ -4471,7 +4565,7 @@ class Dashboard(QtWidgets.QMainWindow):
                 'desc': 'Scan tray/USB and launch local media games.',
             },
         ]
-        self._games_inline.set_items(items, title='My Games')
+        self._games_inline.set_items(items, title='Games')
         self._layout_overlays()
         self._games_inline.open_overlay()
 
@@ -5607,6 +5701,88 @@ class Dashboard(QtWidgets.QMainWindow):
         else:
             self._msg('Action', f'{action} launched.')
 
+    def _dispatch_dashboard_key(self, key):
+        target = self.focusWidget()
+        if target is None:
+            target = self
+        for et in (QtCore.QEvent.KeyPress, QtCore.QEvent.KeyRelease):
+            evt = QtGui.QKeyEvent(et, int(key), QtCore.Qt.NoModifier)
+            QtWidgets.QApplication.sendEvent(target, evt)
+
+    def _gp_emit(self, key, channel='main', repeat_sec=0.15):
+        now = time.monotonic()
+        last = float(self._gp_last_emit.get(channel, 0.0))
+        if (now - last) < float(repeat_sec):
+            return
+        self._gp_last_emit[channel] = now
+        self._dispatch_dashboard_key(key)
+
+    def _gp_axis(self, axis_name, value):
+        v = float(value)
+        if abs(v) < 0.45:
+            return
+        if axis_name in ('lx', 'rx'):
+            self._gp_emit(QtCore.Qt.Key_Left if v < 0 else QtCore.Qt.Key_Right, channel=f'axis_{axis_name}', repeat_sec=0.17)
+        elif axis_name in ('ly', 'ry'):
+            self._gp_emit(QtCore.Qt.Key_Up if v < 0 else QtCore.Qt.Key_Down, channel=f'axis_{axis_name}', repeat_sec=0.17)
+
+    def _on_gp_connected_change(self, _device_id=None):
+        if QtGamepad is None:
+            return
+        manager = QtGamepad.QGamepadManager.instance()
+        active = set(manager.connectedGamepads())
+        for did in list(self._qgamepads.keys()):
+            if did not in active:
+                gp = self._qgamepads.pop(did, None)
+                if gp is not None:
+                    gp.deleteLater()
+        for did in sorted(active):
+            if did in self._qgamepads:
+                continue
+            try:
+                gp = QtGamepad.QGamepad(did, self)
+            except Exception:
+                continue
+            self._qgamepads[did] = gp
+
+            gp.buttonAChanged.connect(lambda p, did=did: p and self._gp_emit(QtCore.Qt.Key_Return, channel=f'{did}_a'))
+            gp.buttonBChanged.connect(lambda p, did=did: p and self._gp_emit(QtCore.Qt.Key_Escape, channel=f'{did}_b'))
+            gp.buttonXChanged.connect(lambda p, did=did: p and self._gp_emit(QtCore.Qt.Key_Space, channel=f'{did}_x'))
+            gp.buttonYChanged.connect(lambda p, did=did: p and self._gp_emit(QtCore.Qt.Key_Tab, channel=f'{did}_y'))
+
+            gp.buttonStartChanged.connect(lambda p, did=did: p and self._gp_emit(QtCore.Qt.Key_Return, channel=f'{did}_start'))
+            gp.buttonSelectChanged.connect(lambda p, did=did: p and self._gp_emit(QtCore.Qt.Key_Escape, channel=f'{did}_back'))
+
+            gp.buttonLeftShoulderChanged.connect(lambda p, did=did: p and self._gp_emit(QtCore.Qt.Key_Left, channel=f'{did}_lb'))
+            gp.buttonRightShoulderChanged.connect(lambda p, did=did: p and self._gp_emit(QtCore.Qt.Key_Right, channel=f'{did}_rb'))
+            gp.buttonL2Changed.connect(lambda v, did=did: v > 0.55 and self._gp_emit(QtCore.Qt.Key_Tab, channel=f'{did}_lt'))
+            gp.buttonR2Changed.connect(lambda v, did=did: v > 0.55 and self._gp_emit(QtCore.Qt.Key_Tab, channel=f'{did}_rt'))
+
+            gp.buttonUpChanged.connect(lambda p, did=did: p and self._gp_emit(QtCore.Qt.Key_Up, channel=f'{did}_du'))
+            gp.buttonDownChanged.connect(lambda p, did=did: p and self._gp_emit(QtCore.Qt.Key_Down, channel=f'{did}_dd'))
+            gp.buttonLeftChanged.connect(lambda p, did=did: p and self._gp_emit(QtCore.Qt.Key_Left, channel=f'{did}_dl'))
+            gp.buttonRightChanged.connect(lambda p, did=did: p and self._gp_emit(QtCore.Qt.Key_Right, channel=f'{did}_dr'))
+
+            if hasattr(gp, 'buttonGuideChanged'):
+                gp.buttonGuideChanged.connect(lambda p, did=did: p and self._gp_emit(QtCore.Qt.Key_F1, channel=f'{did}_guide'))
+            gp.buttonCenterChanged.connect(lambda p, did=did: p and self._gp_emit(QtCore.Qt.Key_F1, channel=f'{did}_center'))
+
+            gp.axisLeftXChanged.connect(lambda v, did=did: self._gp_axis('lx', v))
+            gp.axisLeftYChanged.connect(lambda v, did=did: self._gp_axis('ly', v))
+            gp.axisRightXChanged.connect(lambda v, did=did: self._gp_axis('rx', v))
+            gp.axisRightYChanged.connect(lambda v, did=did: self._gp_axis('ry', v))
+
+    def _setup_qt_gamepad_input(self):
+        if QtGamepad is None:
+            return
+        try:
+            manager = QtGamepad.QGamepadManager.instance()
+            manager.gamepadConnected.connect(self._on_gp_connected_change)
+            manager.gamepadDisconnected.connect(self._on_gp_connected_change)
+            self._on_gp_connected_change()
+        except Exception:
+            pass
+
     def keyPressEvent(self, e):
         k = e.key()
         if self._games_inline is not None and self._games_inline.isVisible():
@@ -6075,6 +6251,7 @@ JOY_PROFILE = os.environ.get('XUI_JOY_PROFILE', 'auto').strip().lower()
 XDOTOOL = shutil.which('xdotool')
 NINTENDO_VENDOR = 0x057E
 MICROSOFT_VENDOR = 0x045E
+HYPERKIN_VENDOR = 0x2E24
 
 
 def _default_display():
@@ -6249,15 +6426,17 @@ def classify_controller(dev):
             return 'joycon_l'
         if product == 0x2007 or 'joy-con (r)' in name:
             return 'joycon_r'
+        if product in (0x2009, 0x2017) or 'combined joy-cons' in name or 'joy-cons (combined)' in name:
+            return 'nintendo'
         return 'nintendo'
-    if vendor == MICROSOFT_VENDOR:
+    if vendor in (MICROSOFT_VENDOR, HYPERKIN_VENDOR):
         return 'xbox'
 
     if any(token in name for token in ('joy-con (l)', 'left joy-con', 'joycon l')):
         return 'joycon_l'
     if any(token in name for token in ('joy-con (r)', 'right joy-con', 'joycon r')):
         return 'joycon_r'
-    if any(token in name for token in ('joy-con', 'joycon', 'nintendo switch', 'pro controller', 'switch')):
+    if any(token in name for token in ('joy-con', 'joycon', 'combined joy-cons', 'joy-cons (combined)', 'nintendo switch', 'pro controller', 'switch')):
         return 'nintendo'
     if any(token in name for token in (
         'xbox', 'x-input', 'xinput', 'x-pad', 'xpadneo',
@@ -6280,7 +6459,7 @@ def is_controller_device(dev):
     has_axis = bool(abs_caps & ANALOG_AXIS_CODES)
     named_as_pad = any(token in name for token in (
         'xbox', 'x-input', 'xinput', 'x-pad', 'xenon', 'hyperkin',
-        'joy-con', 'joycon',
+        'joy-con', 'joycon', 'combined joy-cons', 'joy-cons (combined)',
         'nintendo switch', 'pro controller', 'hid-nintendo',
         'wireless controller', 'gamepad', 'joystick'
     ))
@@ -6648,7 +6827,7 @@ for p in paths:
     except Exception:
         continue
     name = (d.name or '').lower()
-    if any(t in name for t in ('xbox','joy-con','joycon','nintendo','pro controller','gamepad','joystick','wireless controller')):
+    if any(t in name for t in ('xbox','xenon','hyperkin','joy-con','joycon','combined joy-cons','nintendo','pro controller','gamepad','joystick','wireless controller')):
         info = getattr(d, 'info', None)
         vid = int(getattr(info, 'vendor', 0) or 0)
         pid = int(getattr(info, 'product', 0) or 0)
