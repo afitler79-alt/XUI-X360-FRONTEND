@@ -6200,13 +6200,48 @@ exit 0
     def _run(self, cmd, args=None):
         self._play_sfx('open')
         try:
-            QtCore.QProcess.startDetached(cmd, args or [])
+            argv = list(args or [])
+            if str(cmd) in ('/bin/sh', 'sh', '/bin/bash', 'bash') and len(argv) >= 2 and str(argv[0]) in ('-c', '-lc'):
+                argv[1] = self._with_controller_env_cmd(argv[1])
+            QtCore.QProcess.startDetached(cmd, argv)
         except Exception:
             pass
 
+    def _controller_env_exports(self):
+        env_file = XUI_HOME / 'data' / 'controller_profile.env'
+        if not env_file.exists():
+            return ''
+        parts = []
+        try:
+            for raw in env_file.read_text(encoding='utf-8', errors='ignore').splitlines():
+                line = str(raw).strip()
+                if not line or line.startswith('#') or '=' not in line:
+                    continue
+                k, v = line.split('=', 1)
+                k = str(k).strip()
+                v = str(v).strip()
+                if not k:
+                    continue
+                if not (k.startswith('XUI_JOY_') or k.startswith('SDL_') or k.startswith('QT_')):
+                    continue
+                parts.append(f'export {k}={shlex.quote(v)}')
+        except Exception:
+            return ''
+        return '; '.join(parts)
+
+    def _with_controller_env_cmd(self, shell_cmd):
+        exports = self._controller_env_exports()
+        body = str(shell_cmd or '').strip()
+        if not exports:
+            return body
+        if not body:
+            return exports
+        return f'{exports}; {body}'
+
     def _run_terminal(self, shell_cmd):
         self._play_sfx('open')
-        hold = shell_cmd + '; echo; read -r -p "Press Enter to close..." _'
+        base_cmd = self._with_controller_env_cmd(shell_cmd)
+        hold = base_cmd + '; echo; read -r -p "Press Enter to close..." _'
         if shutil.which('x-terminal-emulator'):
             QtCore.QProcess.startDetached('x-terminal-emulator', ['-e', '/bin/bash', '-lc', hold])
             return
@@ -6309,6 +6344,21 @@ exit 0
         self._install_task_progress = dlg
         proc = QtCore.QProcess(self)
         env = QtCore.QProcessEnvironment.systemEnvironment()
+        env_file = XUI_HOME / 'data' / 'controller_profile.env'
+        if env_file.exists():
+            try:
+                for raw in env_file.read_text(encoding='utf-8', errors='ignore').splitlines():
+                    line = str(raw).strip()
+                    if not line or line.startswith('#') or '=' not in line:
+                        continue
+                    k, v = line.split('=', 1)
+                    k = str(k).strip()
+                    if not k:
+                        continue
+                    if k.startswith('XUI_JOY_') or k.startswith('SDL_') or k.startswith('QT_'):
+                        env.insert(k, str(v).strip())
+            except Exception:
+                pass
         env.insert('XUI_NONINTERACTIVE', '1')
         env.insert('XUI_FORCE_ELEVATED', '1')
         env.insert('DEBIAN_FRONTEND', 'noninteractive')
@@ -6340,6 +6390,17 @@ exit 0
             self._run('/bin/sh', ['-c', f'xdg-open "{url}"'])
             return
         self._msg('Browser', f'No browser launcher available.\n{url}')
+
+    def _open_url_external(self, url, normal_mode=True):
+        u = str(url or '').strip()
+        if not u:
+            return
+        kiosk = XUI_HOME / 'bin' / 'xui_browser.sh'
+        if kiosk.exists():
+            mode = '--normal' if bool(normal_mode) else '--kiosk'
+            self._run('/bin/sh', ['-c', f'"{kiosk}" {mode} "{u}"'])
+            return
+        self._run('/bin/sh', ['-c', f'xdg-open "{u}"'])
 
     def _open_social_chat(self):
         self._play_sfx('open')
@@ -7060,11 +7121,11 @@ exit 0
             else:
                 self._msg('Media', 'No startup.mp4 found.')
         elif action == 'Netflix':
-            self._open_url('https://www.netflix.com')
+            self._open_url_external('https://www.netflix.com', normal_mode=True)
         elif action == 'YouTube':
-            self._open_url('https://www.youtube.com')
+            self._open_url_external('https://www.youtube.com', normal_mode=True)
         elif action == 'ESPN':
-            self._open_url('https://www.espn.com')
+            self._open_url_external('https://www.espn.com', normal_mode=True)
         elif action == 'Startup Sound':
             p = ASSETS / 'startup.mp3'
             if p.exists():
@@ -7250,12 +7311,30 @@ exit 0
             self._msg('Action', f'{action} launched.')
 
     def _dispatch_dashboard_key(self, key):
-        target = self.focusWidget()
-        if target is None:
-            target = self
+        modal = QtWidgets.QApplication.activeModalWidget()
+        if modal is not None and bool(modal.isVisible()):
+            target = modal.focusWidget() or modal
+        else:
+            target = QtWidgets.QApplication.focusWidget()
+            if target is None:
+                target = QtWidgets.QApplication.activeWindow()
+            if target is None:
+                target = self
         for et in (QtCore.QEvent.KeyPress, QtCore.QEvent.KeyRelease):
             evt = QtGui.QKeyEvent(et, int(key), QtCore.Qt.NoModifier)
             QtWidgets.QApplication.sendEvent(target, evt)
+
+    def _canonical_gamepad_key(self, key):
+        k = int(key)
+        if k == int(QtCore.Qt.Key_A):
+            return int(QtCore.Qt.Key_Return)
+        if k == int(QtCore.Qt.Key_B):
+            return int(QtCore.Qt.Key_Escape)
+        if k == int(QtCore.Qt.Key_X):
+            return int(QtCore.Qt.Key_Space)
+        if k == int(QtCore.Qt.Key_Y):
+            return int(QtCore.Qt.Key_Tab)
+        return k
 
     def _gp_emit(self, key, channel='main', repeat_sec=0.15):
         now = time.monotonic()
@@ -7263,7 +7342,7 @@ exit 0
         if (now - last) < float(repeat_sec):
             return
         self._gp_last_emit[channel] = now
-        self._dispatch_dashboard_key(key)
+        self._dispatch_dashboard_key(self._canonical_gamepad_key(key))
 
     def _gp_axis(self, axis_name, value):
         v = float(value)
@@ -7340,7 +7419,7 @@ exit 0
             pass
 
     def keyPressEvent(self, e):
-        k = e.key()
+        k = self._canonical_gamepad_key(e.key())
         if self._games_inline is not None and self._games_inline.isVisible():
             if k in (QtCore.Qt.Key_Escape, QtCore.Qt.Key_Back):
                 self._games_inline.close_overlay()
@@ -7539,13 +7618,9 @@ if [ "$(id -u)" -eq 0 ] && [ -n "${SUDO_USER:-}" ]; then
   fi
 fi
 if [ "$(id -u)" -ne 0 ]; then
-  if command -v sudo >/dev/null 2>&1; then
-    if sudo -n "$0" "$@"; then
-      exit 0
-    fi
-  fi
-  echo "[WARN] Passwordless sudo is required. Install/update to write /etc/sudoers.d/xui-autosudo-\$USER." >&2
-  exit 1
+  # Running as regular user is valid for launching the dashboard.
+  # Elevated permissions are only needed for installer/maintenance actions.
+  :
 fi
 export HOME="$TARGET_HOME"
 export USER="${SUDO_USER:-${USER:-$(id -un)}}"
@@ -7921,8 +7996,8 @@ TRIGGER_HAPPY_MAP = {
 }
 
 XBOX_BUTTON_MAP = {
-    _c('BTN_TL', 310): 'Left',
-    _c('BTN_TR', 311): 'Right',
+    _c('BTN_TL', 310): 'Prior',
+    _c('BTN_TR', 311): 'Next',
     _c('BTN_TL2', 312): 'Tab',
     _c('BTN_TR2', 313): 'Tab',
     _c('BTN_THUMBL', 317): 'F1',
@@ -7963,8 +8038,8 @@ JOYCON_RIGHT_BUTTON_MAP = {
 }
 
 JOYCON_COMBINED_BUTTON_MAP = {
-    _c('BTN_TL', 310): 'Left',
-    _c('BTN_TR', 311): 'Right',
+    _c('BTN_TL', 310): 'Prior',
+    _c('BTN_TR', 311): 'Next',
     _c('BTN_TL2', 312): 'Tab',
     _c('BTN_TR2', 313): 'Tab',
     _c('BTN_START', 315): 'Return',
@@ -7986,8 +8061,8 @@ XBOX360_PROFILE_MAP = {
     _c('KEY_HOMEPAGE', 172): 'F1',
     _c('KEY_HOME', 102): 'F1',
     _c('KEY_MENU', 139): 'F1',
-    _c('BTN_TL', 310): 'Left',
-    _c('BTN_TR', 311): 'Right',
+    _c('BTN_TL', 310): 'Prior',
+    _c('BTN_TR', 311): 'Next',
     _c('BTN_TL2', 312): 'Tab',
     _c('BTN_TR2', 313): 'Tab',
 }
@@ -9593,14 +9668,14 @@ class CasinoWindow(QtWidgets.QMainWindow):
         v.addWidget(self.balance_lbl)
         v.addWidget(self.info_lbl)
 
-        tabs = QtWidgets.QTabWidget()
-        tabs.addTab(self._slots_tab(), 'Slots')
-        tabs.addTab(self._roulette_tab(), 'Roulette')
-        tabs.addTab(self._blackjack_tab(), 'Blackjack')
-        tabs.addTab(self._hilo_tab(), 'Hi-Lo')
-        tabs.addTab(self._coin_tab(), 'Coin Flip')
-        tabs.addTab(self._online_tab(), 'Dice Duel Online')
-        v.addWidget(tabs, 1)
+        self.tabs = QtWidgets.QTabWidget()
+        self.tabs.addTab(self._slots_tab(), 'Slots')
+        self.tabs.addTab(self._roulette_tab(), 'Roulette')
+        self.tabs.addTab(self._blackjack_tab(), 'Blackjack')
+        self.tabs.addTab(self._hilo_tab(), 'Hi-Lo')
+        self.tabs.addTab(self._coin_tab(), 'Coin Flip')
+        self.tabs.addTab(self._online_tab(), 'Dice Duel Online')
+        v.addWidget(self.tabs, 1)
 
         self.setStyleSheet('''
             QMainWindow {
@@ -10199,9 +10274,56 @@ class CasinoWindow(QtWidgets.QMainWindow):
                 payload = dict(evt[1] or {})
                 self._record_roll(payload, local=False)
 
+    def _casino_action_primary(self):
+        idx = int(self.tabs.currentIndex()) if hasattr(self, 'tabs') else 0
+        if idx == 0:
+            self.play_slots()
+        elif idx == 1:
+            self.play_roulette()
+        elif idx == 2:
+            self.play_blackjack()
+        elif idx == 3:
+            self.play_hilo('high')
+        elif idx == 4:
+            self.play_coin()
+        elif idx == 5:
+            self.play_online_dice()
+
+    def _casino_action_secondary(self):
+        idx = int(self.tabs.currentIndex()) if hasattr(self, 'tabs') else 0
+        if idx == 3:
+            self.play_hilo('low')
+            return True
+        if idx == 4:
+            cur = str(self.coin_pick.currentText()).strip().upper()
+            self.coin_pick.setCurrentText('TAILS' if cur == 'HEADS' else 'HEADS')
+            self.refresh_balance(f'Coin pick: {self.coin_pick.currentText()}')
+            return True
+        return False
+
     def keyPressEvent(self, e):
-        if e.key() in (QtCore.Qt.Key_Escape, QtCore.Qt.Key_Back):
+        k = e.key()
+        if k == QtCore.Qt.Key_A:
+            k = QtCore.Qt.Key_Return
+        elif k == QtCore.Qt.Key_B:
+            k = QtCore.Qt.Key_Escape
+        elif k == QtCore.Qt.Key_X:
+            if self._casino_action_secondary():
+                return
+            k = QtCore.Qt.Key_Space
+        elif k == QtCore.Qt.Key_Y:
+            k = QtCore.Qt.Key_Tab
+        if k in (QtCore.Qt.Key_Escape, QtCore.Qt.Key_Back):
             self.close()
+            return
+        if k in (QtCore.Qt.Key_PageUp, QtCore.Qt.Key_Backtab):
+            self.tabs.setCurrentIndex((self.tabs.currentIndex() - 1) % max(1, self.tabs.count()))
+            return
+        if k in (QtCore.Qt.Key_PageDown, QtCore.Qt.Key_Tab):
+            self.tabs.setCurrentIndex((self.tabs.currentIndex() + 1) % max(1, self.tabs.count()))
+            return
+        if k in (QtCore.Qt.Key_Return, QtCore.Qt.Key_Enter, QtCore.Qt.Key_Space):
+            self._casino_action_primary()
             return
         super().keyPressEvent(e)
 
@@ -10323,10 +10445,15 @@ class RunnerGame(QtWidgets.QWidget):
         self.close()
 
     def keyPressEvent(self, e):
-        if e.key() in (QtCore.Qt.Key_Space, QtCore.Qt.Key_Up):
+        k = e.key()
+        if k in (QtCore.Qt.Key_A, QtCore.Qt.Key_Return, QtCore.Qt.Key_Enter):
+            k = QtCore.Qt.Key_Space
+        elif k == QtCore.Qt.Key_B:
+            k = QtCore.Qt.Key_Escape
+        if k in (QtCore.Qt.Key_Space, QtCore.Qt.Key_Up):
             if self.player_y >= (self.ground - self.player_h - 0.5):
                 self.vy = self.jump_v
-        elif e.key() == QtCore.Qt.Key_Escape:
+        elif k == QtCore.Qt.Key_Escape:
             self.close()
             return
         super().keyPressEvent(e)
@@ -10462,7 +10589,29 @@ class MissionsWindow(QtWidgets.QMainWindow):
         self.reload('Misiones reiniciadas.')
 
     def keyPressEvent(self, e):
-        if e.key() in (QtCore.Qt.Key_Escape, QtCore.Qt.Key_Back):
+        k = e.key()
+        if k == QtCore.Qt.Key_A:
+            k = QtCore.Qt.Key_Return
+        elif k == QtCore.Qt.Key_B:
+            k = QtCore.Qt.Key_Escape
+        elif k == QtCore.Qt.Key_X:
+            self.reset_missions()
+            return
+        elif k == QtCore.Qt.Key_Y:
+            self.reload('Misiones recargadas.')
+            return
+        if k in (QtCore.Qt.Key_Up,):
+            row = max(0, self.listw.currentRow() - 1)
+            self.listw.setCurrentRow(row)
+            return
+        if k in (QtCore.Qt.Key_Down,):
+            row = min(max(0, self.listw.count() - 1), self.listw.currentRow() + 1)
+            self.listw.setCurrentRow(row)
+            return
+        if k in (QtCore.Qt.Key_Return, QtCore.Qt.Key_Enter, QtCore.Qt.Key_Space):
+            self.complete_selected()
+            return
+        if k in (QtCore.Qt.Key_Escape, QtCore.Qt.Key_Back):
             self.close()
             return
         super().keyPressEvent(e)
@@ -11687,7 +11836,7 @@ class StoreWindow(QtWidgets.QMainWindow):
         self.info_lbl.setText(f'{key} section is visual-only in this build.')
 
     def _run_terminal(self, cmd):
-        hold = str(cmd) + '; rc=$?; echo; echo "[XUI] Exit code: $rc"; echo "[XUI] Press Enter to close..."; read -r _'
+        hold = self._with_controller_env_cmd(str(cmd)) + '; rc=$?; echo; echo "[XUI] Exit code: $rc"; echo "[XUI] Press Enter to close..."; read -r _'
         term = None
         args = []
         if shutil.which('x-terminal-emulator'):
@@ -11707,8 +11856,37 @@ class StoreWindow(QtWidgets.QMainWindow):
             return True
         return QtCore.QProcess.startDetached('/bin/bash', ['-lc', hold])
 
+    def _controller_env_exports(self):
+        env_file = DATA_HOME / 'controller_profile.env'
+        if not env_file.exists():
+            return ''
+        parts = []
+        try:
+            for raw in env_file.read_text(encoding='utf-8', errors='ignore').splitlines():
+                line = str(raw).strip()
+                if not line or line.startswith('#') or '=' not in line:
+                    continue
+                k, v = line.split('=', 1)
+                k = str(k).strip()
+                if not k:
+                    continue
+                if k.startswith('XUI_JOY_') or k.startswith('SDL_') or k.startswith('QT_'):
+                    parts.append(f'export {k}={shlex.quote(str(v).strip())}')
+        except Exception:
+            return ''
+        return '; '.join(parts)
+
+    def _with_controller_env_cmd(self, cmd):
+        exports = self._controller_env_exports()
+        body = str(cmd or '').strip()
+        if not exports:
+            return body
+        if not body:
+            return exports
+        return f'{exports}; {body}'
+
     def _run_detached(self, cmd):
-        return QtCore.QProcess.startDetached('/bin/sh', ['-c', cmd])
+        return QtCore.QProcess.startDetached('/bin/sh', ['-c', self._with_controller_env_cmd(cmd)])
 
     def _close_install_progress(self):
         dlg = self._install_progress
@@ -12530,6 +12708,71 @@ def flathub_items(limit=260):
         return items
     return items
 
+def itch_collection_items(collection_url, id_prefix='itch_collection'):
+    items = []
+    try:
+        req = urllib.request.Request(str(collection_url), headers=UA)
+        with urllib.request.urlopen(req, timeout=25) as r:
+            raw = r.read().decode('utf-8', errors='ignore')
+    except Exception:
+        return items
+
+    seen = set()
+
+    # Preferred source: init_ConversionLink(...) JSON snippets include canonical title + href.
+    for m in re.finditer(r'init_ConversionLink\\([^\\{]*\\{(.*?)\\}\\);', raw, re.S):
+        blob = m.group(1)
+        hm = re.search(r'"href":"(https:\\\\/\\\\/[^"]+\\.itch\\.io\\\\/[^"]+)"', blob)
+        tm = re.search(r'"children":"([^"]+)"', blob)
+        if not hm or not tm:
+            continue
+        url = hm.group(1).replace('\\/', '/').strip()
+        name = tm.group(1).replace("\\'", "'").strip()
+        if not url or not name or url in seen:
+            continue
+        seen.add(url)
+        rid = f"{id_prefix}_{safe_name(url.replace('https://', '').replace('/', '_'))}".lower()
+        cover = 'https://itch.io/favicon.ico'
+        cover_local = cache_cover(cover, rid)
+        items.append({
+            'id': rid,
+            'name': name,
+            'price': 0.0,
+            'pricing': 'free',
+            'category': 'Games',
+            'source': 'Itch.io',
+            'desc': 'Imported from Itch.io collection.',
+            'cover': cover,
+            'cover_local': cover_local,
+            'launch': str(BIN / 'xui_browser.sh') + f' --hub {url}',
+        })
+
+    # Fallback parser if init_ConversionLink is absent.
+    if not items:
+        for m in re.finditer(r'<a class="game_title" href="(https://[^"]+\\.itch\\.io/[^"]+)">(.*?)</a>', raw, re.S):
+            url = str(m.group(1) or '').strip()
+            name = re.sub(r'<[^>]+>', '', str(m.group(2) or '')).strip()
+            name = name.replace('&#039;', "'")
+            if not url or not name or url in seen:
+                continue
+            seen.add(url)
+            rid = f"{id_prefix}_{safe_name(url.replace('https://', '').replace('/', '_'))}".lower()
+            cover = 'https://itch.io/favicon.ico'
+            cover_local = cache_cover(cover, rid)
+            items.append({
+                'id': rid,
+                'name': name,
+                'price': 0.0,
+                'pricing': 'free',
+                'category': 'Games',
+                'source': 'Itch.io',
+                'desc': 'Imported from Itch.io collection.',
+                'cover': cover,
+                'cover_local': cover_local,
+                'launch': str(BIN / 'xui_browser.sh') + f' --hub {url}',
+            })
+    return items
+
 def curated_web_sources():
     # Real cards from official pages. Paid cards always redirect to official checkout.
     entries = [
@@ -12560,6 +12803,286 @@ def curated_web_sources():
             'source': 'Itch.io',
             'cover': 'https://itch.io/favicon.ico',
             'desc': 'Browse horror games on Itch.io.',
+            'pricing': 'free',
+            'price': 0.0,
+        },
+        {
+            'id': 'itch_efpse_mysticalmist_an_abstract_kind_of_hell_the_amazing_digital_circus_fan_game',
+            'name': 'An Abstract Kind of Hell - The Amazing Digital Circus Fan Game',
+            'url': 'https://mysticalmist.itch.io/an-abstract-kind-of-hell-the-amazing-digital-circus-fan-game',
+            'source': 'Itch.io',
+            'cover': 'https://itch.io/favicon.ico',
+            'desc': 'Easy FPS Editor Games collection card on Itch.io.',
+            'pricing': 'free',
+            'price': 0.0,
+        },
+        {
+            'id': 'itch_efpse_bryson111_rage_of_vengence',
+            'name': 'DroneGun',
+            'url': 'https://bryson111.itch.io/rage-of-vengence',
+            'source': 'Itch.io',
+            'cover': 'https://itch.io/favicon.ico',
+            'desc': 'Easy FPS Editor Games collection card on Itch.io.',
+            'pricing': 'free',
+            'price': 0.0,
+        },
+        {
+            'id': 'itch_efpse_keshafilm_project_babe',
+            'name': 'Project: B.A.B.E.',
+            'url': 'https://keshafilm.itch.io/project-babe',
+            'source': 'Itch.io',
+            'cover': 'https://itch.io/favicon.ico',
+            'desc': 'Easy FPS Editor Games collection card on Itch.io.',
+            'pricing': 'free',
+            'price': 0.0,
+        },
+        {
+            'id': 'itch_efpse_lazyspar7an_rampancy',
+            'name': 'Rampancy',
+            'url': 'https://lazyspar7an.itch.io/rampancy',
+            'source': 'Itch.io',
+            'cover': 'https://itch.io/favicon.ico',
+            'desc': 'Easy FPS Editor Games collection card on Itch.io.',
+            'pricing': 'free',
+            'price': 0.0,
+        },
+        {
+            'id': 'itch_efpse_nikkyhika_three_endless_apartments',
+            'name': 'Three endless apartments',
+            'url': 'https://nikkyhika.itch.io/three-endless-apartments',
+            'source': 'Itch.io',
+            'cover': 'https://itch.io/favicon.ico',
+            'desc': 'Easy FPS Editor Games collection card on Itch.io.',
+            'pricing': 'free',
+            'price': 0.0,
+        },
+        {
+            'id': 'itch_efpse_creationkit_high_noon',
+            'name': 'HighNoon',
+            'url': 'https://creationkit.itch.io/high-noon',
+            'source': 'Itch.io',
+            'cover': 'https://itch.io/favicon.ico',
+            'desc': 'Easy FPS Editor Games collection card on Itch.io.',
+            'pricing': 'free',
+            'price': 0.0,
+        },
+        {
+            'id': 'itch_efpse_overlordofwoodhouse_mega_man_world_tour',
+            'name': 'Mega Man: World Tour Demo',
+            'url': 'https://overlordofwoodhouse.itch.io/mega-man-world-tour',
+            'source': 'Itch.io',
+            'cover': 'https://itch.io/favicon.ico',
+            'desc': 'Easy FPS Editor Games collection card on Itch.io.',
+            'pricing': 'free',
+            'price': 0.0,
+        },
+        {
+            'id': 'itch_efpse_darkslayerx69x_bloom',
+            'name': 'BLOOM',
+            'url': 'https://darkslayerx69x.itch.io/bloom',
+            'source': 'Itch.io',
+            'cover': 'https://itch.io/favicon.ico',
+            'desc': 'Easy FPS Editor Games collection card on Itch.io.',
+            'pricing': 'free',
+            'price': 0.0,
+        },
+        {
+            'id': 'itch_efpse_vavaci_infinite_shooter',
+            'name': 'INFINITE SHOOTER',
+            'url': 'https://vavaci.itch.io/infinite-shooter',
+            'source': 'Itch.io',
+            'cover': 'https://itch.io/favicon.ico',
+            'desc': 'Easy FPS Editor Games collection card on Itch.io.',
+            'pricing': 'free',
+            'price': 0.0,
+        },
+        {
+            'id': 'itch_efpse_rotexun_games_lyras_rampage',
+            'name': "Lyra's Rampage",
+            'url': 'https://rotexun-games.itch.io/lyras-rampage',
+            'source': 'Itch.io',
+            'cover': 'https://itch.io/favicon.ico',
+            'desc': 'Easy FPS Editor Games collection card on Itch.io.',
+            'pricing': 'free',
+            'price': 0.0,
+        },
+        {
+            'id': 'itch_efpse_slipgatestories_despair',
+            'name': 'Despair',
+            'url': 'https://slipgatestories.itch.io/despair',
+            'source': 'Itch.io',
+            'cover': 'https://itch.io/favicon.ico',
+            'desc': 'Easy FPS Editor Games collection card on Itch.io.',
+            'pricing': 'free',
+            'price': 0.0,
+        },
+        {
+            'id': 'itch_efpse_slipgatestories_backrooms',
+            'name': 'Backrooms',
+            'url': 'https://slipgatestories.itch.io/backrooms',
+            'source': 'Itch.io',
+            'cover': 'https://itch.io/favicon.ico',
+            'desc': 'Easy FPS Editor Games collection card on Itch.io.',
+            'pricing': 'free',
+            'price': 0.0,
+        },
+        {
+            'id': 'itch_efpse_cyclosworld_dmtgadr',
+            'name': 'Dareman The Grand Adventure Demo Release',
+            'url': 'https://cyclosworld.itch.io/dmtgadr',
+            'source': 'Itch.io',
+            'cover': 'https://itch.io/favicon.ico',
+            'desc': 'Easy FPS Editor Games collection card on Itch.io.',
+            'pricing': 'free',
+            'price': 0.0,
+        },
+        {
+            'id': 'itch_efpse_rukus04_hell_ridden',
+            'name': 'Hell Ridden',
+            'url': 'https://rukus04.itch.io/hell-ridden',
+            'source': 'Itch.io',
+            'cover': 'https://itch.io/favicon.ico',
+            'desc': 'Easy FPS Editor Games collection card on Itch.io.',
+            'pricing': 'free',
+            'price': 0.0,
+        },
+        {
+            'id': 'itch_efpse_supersalnik97_bulletarium',
+            'name': 'Bulletarium : Project Whale-Man',
+            'url': 'https://supersalnik97.itch.io/bulletarium',
+            'source': 'Itch.io',
+            'cover': 'https://itch.io/favicon.ico',
+            'desc': 'Easy FPS Editor Games collection card on Itch.io.',
+            'pricing': 'free',
+            'price': 0.0,
+        },
+        {
+            'id': 'itch_efpse_chill_d_man_efpsep_tech_demo_ver10',
+            'name': 'EFPSEP Tech Demo (Ver1.0)',
+            'url': 'https://chill-d-man.itch.io/efpsep-tech-demo-ver10',
+            'source': 'Itch.io',
+            'cover': 'https://itch.io/favicon.ico',
+            'desc': 'Easy FPS Editor Games collection card on Itch.io.',
+            'pricing': 'free',
+            'price': 0.0,
+        },
+        {
+            'id': 'itch_efpse_chill_d_man_echelon_prime',
+            'name': 'ECHELON PRIME',
+            'url': 'https://chill-d-man.itch.io/echelon-prime',
+            'source': 'Itch.io',
+            'cover': 'https://itch.io/favicon.ico',
+            'desc': 'Easy FPS Editor Games collection card on Itch.io.',
+            'pricing': 'free',
+            'price': 0.0,
+        },
+        {
+            'id': 'itch_efpse_bontie_the_bald_brights_twice',
+            'name': 'The Bald Brights Twice',
+            'url': 'https://bontie.itch.io/the-bald-brights-twice',
+            'source': 'Itch.io',
+            'cover': 'https://itch.io/favicon.ico',
+            'desc': 'Easy FPS Editor Games collection card on Itch.io.',
+            'pricing': 'free',
+            'price': 0.0,
+        },
+        {
+            'id': 'itch_efpse_creationkit_advance_efpse_template',
+            'name': "Creationkit's Advance EFPSE Template",
+            'url': 'https://creationkit.itch.io/advance-efpse-template',
+            'source': 'Itch.io',
+            'cover': 'https://itch.io/favicon.ico',
+            'desc': 'Easy FPS Editor Games collection card on Itch.io.',
+            'pricing': 'free',
+            'price': 0.0,
+        },
+        {
+            'id': 'itch_efpse_pmhproductions_gi_joe_escape_from_castle_cobra',
+            'name': 'GI JOE: Escape From Castle Cobra (Full Game)',
+            'url': 'https://pmhproductions.itch.io/gi-joe-escape-from-castle-cobra',
+            'source': 'Itch.io',
+            'cover': 'https://itch.io/favicon.ico',
+            'desc': 'Easy FPS Editor Games collection card on Itch.io.',
+            'pricing': 'free',
+            'price': 0.0,
+        },
+        {
+            'id': 'itch_efpse_bontie_bontie_test_game',
+            'name': 'Bontie Test Game',
+            'url': 'https://bontie.itch.io/bontie-test-game',
+            'source': 'Itch.io',
+            'cover': 'https://itch.io/favicon.ico',
+            'desc': 'Easy FPS Editor Games collection card on Itch.io.',
+            'pricing': 'free',
+            'price': 0.0,
+        },
+        {
+            'id': 'itch_efpse_bontie_bontie2',
+            'name': 'B.O.N.T.I.E 2',
+            'url': 'https://bontie.itch.io/bontie2',
+            'source': 'Itch.io',
+            'cover': 'https://itch.io/favicon.ico',
+            'desc': 'Easy FPS Editor Games collection card on Itch.io.',
+            'pricing': 'free',
+            'price': 0.0,
+        },
+        {
+            'id': 'itch_efpse_hasturudjat_witch_hunter',
+            'name': 'Witch Hunter (retro-fps)',
+            'url': 'https://hasturudjat.itch.io/witch-hunter',
+            'source': 'Itch.io',
+            'cover': 'https://itch.io/favicon.ico',
+            'desc': 'Easy FPS Editor Games collection card on Itch.io.',
+            'pricing': 'free',
+            'price': 0.0,
+        },
+        {
+            'id': 'itch_efpse_poopbutt67_putershooter667',
+            'name': 'PUTerSHOOTer667',
+            'url': 'https://poopbutt67.itch.io/putershooter667',
+            'source': 'Itch.io',
+            'cover': 'https://itch.io/favicon.ico',
+            'desc': 'Easy FPS Editor Games collection card on Itch.io.',
+            'pricing': 'free',
+            'price': 0.0,
+        },
+        {
+            'id': 'itch_efpse_damiondamaske_space_ghost_coast_to_coast_3d',
+            'name': 'Space Ghost: Coast to Coast: The Game',
+            'url': 'https://damiondamaske.itch.io/space-ghost-coast-to-coast-3d',
+            'source': 'Itch.io',
+            'cover': 'https://itch.io/favicon.ico',
+            'desc': 'Easy FPS Editor Games collection card on Itch.io.',
+            'pricing': 'free',
+            'price': 0.0,
+        },
+        {
+            'id': 'itch_efpse_qwert_yt_cryine_2',
+            'name': 'cryine 2',
+            'url': 'https://qwert-yt.itch.io/cryine-2',
+            'source': 'Itch.io',
+            'cover': 'https://itch.io/favicon.ico',
+            'desc': 'Easy FPS Editor Games collection card on Itch.io.',
+            'pricing': 'free',
+            'price': 0.0,
+        },
+        {
+            'id': 'itch_efpse_bontie_bontie',
+            'name': 'B.O.N.T.I.E',
+            'url': 'https://bontie.itch.io/bontie',
+            'source': 'Itch.io',
+            'cover': 'https://itch.io/favicon.ico',
+            'desc': 'Easy FPS Editor Games collection card on Itch.io.',
+            'pricing': 'free',
+            'price': 0.0,
+        },
+        {
+            'id': 'itch_efpse_sodosopa_games_tegridy_arms_demo',
+            'name': 'Tegridy Arms (Demo)',
+            'url': 'https://sodosopa-games.itch.io/tegridy-arms-demo',
+            'source': 'Itch.io',
+            'cover': 'https://itch.io/favicon.ico',
+            'desc': 'Easy FPS Editor Games collection card on Itch.io.',
             'pricing': 'free',
             'price': 0.0,
         },
@@ -12719,6 +13242,10 @@ def curated_web_sources():
 items = []
 items.extend(flathub_items(limit=260))
 items.extend(curated_web_sources())
+items.extend(itch_collection_items(
+    'https://itch.io/c/5283593/games-made-with-fps-creator',
+    id_prefix='itch_fpscreator'
+))
 
 # Deduplicate IDs, keep first.
 seen = set()
@@ -14454,14 +14981,8 @@ if [ "$(id -u)" -eq 0 ] && [ -n "${SUDO_USER:-}" ]; then
 fi
 
 if [ "$(id -u)" -ne 0 ]; then
-    if command -v sudo >/dev/null 2>&1; then
-        if sudo -n "$0" "$@"; then
-            exit 0
-        fi
-    fi
-    echo "[WARN] Passwordless sudo is required for XUI actions." >&2
-    echo "[WARN] Re-run installer/update to configure /etc/sudoers.d/xui-autosudo-\$USER." >&2
-    exit 1
+    # Launch path must not require sudo; this script is used by systemd --user and autostart.
+    :
 fi
 
 export HOME="$TARGET_HOME"
