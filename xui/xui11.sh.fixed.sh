@@ -6053,7 +6053,26 @@ exit 0
         elif action in ('Gem Match', 'Bejeweled'):
             self._run('/bin/sh', ['-c', f'{xui}/bin/xui_gem_match.sh'])
         elif action in ('FNAE', "Five Night's At Epstein's", "Five Nights At Epstein's"):
-            self._run('/bin/sh', ['-c', f'{xui}/bin/xui_run_fnae.sh'])
+            run_fnae = f'{xui}/bin/xui_run_fnae.sh'
+            install_fnae = f'{xui}/bin/xui_install_fnae.sh'
+            installed = (
+                subprocess.call(
+                    ['/bin/sh', '-c', f'"{run_fnae}" --check'],
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                ) == 0
+            )
+            if installed:
+                self._run('/bin/sh', ['-c', f'"{run_fnae}"'])
+            else:
+                if self._ask_yes_no(
+                    'FNAE',
+                    'FNAE no esta instalado.\n\n'
+                    'Se descargara desde MediaFire y se instalara ahora.\n'
+                    'URL: https://www.mediafire.com/file/a4q4l09vdfqzzws/Five_Nights_At_Epsteins_Linux.tar/file\n\n'
+                    'Deseas continuar?'
+                ):
+                    self._run_terminal(f'"{install_fnae}" && "{run_fnae}"')
         elif action == 'Uninstall FNAE':
             if self._ask_yes_no('FNAE', 'Uninstall Five Nights At Epstein\'s from local XUI apps folder?'):
                 subprocess.getoutput('/bin/sh -c "rm -rf $HOME/.xui/apps/fnae $HOME/.xui/data/fnae_paths.json"')
@@ -10940,18 +10959,48 @@ fetch_url_to_file(){
   local ref="${3:-}"
   if command -v curl >/dev/null 2>&1; then
     if [ -n "$ref" ]; then
-      curl -fL --retry 3 --retry-delay 1 -A "Mozilla/5.0" -e "$ref" "$url" -o "$out" >/dev/null 2>&1
+      curl -fL --retry 5 --retry-delay 2 --retry-all-errors \
+        --connect-timeout 20 --max-time 0 \
+        -A "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 XUI-FNAE" \
+        -e "$ref" "$url" -o "$out" >/dev/null 2>&1
     else
-      curl -fL --retry 3 --retry-delay 1 -A "Mozilla/5.0" "$url" -o "$out" >/dev/null 2>&1
+      curl -fL --retry 5 --retry-delay 2 --retry-all-errors \
+        --connect-timeout 20 --max-time 0 \
+        -A "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 XUI-FNAE" \
+        "$url" -o "$out" >/dev/null 2>&1
     fi
     return $?
   fi
   if command -v wget >/dev/null 2>&1; then
     if [ -n "$ref" ]; then
-      wget -q --tries=3 --waitretry=1 --user-agent="Mozilla/5.0" --referer="$ref" -O "$out" "$url"
+      wget -q --tries=5 --waitretry=2 --timeout=25 --user-agent="Mozilla/5.0 (X11; Linux x86_64) XUI-FNAE" --referer="$ref" -O "$out" "$url"
     else
-      wget -q --tries=3 --waitretry=1 --user-agent="Mozilla/5.0" -O "$out" "$url"
+      wget -q --tries=5 --waitretry=2 --timeout=25 --user-agent="Mozilla/5.0 (X11; Linux x86_64) XUI-FNAE" -O "$out" "$url"
     fi
+    return $?
+  fi
+  if command -v python3 >/dev/null 2>&1; then
+    python3 - "$url" "$out" "$ref" <<'PY'
+import ssl
+import sys
+import urllib.request
+
+url = sys.argv[1]
+out = sys.argv[2]
+ref = sys.argv[3] if len(sys.argv) > 3 else ''
+headers = {'User-Agent': 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 XUI-FNAE'}
+if ref:
+    headers['Referer'] = ref
+req = urllib.request.Request(url, headers=headers)
+ctx = ssl.create_default_context()
+with urllib.request.urlopen(req, timeout=60, context=ctx) as r:
+    payload = r.read()
+if not payload:
+    raise SystemExit(1)
+with open(out, 'wb') as fh:
+    fh.write(payload)
+raise SystemExit(0)
+PY
     return $?
   fi
   return 1
@@ -10960,7 +11009,14 @@ fetch_url_to_file(){
 extract_mediafire_direct(){
   local html="$1"
   local direct=""
-  direct="$(grep -Eo 'https://download[0-9]*\.mediafire\.com/[^"'"'"' <>]+' "$html" | head -n1 || true)"
+  direct="$(grep -Eo 'https:\\/\\/download[0-9]*\\.mediafire\\.com\\/[^\"]+' "$html" | head -n1 || true)"
+  if [ -z "$direct" ]; then
+    direct="$(grep -Eo '//download[0-9]*\\.mediafire\\.com/[^"'"'"' <>]+' "$html" | head -n1 || true)"
+    [ -n "$direct" ] && direct="https:${direct}"
+  fi
+  if [ -z "$direct" ]; then
+    direct="$(grep -Eo 'https://download[0-9]*\.mediafire\.com/[^"'"'"' <>]+' "$html" | head -n1 || true)"
+  fi
   if [ -z "$direct" ]; then
     direct="$(grep -Eo 'https://[a-z0-9.-]*mediafire\.com/[^"'"'"' <>]*download[^"'"'"' <>]*' "$html" | head -n1 || true)"
   fi
@@ -10998,6 +11054,13 @@ download_from_mediafire(){
     return 1
   fi
   fetch_url_to_file "$direct" "$tmp_dl" "$page_url" || { rm -f "$tmp_html" "$tmp_dl"; return 1; }
+  if is_html_file "$tmp_dl"; then
+    local nested=""
+    nested="$(extract_mediafire_direct "$tmp_dl" || true)"
+    if [ -n "$nested" ] && [ "$nested" != "$direct" ]; then
+      fetch_url_to_file "$nested" "$tmp_dl" "$page_url" || { rm -f "$tmp_html" "$tmp_dl"; return 1; }
+    fi
+  fi
   if is_html_file "$tmp_dl"; then
     rm -f "$tmp_html" "$tmp_dl"
     return 1
@@ -11066,6 +11129,12 @@ find_linux_executable(){
   local root="$1"
   [ -d "$root" ] || return 1
 
+  is_elf(){
+    local f="$1"
+    [ -f "$f" ] || return 1
+    LC_ALL=C head -c 4 "$f" 2>/dev/null | grep -q $'^\x7fELF'
+  }
+
   # 1) Common Unity/Linux artifacts.
   local exe=""
   exe="$(find "$root" -maxdepth 8 -type f \( -name '*.x86_64' -o -name '*.x86' -o -name '*.AppImage' \) | head -n1 || true)"
@@ -11099,6 +11168,18 @@ find_linux_executable(){
     echo "$exe"
     return 0
   fi
+
+  # 4) Fallback: any ELF binary, even if it was extracted without +x bit.
+  while IFS= read -r exe; do
+    [ -n "$exe" ] || continue
+    if is_elf "$exe"; then
+      chmod +x "$exe" >/dev/null 2>&1 || true
+      echo "$exe"
+      return 0
+    fi
+  done < <(find "$root" -maxdepth 8 -type f \
+    ! -name '*.so' ! -name '*.dll' ! -name '*.pdb' \
+    ! -name 'UnityCrashHandler*' ! -name '*.exe' 2>/dev/null)
   return 1
 }
 
@@ -11286,6 +11367,11 @@ JSON
 echo "FNAE installed."
 echo "Linux executable: ${LINUX_EXE:-not found}"
 echo "Windows executable: ${WIN_EXE:-not found/disabled on Linux}"
+if [ "$IS_LINUX" = "1" ] && [ -z "$LINUX_EXE" ]; then
+  echo "FNAE install completed but Linux executable was not detected."
+  echo "Check extracted files in: $APP_HOME/linux"
+  exit 1
+fi
 BASH
   chmod +x "$BIN_DIR/xui_install_fnae.sh"
 
@@ -11325,6 +11411,11 @@ HOST_OS="$(uname -s 2>/dev/null || echo Linux)"
 IS_LINUX=0
 [ "$HOST_OS" = "Linux" ] && IS_LINUX=1
 ALLOW_WIN_ON_LINUX="${XUI_FNAE_ALLOW_WINDOWS_ON_LINUX:-0}"
+CHECK_ONLY=0
+if [ "${1:-}" = "--check" ]; then
+  CHECK_ONLY=1
+  shift || true
+fi
 
 read_json_field(){
   local field="$1"
@@ -11344,6 +11435,11 @@ PY
 find_linux_executable(){
   local root="${1:-$APP_HOME/linux}"
   [ -d "$root" ] || return 1
+  is_elf(){
+    local f="$1"
+    [ -f "$f" ] || return 1
+    LC_ALL=C head -c 4 "$f" 2>/dev/null | grep -q $'^\x7fELF'
+  }
   local exe=""
   exe="$(find "$root" -maxdepth 8 -type f \( -name '*.x86_64' -o -name '*.x86' -o -name '*.AppImage' \) | head -n1 || true)"
   if [ -n "$exe" ] && [ -f "$exe" ]; then
@@ -11368,10 +11464,19 @@ find_linux_executable(){
     echo "$exe"
     return 0
   fi
+  while IFS= read -r exe; do
+    [ -n "$exe" ] || continue
+    if is_elf "$exe"; then
+      echo "$exe"
+      return 0
+    fi
+  done < <(find "$root" -maxdepth 8 -type f \
+    ! -name '*.so' ! -name '*.dll' ! -name '*.pdb' \
+    ! -name 'UnityCrashHandler*' ! -name '*.exe' 2>/dev/null)
   return 1
 }
 
-if [ ! -f "$DATA_FILE" ]; then
+if [ "$CHECK_ONLY" = "0" ] && [ ! -f "$DATA_FILE" ]; then
   "$BIN_DIR/xui_install_fnae.sh" || true
 fi
 
@@ -11386,12 +11491,21 @@ if [ -z "$LINUX_EXE" ] || [ ! -f "$LINUX_EXE" ]; then
 fi
 
 # On Linux, force a Linux reinstall once if no native executable was detected.
-if [ "$IS_LINUX" = "1" ] && { [ -z "$LINUX_EXE" ] || [ ! -f "$LINUX_EXE" ]; }; then
+if [ "$CHECK_ONLY" = "0" ] && [ "$IS_LINUX" = "1" ] && { [ -z "$LINUX_EXE" ] || [ ! -f "$LINUX_EXE" ]; }; then
   "$BIN_DIR/xui_install_fnae.sh" || true
   if [ -f "$DATA_FILE" ]; then
     LINUX_EXE="$(read_json_field linux_exe)"
     WIN_EXE="$(read_json_field windows_exe)"
   fi
+fi
+
+if [ "$CHECK_ONLY" = "1" ]; then
+  if [ "$IS_LINUX" = "1" ]; then
+    [ -n "$LINUX_EXE" ] && [ -f "$LINUX_EXE" ] && exit 0
+    exit 1
+  fi
+  [ -n "$WIN_EXE" ] && [ -f "$WIN_EXE" ] && exit 0
+  exit 1
 fi
 
 launch_and_wait(){
