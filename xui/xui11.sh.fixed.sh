@@ -1136,7 +1136,44 @@ def play_media(path, video=False, blocking=False):
             return True
     except Exception:
         pass
+    if video:
+        return False
+    fallback_cmds = []
+    if shutil.which('ffplay'):
+        fallback_cmds.append(['ffplay', '-nodisp', '-autoexit', '-loglevel', 'quiet', str(p)])
+    if shutil.which('paplay'):
+        fallback_cmds.append(['paplay', str(p)])
+    if shutil.which('aplay'):
+        fallback_cmds.append(['aplay', '-q', str(p)])
+    for cmd in fallback_cmds:
+        try:
+            if blocking:
+                subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False)
+            else:
+                subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            return True
+        except Exception:
+            continue
     return False
+
+
+def ensure_audio_output_ready(min_volume=35):
+    try:
+        v = int(min_volume)
+    except Exception:
+        v = 35
+    v = max(1, min(120, v))
+    cmds = [
+        f'pactl set-sink-mute @DEFAULT_SINK@ 0 || true; pactl set-sink-volume @DEFAULT_SINK@ {v}% || true',
+        f'wpctl set-mute @DEFAULT_AUDIO_SINK@ 0 || true; wpctl set-volume @DEFAULT_AUDIO_SINK@ {v}% || true',
+        f'amixer -D pulse sset Master unmute || true; amixer -D pulse sset Master {v}% || true',
+        f'amixer sset Master unmute || true; amixer sset Master {v}% || true',
+    ]
+    for cmd in cmds:
+        try:
+            subprocess.run(['/bin/sh', '-c', cmd], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False)
+        except Exception:
+            pass
 
 
 def play_startup_video():
@@ -5345,6 +5382,9 @@ class Dashboard(QtWidgets.QMainWindow):
         self._games_inline = None
         self._qgamepads = {}
         self._gp_last_emit = {}
+        self._gp_axis_last_dir = {}
+        self._gp_axis_deadzone = 0.40
+        self._gp_axis_release_zone = 0.22
         self.sfx = {
             'hover': 'hover.mp3',
             'open': 'open.mp3',
@@ -5367,6 +5407,7 @@ class Dashboard(QtWidgets.QMainWindow):
             ensure_achievements(5000)
         except Exception:
             pass
+        ensure_audio_output_ready(40)
         self._setup_qt_gamepad_input()
         self._apply_responsive_layout()
         self.update_focus()
@@ -6060,6 +6101,7 @@ exit 0
             if (now - self._last_hover_at) < 0.08:
                 return
             self._last_hover_at = now
+        ensure_audio_output_ready(35)
         candidates = []
         base = self.sfx.get(name)
         if base:
@@ -7225,8 +7267,16 @@ exit 0
 
     def _gp_axis(self, axis_name, value):
         v = float(value)
-        if abs(v) < 0.45:
+        prev_dir = int(self._gp_axis_last_dir.get(axis_name, 0))
+        if abs(v) <= float(self._gp_axis_release_zone):
+            self._gp_axis_last_dir[axis_name] = 0
             return
+        if abs(v) < float(self._gp_axis_deadzone):
+            return
+        direction = -1 if v < 0 else 1
+        if direction == prev_dir:
+            return
+        self._gp_axis_last_dir[axis_name] = direction
         if axis_name in ('lx', 'rx'):
             self._gp_emit(QtCore.Qt.Key_Left if v < 0 else QtCore.Qt.Key_Right, channel=f'axis_{axis_name}', repeat_sec=0.17)
         elif axis_name in ('ly', 'ry'):
@@ -7259,9 +7309,9 @@ exit 0
             gp.buttonStartChanged.connect(lambda p, did=did: p and self._gp_emit(QtCore.Qt.Key_Return, channel=f'{did}_start'))
             gp.buttonSelectChanged.connect(lambda p, did=did: p and self._gp_emit(QtCore.Qt.Key_Escape, channel=f'{did}_back'))
 
-            gp.buttonLeftShoulderChanged.connect(lambda p, did=did: p and self._gp_emit(QtCore.Qt.Key_Left, channel=f'{did}_lb'))
-            gp.buttonRightShoulderChanged.connect(lambda p, did=did: p and self._gp_emit(QtCore.Qt.Key_Right, channel=f'{did}_rb'))
-            gp.buttonL2Changed.connect(lambda v, did=did: v > 0.55 and self._gp_emit(QtCore.Qt.Key_Tab, channel=f'{did}_lt'))
+            gp.buttonLeftShoulderChanged.connect(lambda p, did=did: p and self._gp_emit(QtCore.Qt.Key_PageUp, channel=f'{did}_lb'))
+            gp.buttonRightShoulderChanged.connect(lambda p, did=did: p and self._gp_emit(QtCore.Qt.Key_PageDown, channel=f'{did}_rb'))
+            gp.buttonL2Changed.connect(lambda v, did=did: v > 0.55 and self._gp_emit(QtCore.Qt.Key_Backtab, channel=f'{did}_lt'))
             gp.buttonR2Changed.connect(lambda v, did=did: v > 0.55 and self._gp_emit(QtCore.Qt.Key_Tab, channel=f'{did}_rt'))
 
             gp.buttonUpChanged.connect(lambda p, did=did: p and self._gp_emit(QtCore.Qt.Key_Up, channel=f'{did}_du'))
@@ -7313,6 +7363,12 @@ exit 0
         if self._tab_animating:
             return
         page = self._current_page()
+        if k in (QtCore.Qt.Key_PageUp, QtCore.Qt.Key_Backtab):
+            self._switch_tab(self.tab_idx - 1, animate=True, keep_tabs_focus=True)
+            return
+        if k in (QtCore.Qt.Key_PageDown, QtCore.Qt.Key_Tab):
+            self._switch_tab(self.tab_idx + 1, animate=True, keep_tabs_focus=True)
+            return
         if k == QtCore.Qt.Key_Left:
             if self.focus_area == 'tabs':
                 self._switch_tab(self.tab_idx - 1, animate=True, keep_tabs_focus=True)
@@ -7725,11 +7781,26 @@ write_volume_brightness_scripts(){
 #!/usr/bin/env bash
 set -euo pipefail
 V=${1:-50}
+V="${V%\%}"
+case "$V" in
+    ''|*[!0-9]*) V=50 ;;
+esac
+if [ "$V" -lt 0 ]; then V=0; fi
+if [ "$V" -gt 150 ]; then V=150; fi
 if command -v pactl >/dev/null 2>&1; then
-    pactl set-sink-volume @DEFAULT_SINK@ ${V}%
+    pactl set-sink-mute @DEFAULT_SINK@ 0 >/dev/null 2>&1 || true
+    pactl set-sink-volume @DEFAULT_SINK@ "${V}%" >/dev/null 2>&1 || true
+elif command -v wpctl >/dev/null 2>&1; then
+    wpctl set-mute @DEFAULT_AUDIO_SINK@ 0 >/dev/null 2>&1 || true
+    wpctl set-volume @DEFAULT_AUDIO_SINK@ "${V}%" >/dev/null 2>&1 || true
+elif command -v amixer >/dev/null 2>&1; then
+    amixer -D pulse sset Master unmute >/dev/null 2>&1 || true
+    amixer -D pulse sset Master "${V}%" >/dev/null 2>&1 || amixer sset Master "${V}%" >/dev/null 2>&1 || true
 else
-    echo "pactl not available"
+    echo "No volume backend found (pactl/wpctl/amixer)"
+    exit 1
 fi
+echo "volume:${V}%"
 SH
     chmod +x "$BIN_DIR/xui_set_volume.sh"
 
@@ -18644,17 +18715,87 @@ BASH
     cat > "$BIN_DIR/xui_volume.sh" <<'BASH'
 #!/usr/bin/env bash
 set -euo pipefail
-if ! command -v pactl >/dev/null 2>&1; then
-  echo "pactl not available"
+BACKEND=""
+if command -v pactl >/dev/null 2>&1; then
+  BACKEND="pactl"
+elif command -v wpctl >/dev/null 2>&1; then
+  BACKEND="wpctl"
+elif command -v amixer >/dev/null 2>&1; then
+  BACKEND="amixer"
+else
+  echo "No volume backend found (pactl/wpctl/amixer)"
   exit 1
 fi
-case ${1:-} in
-    up) pactl set-sink-volume @DEFAULT_SINK@ +5% ;; 
-    down) pactl set-sink-volume @DEFAULT_SINK@ -5% ;; 
-    mute) pactl set-sink-mute @DEFAULT_SINK@ toggle ;; 
-    get|"") pactl get-sink-volume @DEFAULT_SINK@; pactl get-sink-mute @DEFAULT_SINK@ ;;
-    set) pactl set-sink-volume @DEFAULT_SINK@ "${2:-50}%";;
-    *) echo "Usage: $0 {get|set <0-150>|up|down|mute}"; exit 1 ;;
+
+norm_vol(){
+  local v="${1:-50}"
+  v="${v%\%}"
+  case "$v" in
+    ''|*[!0-9]*) v=50 ;;
+  esac
+  if [ "$v" -lt 0 ]; then v=0; fi
+  if [ "$v" -gt 150 ]; then v=150; fi
+  echo "$v"
+}
+
+case ${1:-get} in
+  up)
+    if [ "$BACKEND" = "pactl" ]; then
+      pactl set-sink-mute @DEFAULT_SINK@ 0 >/dev/null 2>&1 || true
+      pactl set-sink-volume @DEFAULT_SINK@ +5%
+    elif [ "$BACKEND" = "wpctl" ]; then
+      wpctl set-mute @DEFAULT_AUDIO_SINK@ 0 >/dev/null 2>&1 || true
+      wpctl set-volume @DEFAULT_AUDIO_SINK@ 5%+ 
+    else
+      amixer -D pulse sset Master unmute >/dev/null 2>&1 || amixer sset Master unmute >/dev/null 2>&1 || true
+      amixer -D pulse sset Master 5%+ >/dev/null 2>&1 || amixer sset Master 5%+ >/dev/null 2>&1 || true
+    fi
+    ;;
+  down)
+    if [ "$BACKEND" = "pactl" ]; then
+      pactl set-sink-volume @DEFAULT_SINK@ -5%
+    elif [ "$BACKEND" = "wpctl" ]; then
+      wpctl set-volume @DEFAULT_AUDIO_SINK@ 5%-
+    else
+      amixer -D pulse sset Master 5%- >/dev/null 2>&1 || amixer sset Master 5%- >/dev/null 2>&1 || true
+    fi
+    ;;
+  mute)
+    if [ "$BACKEND" = "pactl" ]; then
+      pactl set-sink-mute @DEFAULT_SINK@ toggle
+    elif [ "$BACKEND" = "wpctl" ]; then
+      wpctl set-mute @DEFAULT_AUDIO_SINK@ toggle
+    else
+      amixer -D pulse sset Master toggle >/dev/null 2>&1 || amixer sset Master toggle >/dev/null 2>&1 || true
+    fi
+    ;;
+  get|"")
+    if [ "$BACKEND" = "pactl" ]; then
+      pactl get-sink-volume @DEFAULT_SINK@
+      pactl get-sink-mute @DEFAULT_SINK@
+    elif [ "$BACKEND" = "wpctl" ]; then
+      wpctl get-volume @DEFAULT_AUDIO_SINK@
+    else
+      amixer -D pulse sget Master 2>/dev/null || amixer sget Master 2>/dev/null || true
+    fi
+    ;;
+  set)
+    VOL="$(norm_vol "${2:-50}")"
+    if [ "$BACKEND" = "pactl" ]; then
+      pactl set-sink-mute @DEFAULT_SINK@ 0 >/dev/null 2>&1 || true
+      pactl set-sink-volume @DEFAULT_SINK@ "${VOL}%"
+    elif [ "$BACKEND" = "wpctl" ]; then
+      wpctl set-mute @DEFAULT_AUDIO_SINK@ 0 >/dev/null 2>&1 || true
+      wpctl set-volume @DEFAULT_AUDIO_SINK@ "${VOL}%"
+    else
+      amixer -D pulse sset Master unmute >/dev/null 2>&1 || amixer sset Master unmute >/dev/null 2>&1 || true
+      amixer -D pulse sset Master "${VOL}%" >/dev/null 2>&1 || amixer sset Master "${VOL}%" >/dev/null 2>&1 || true
+    fi
+    ;;
+  *)
+    echo "Usage: $0 {get|set <0-150>|up|down|mute}"
+    exit 1
+    ;;
 esac
 BASH
     chmod +x "$BIN_DIR/xui_volume.sh"
