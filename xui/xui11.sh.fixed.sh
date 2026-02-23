@@ -157,6 +157,10 @@ BASH
             ffmpeg mpv jq xdotool curl ca-certificates iproute2 bc
             xclip xsel rofi feh maim scrot udisks2 p7zip-full joystick joycond evtest jstest-gtk xboxdrv
             retroarch lutris kodi
+            binutils file xz-utils
+            libc6 libstdc++6 libgcc-s1 libasound2 libx11-6 libxrandr2 libxinerama1 libxcursor1 libxi6
+            libgl1 libglu1-mesa libpulse0 mesa-vulkan-drivers
+            steam-installer steam
         )
         apt_safe_update || warn "apt update failed"
         # Install critical runtime first (must succeed for dashboard)
@@ -5485,7 +5489,7 @@ exit 0
         if shutil.which('xterm'):
             QtCore.QProcess.startDetached('xterm', ['-e', '/bin/bash', '-lc', hold])
             return
-        QtCore.QProcess.startDetached('/bin/bash', ['-lc', shell_cmd])
+        QtCore.QProcess.startDetached('/bin/bash', ['-lc', hold])
 
     def _open_url(self, url):
         if QtWebEngineWidgets is not None:
@@ -6073,6 +6077,7 @@ exit 0
                     'Deseas continuar?'
                 ):
                     self._run_terminal(f'"{install_fnae}" && "{run_fnae}"')
+                    self._msg('FNAE', 'Instalador iniciado. Log: ~/.xui/logs/fnae_install.log')
         elif action == 'Uninstall FNAE':
             if self._ask_yes_no('FNAE', 'Uninstall Five Nights At Epstein\'s from local XUI apps folder?'):
                 subprocess.getoutput('/bin/sh -c "rm -rf $HOME/.xui/apps/fnae $HOME/.xui/data/fnae_paths.json"')
@@ -9941,24 +9946,25 @@ class StoreWindow(QtWidgets.QMainWindow):
         self.info_lbl.setText(f'{key} section is visual-only in this build.')
 
     def _run_terminal(self, cmd):
+        hold = str(cmd) + '; rc=$?; echo; echo "[XUI] Exit code: $rc"; echo "[XUI] Press Enter to close..."; read -r _'
         term = None
         args = []
         if shutil.which('x-terminal-emulator'):
             term = 'x-terminal-emulator'
-            args = ['-e', '/bin/bash', '-lc', cmd]
+            args = ['-e', '/bin/bash', '-lc', hold]
         elif shutil.which('gnome-terminal'):
             term = 'gnome-terminal'
-            args = ['--', '/bin/bash', '-lc', cmd]
+            args = ['--', '/bin/bash', '-lc', hold]
         elif shutil.which('konsole'):
             term = 'konsole'
-            args = ['-e', '/bin/bash', '-lc', cmd]
+            args = ['-e', '/bin/bash', '-lc', hold]
         elif shutil.which('xterm'):
             term = 'xterm'
-            args = ['-e', '/bin/bash', '-lc', cmd]
+            args = ['-e', '/bin/bash', '-lc', hold]
         if term:
             QtCore.QProcess.startDetached(term, args)
             return True
-        return QtCore.QProcess.startDetached('/bin/bash', ['-lc', cmd])
+        return QtCore.QProcess.startDetached('/bin/bash', ['-lc', hold])
 
     def _run_detached(self, cmd):
         return QtCore.QProcess.startDetached('/bin/sh', ['-c', cmd])
@@ -10204,6 +10210,15 @@ class StoreWindow(QtWidgets.QMainWindow):
         cmd = str(item.get('install', '')).strip()
         if not cmd:
             self.reload('This item does not need installation.')
+            return
+        if iid == 'game_fnae_fangame':
+            run_fnae = str(XUI_BIN / 'xui_run_fnae.sh')
+            install_cmd = f'"{cmd}" && "{run_fnae}"'
+            self._run_terminal(install_cmd)
+            self.reload(
+                'FNAE installer started (MediaFire). '
+                'If download fails, check ~/.xui/logs/fnae_install.log.'
+            )
             return
         self._run_terminal(cmd)
         self.reload(f'Installer started: {item.get("name", "item")}')
@@ -10904,12 +10919,82 @@ exec "$HOME/.xui/bin/xui_python.sh" "$HOME/.xui/games/gem_match.py" "$@"
 BASH
   chmod +x "$BIN_DIR/xui_gem_match.sh"
 
+  cat > "$BIN_DIR/xui_install_fnae_deps.sh" <<'BASH'
+#!/usr/bin/env bash
+set -euo pipefail
+
+as_root(){
+  if [ "$(id -u)" -eq 0 ]; then "$@"; return $?; fi
+  if command -v sudo >/dev/null 2>&1; then sudo "$@"; return $?; fi
+  echo "sudo required: $*" >&2
+  return 1
+}
+
+wait_apt(){
+  local t=0
+  while pgrep -x apt >/dev/null 2>&1 || pgrep -x apt-get >/dev/null 2>&1 || pgrep -x dpkg >/dev/null 2>&1 || pgrep -f unattended-upgrade >/dev/null 2>&1; do
+    [ "$t" -ge 180 ] && break
+    sleep 2
+    t=$((t+2))
+  done
+}
+
+install_pkgs_best_effort(){
+  local manager="$1"
+  shift || true
+  local p
+  for p in "$@"; do
+    case "$manager" in
+      apt) as_root apt install -y "$p" >/dev/null 2>&1 || true ;;
+      dnf) as_root dnf install -y "$p" >/dev/null 2>&1 || true ;;
+      pacman) as_root pacman -S --noconfirm "$p" >/dev/null 2>&1 || true ;;
+    esac
+  done
+}
+
+if command -v steam-run >/dev/null 2>&1; then
+  echo "steam-run already available"
+  exit 0
+fi
+
+if command -v apt >/dev/null 2>&1; then
+  wait_apt
+  as_root apt update >/dev/null 2>&1 || true
+  wait_apt
+  install_pkgs_best_effort apt \
+    ca-certificates curl tar file xz-utils binutils \
+    libc6 libstdc++6 libgcc-s1 libasound2 libx11-6 libxrandr2 libxinerama1 libxcursor1 libxi6 \
+    libgl1 libglu1-mesa libpulse0 mesa-vulkan-drivers \
+    steam-installer steam
+elif command -v dnf >/dev/null 2>&1; then
+  install_pkgs_best_effort dnf \
+    ca-certificates curl tar file xz binutils \
+    glibc libstdc++ libgcc alsa-lib libX11 libXrandr libXinerama libXcursor libXi \
+    mesa-libGL mesa-libGLU pulseaudio-libs steam
+elif command -v pacman >/dev/null 2>&1; then
+  as_root pacman -Sy --noconfirm >/dev/null 2>&1 || true
+  install_pkgs_best_effort pacman \
+    ca-certificates curl tar file xz binutils \
+    glibc gcc-libs libx11 libxrandr libxinerama libxcursor libxi mesa libpulse steam
+fi
+
+if command -v steam-run >/dev/null 2>&1; then
+  echo "steam-run available"
+  exit 0
+fi
+
+echo "steam-run still not available (FNAE can still fail on old glibc hosts)."
+exit 0
+BASH
+  chmod +x "$BIN_DIR/xui_install_fnae_deps.sh"
+
   cat > "$BIN_DIR/xui_install_fnae.sh" <<'BASH'
 #!/usr/bin/env bash
 set -euo pipefail
 XUI_HOME="$HOME/.xui"
 APP_HOME="$XUI_HOME/apps/fnae"
 DATA_FILE="$XUI_HOME/data/fnae_paths.json"
+BIN_DIR="$XUI_HOME/bin"
 LINUX_MEDIAFIRE_URL="https://www.mediafire.com/file/a4q4l09vdfqzzws/Five_Nights_At_Epsteins_Linux.tar/file"
 LINUX_MEDIAFIRE_DIRECT_URL="https://www.mediafire.com/download/a4q4l09vdfqzzws/Five_Nights_At_Epsteins_Linux.tar"
 WINDOWS_MEDIAFIRE_URL="https://www.mediafire.com/file/6tj1rd7kmsxv4oe/Five_Nights_At_Epstein%2527s.zip/file"
@@ -10919,6 +11004,20 @@ HOST_OS="$(uname -s 2>/dev/null || echo Linux)"
 IS_LINUX=0
 if [ "$HOST_OS" = "Linux" ]; then
   IS_LINUX=1
+fi
+LOG_DIR="$XUI_HOME/logs"
+LOG_FILE="$LOG_DIR/fnae_install.log"
+mkdir -p "$LOG_DIR"
+touch "$LOG_FILE" >/dev/null 2>&1 || true
+if command -v tee >/dev/null 2>&1; then
+  exec > >(tee -a "$LOG_FILE") 2>&1
+else
+  exec >>"$LOG_FILE" 2>&1
+fi
+echo "=== FNAE install start: $(date '+%Y-%m-%d %H:%M:%S') ==="
+
+if [ "$IS_LINUX" = "1" ] && [ -x "$BIN_DIR/xui_install_fnae_deps.sh" ]; then
+  "$BIN_DIR/xui_install_fnae_deps.sh" || true
 fi
 
 find_first_existing(){
@@ -11074,6 +11173,64 @@ download_from_mediafire(){
   return 0
 }
 
+download_from_mediafire_python(){
+  local page_url="$1"
+  local out_file="$2"
+  command -v python3 >/dev/null 2>&1 || return 1
+  rm -f "$out_file" >/dev/null 2>&1 || true
+  python3 - "$page_url" "$out_file" <<'PY'
+import html
+import re
+import ssl
+import sys
+import urllib.parse
+import urllib.request
+
+page_url = sys.argv[1]
+out_file = sys.argv[2]
+headers = {'User-Agent': 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 XUI-FNAE'}
+ctx = ssl.create_default_context()
+
+def fetch(url, referer=''):
+    h = dict(headers)
+    if referer:
+        h['Referer'] = referer
+    req = urllib.request.Request(url, headers=h)
+    with urllib.request.urlopen(req, timeout=60, context=ctx) as r:
+        return r.read()
+
+raw = fetch(page_url)
+txt = raw.decode('utf-8', 'ignore')
+
+m = re.search(r'id=["\']downloadButton["\'][^>]*href=["\']([^"\']+)', txt, re.IGNORECASE)
+if not m:
+    m = re.search(r'https?://download[0-9]*\.mediafire\.com/[^\s"\'<>]+', txt, re.IGNORECASE)
+if not m:
+    m = re.search(r'https:\\/\\/download[0-9]*\\.mediafire\\.com\\/[^\s"\'<>]+', txt, re.IGNORECASE)
+if not m:
+    raise SystemExit(1)
+
+raw_direct = m.group(1) if (getattr(m, 'lastindex', 0) or 0) >= 1 else m.group(0)
+direct = html.unescape(raw_direct).replace('\\/', '/')
+if direct.startswith('//'):
+    direct = 'https:' + direct
+if direct.startswith('/'):
+    direct = urllib.parse.urljoin(page_url, direct)
+
+payload = fetch(direct, page_url)
+head = payload[:4096].lower()
+if b'<html' in head or b'<!doctype html' in head:
+    raise SystemExit(2)
+if not payload:
+    raise SystemExit(3)
+
+with open(out_file, 'wb') as fh:
+    fh.write(payload)
+raise SystemExit(0)
+PY
+  return $?
+}
+
 download_mediafire_archive(){
   local out_file="$1"
   local validator="$2"
@@ -11090,6 +11247,13 @@ download_mediafire_archive(){
   for src in "$@"; do
     [ -n "$src" ] || continue
     if download_from_mediafire "$src" "$out_file" && "$validator" "$out_file"; then
+      return 0
+    fi
+    rm -f "$out_file" >/dev/null 2>&1 || true
+  done
+  for src in "$@"; do
+    [ -n "$src" ] || continue
+    if download_from_mediafire_python "$src" "$out_file" && "$validator" "$out_file"; then
       return 0
     fi
     rm -f "$out_file" >/dev/null 2>&1 || true
@@ -11411,6 +11575,8 @@ HOST_OS="$(uname -s 2>/dev/null || echo Linux)"
 IS_LINUX=0
 [ "$HOST_OS" = "Linux" ] && IS_LINUX=1
 ALLOW_WIN_ON_LINUX="${XUI_FNAE_ALLOW_WINDOWS_ON_LINUX:-0}"
+USE_STEAM_RUNTIME="${XUI_FNAE_USE_STEAM_RUNTIME:-auto}"
+DEPS_SCRIPT="$BIN_DIR/xui_install_fnae_deps.sh"
 CHECK_ONLY=0
 if [ "${1:-}" = "--check" ]; then
   CHECK_ONLY=1
@@ -11476,6 +11642,49 @@ find_linux_executable(){
   return 1
 }
 
+version_gt(){
+  local a="${1:-0}"
+  local b="${2:-0}"
+  [ "$a" = "$b" ] && return 1
+  [ "$(printf '%s\n%s\n' "$a" "$b" | sort -V | tail -n1)" = "$a" ]
+}
+
+host_glibc_version(){
+  local v=""
+  v="$(ldd --version 2>/dev/null | head -n1 | grep -Eo '[0-9]+\.[0-9]+' | head -n1 || true)"
+  printf '%s\n' "$v"
+}
+
+required_glibc_version(){
+  local exe="$1"
+  command -v strings >/dev/null 2>&1 || return 1
+  local dir req=""
+  dir="$(dirname "$exe")"
+  if [ -f "$dir/UnityPlayer.so" ]; then
+    req="$(strings "$exe" "$dir/UnityPlayer.so" 2>/dev/null | grep -Eo 'GLIBC_[0-9]+\.[0-9]+' | sed 's/^GLIBC_//' | sort -V | tail -n1 || true)"
+  else
+    req="$(strings "$exe" 2>/dev/null | grep -Eo 'GLIBC_[0-9]+\.[0-9]+' | sed 's/^GLIBC_//' | sort -V | tail -n1 || true)"
+  fi
+  [ -n "$req" ] || return 1
+  printf '%s\n' "$req"
+}
+
+needs_runtime_for_glibc(){
+  local exe="$1"
+  local host req
+  host="$(host_glibc_version || true)"
+  req="$(required_glibc_version "$exe" || true)"
+  [ -n "$host" ] || return 1
+  [ -n "$req" ] || return 1
+  version_gt "$req" "$host"
+}
+
+ensure_fnae_runtime_deps(){
+  [ -x "$DEPS_SCRIPT" ] || return 1
+  "$DEPS_SCRIPT" || true
+  command -v steam-run >/dev/null 2>&1
+}
+
 if [ "$CHECK_ONLY" = "0" ] && [ ! -f "$DATA_FILE" ]; then
   "$BIN_DIR/xui_install_fnae.sh" || true
 fi
@@ -11532,6 +11741,24 @@ launch_and_wait(){
 
 if [ -n "$LINUX_EXE" ] && [ -f "$LINUX_EXE" ]; then
   chmod +x "$LINUX_EXE" || true
+  if [ "$IS_LINUX" = "1" ] && [ "$USE_STEAM_RUNTIME" != "0" ]; then
+    if [ "$USE_STEAM_RUNTIME" = "1" ] || needs_runtime_for_glibc "$LINUX_EXE"; then
+      if ! command -v steam-run >/dev/null 2>&1; then
+        ensure_fnae_runtime_deps || true
+      fi
+      if command -v steam-run >/dev/null 2>&1; then
+        launch_and_wait "$(dirname "$LINUX_EXE")" steam-run "$LINUX_EXE" "$@"
+        exit $?
+      fi
+      host_glibc="$(host_glibc_version || true)"
+      req_glibc="$(required_glibc_version "$LINUX_EXE" || true)"
+      echo "FNAE requires newer runtime (glibc ${req_glibc:-unknown}, host ${host_glibc:-unknown})."
+      echo "steam-run is not available."
+      echo "Run dependency installer:"
+      echo "  $DEPS_SCRIPT"
+      exit 1
+    fi
+  fi
   launch_and_wait "$(dirname "$LINUX_EXE")" "$LINUX_EXE" "$@"
   exit $?
 fi
@@ -13041,6 +13268,10 @@ apply_update(){
     AUTO_CONFIRM=1 XUI_SKIP_LAUNCH_PROMPT=1 XUI_SYSTEMCTL_TIMEOUT_SEC="${XUI_SYSTEMCTL_TIMEOUT_SEC:-15}" \
       bash "$installer" --no-auto-install --skip-apt-wait
   )
+
+  if [ -x "$HOME/.xui/bin/xui_install_fnae_deps.sh" ]; then
+    "$HOME/.xui/bin/xui_install_fnae_deps.sh" || true
+  fi
 
   local installed_commit=""
   installed_commit="$(git -C "$SRC" rev-parse HEAD 2>/dev/null || true)"
@@ -15480,6 +15711,9 @@ else
   echo "Unsupported package manager"
   exit 1
 fi
+if [ -x "$HOME/.xui/bin/xui_install_fnae_deps.sh" ]; then
+  "$HOME/.xui/bin/xui_install_fnae_deps.sh" || true
+fi
 BASH
         chmod +x "$BIN_DIR/xui_update_system.sh"
 
@@ -16653,6 +16887,9 @@ finish_setup(){
     else
       warn "systemctl --user daemon-reload failed; using desktop autostart only"
     fi
+  fi
+  if [ -x "$BIN_DIR/xui_install_fnae_deps.sh" ]; then
+    "$BIN_DIR/xui_install_fnae_deps.sh" || true
   fi
   info "Installation complete."
 }
