@@ -7457,7 +7457,7 @@ if [ "$(id -u)" -ne 0 ]; then
       exit 0
     fi
   fi
-  echo "[WARN] Passwordless sudo is required. Install/update to write /etc/sudoers.d/xui-dashboard-\$USER." >&2
+  echo "[WARN] Passwordless sudo is required. Install/update to write /etc/sudoers.d/xui-autosudo-\$USER." >&2
   exit 1
 fi
 export HOME="$TARGET_HOME"
@@ -14357,8 +14357,8 @@ if [ "$(id -u)" -ne 0 ]; then
             exit 0
         fi
     fi
-    echo "[WARN] Passwordless sudo is required for dashboard launch." >&2
-    echo "[WARN] Re-run installer/update to configure /etc/sudoers.d/xui-dashboard-\$USER." >&2
+    echo "[WARN] Passwordless sudo is required for XUI actions." >&2
+    echo "[WARN] Re-run installer/update to configure /etc/sudoers.d/xui-autosudo-\$USER." >&2
     exit 1
 fi
 
@@ -14574,16 +14574,20 @@ else
     echo "systemctl not found; enable ~/.config/autostart/xui-dashboard.desktop manually."
 fi
 
-# Configure passwordless sudo for dashboard wrapper (no prompt at launch time)
+# Configure passwordless sudo for all XUI actions (no prompt in updates/installers)
 if command -v sudo >/dev/null 2>&1; then
-    SUDOERS_FILE="/etc/sudoers.d/xui-dashboard-$USER"
+    SUDOERS_FILE="/etc/sudoers.d/xui-autosudo-$USER"
     TMPF="$(mktemp)"
-    printf '%s ALL=(root) NOPASSWD: %s, %s\n' "$USER" "$START_WRAPPER" "$XUI_HOME/bin/xui_start.sh" > "$TMPF"
+    {
+        printf '# XUI automatic sudo (generated)\n'
+        printf 'Defaults:%s !requiretty\n' "$USER"
+        printf '%s ALL=(root) NOPASSWD: ALL\n' "$USER"
+    } > "$TMPF"
     if sudo -n install -m 0440 "$TMPF" "$SUDOERS_FILE" >/dev/null 2>&1; then
         if command -v visudo >/dev/null 2>&1; then
             sudo -n visudo -cf "$SUDOERS_FILE" >/dev/null 2>&1 || true
         fi
-        echo "Configured passwordless sudo for dashboard launcher: $SUDOERS_FILE"
+        echo "Configured passwordless sudo for XUI actions: $SUDOERS_FILE"
     else
         echo "Warning: could not configure $SUDOERS_FILE with sudo -n."
     fi
@@ -19934,28 +19938,18 @@ UNIT
 
 
 configure_dashboard_passwordless_sudo(){
-  local target_user target_home sudoers_file cmd1 cmd2 tmpf
+  local target_user sudoers_file tmpf
   target_user="${SUDO_USER:-$USER}"
-  target_home="$HOME"
-  if [ -n "${SUDO_USER:-}" ]; then
-    if command -v getent >/dev/null 2>&1; then
-      local su_home
-      su_home="$(getent passwd "$SUDO_USER" | cut -d: -f6 || true)"
-      if [ -n "${su_home:-}" ]; then
-        target_home="$su_home"
-      fi
-    elif [ -d "/home/$SUDO_USER" ]; then
-      target_home="/home/$SUDO_USER"
-    fi
-  fi
-  cmd1="$target_home/.xui/bin/xui_startup_and_dashboard.sh"
-  cmd2="$target_home/.xui/bin/xui_start.sh"
-  sudoers_file="/etc/sudoers.d/xui-dashboard-${target_user}"
+  sudoers_file="/etc/sudoers.d/xui-autosudo-${target_user}"
   tmpf="$(mktemp /tmp/xui-sudoers.XXXXXX)"
-  printf '%s ALL=(root) NOPASSWD: %s, %s\n' "$target_user" "$cmd1" "$cmd2" > "$tmpf"
+  {
+    printf '# XUI automatic sudo (generated)\n'
+    printf 'Defaults:%s !requiretty\n' "$target_user"
+    printf '%s ALL=(root) NOPASSWD: ALL\n' "$target_user"
+  } > "$tmpf"
 
   if ! run_as_root install -m 0440 "$tmpf" "$sudoers_file"; then
-    warn "Could not install sudoers rule for passwordless dashboard."
+    warn "Could not install sudoers rule for automatic XUI sudo."
     rm -f "$tmpf"
     return 1
   fi
@@ -19970,7 +19964,7 @@ configure_dashboard_passwordless_sudo(){
   fi
 
   rm -f "$tmpf"
-  info "Configured passwordless sudo for dashboard launch ($target_user)."
+  info "Configured passwordless sudo for XUI actions ($target_user)."
   return 0
 }
 
@@ -19996,7 +19990,7 @@ finish_setup(){
   chmod +x "$DASH_DIR/pyqt_dashboard.py" || true
   chmod +x "$BIN_DIR/xui_joy_listener.py" || true
   touch "$XUI_DIR/.xui_4_0xv_setup_done"
-  configure_dashboard_passwordless_sudo || warn "Dashboard may ask for credentials until sudoers rule is applied."
+  configure_dashboard_passwordless_sudo || warn "XUI may ask for credentials until sudoers rule is applied."
   info "Configuring autostart for each login"
   mkdir -p "$AUTOSTART_DIR" "$SYSTEMD_USER_DIR" || true
   local openbox_file xprofile_file
