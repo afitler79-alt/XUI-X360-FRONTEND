@@ -4857,9 +4857,14 @@ class Dashboard(QtWidgets.QMainWindow):
         cmd = (
             'if command -v systemctl >/dev/null 2>&1; then '
             'systemctl --user daemon-reload >/dev/null 2>&1 || true; '
-            'systemctl --user restart xui-dashboard.service >/dev/null 2>&1 && exit 0; '
+            'systemctl --user restart xui-dashboard.service >/dev/null 2>&1 || true; '
             'fi; '
-            'nohup "$HOME/.xui/bin/xui_startup_and_dashboard.sh" >/dev/null 2>&1 &'
+            '(sleep 3; '
+            'if command -v pgrep >/dev/null 2>&1; then '
+            'pgrep -u "$(id -u)" -f "pyqt_dashboard_improved.py" >/dev/null 2>&1 || nohup "$HOME/.xui/bin/xui_startup_and_dashboard.sh" >/dev/null 2>&1 & '
+            'else '
+            'nohup "$HOME/.xui/bin/xui_startup_and_dashboard.sh" >/dev/null 2>&1 & '
+            'fi) >/dev/null 2>&1 &'
         )
         QtCore.QProcess.startDetached('/bin/sh', ['-lc', cmd])
         QtCore.QTimer.singleShot(220, QtWidgets.QApplication.quit)
