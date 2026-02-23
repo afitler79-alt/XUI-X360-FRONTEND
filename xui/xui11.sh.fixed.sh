@@ -11095,6 +11095,12 @@ as_root(){
   return 1
 }
 
+can_noninteractive_root(){
+  [ "$(id -u)" -eq 0 ] && return 0
+  command -v sudo >/dev/null 2>&1 || return 1
+  sudo -n -v >/dev/null 2>&1
+}
+
 wait_apt(){
   local t=0
   local max_wait="${XUI_APT_WAIT_SECONDS:-180}"
@@ -11123,6 +11129,11 @@ install_pkgs_best_effort(){
 
 if command -v steam-run >/dev/null 2>&1; then
   echo "steam-run already available"
+  exit 0
+fi
+
+if [ "${XUI_NONINTERACTIVE:-0}" = "1" ] && ! can_noninteractive_root; then
+  echo "non-interactive root unavailable; skipping runtime package install"
   exit 0
 fi
 
@@ -11186,7 +11197,13 @@ fi
 echo "=== FNAE install start: $(date '+%Y-%m-%d %H:%M:%S') ==="
 
 if [ "$IS_LINUX" = "1" ] && [ -x "$BIN_DIR/xui_install_fnae_deps.sh" ]; then
-  "$BIN_DIR/xui_install_fnae_deps.sh" || true
+  echo "[FNAE] Checking runtime dependencies..."
+  if command -v timeout >/dev/null 2>&1; then
+    XUI_NONINTERACTIVE=1 timeout "${XUI_FNAE_DEPS_TIMEOUT_SEC:-45}" "$BIN_DIR/xui_install_fnae_deps.sh" || true
+  else
+    XUI_NONINTERACTIVE=1 "$BIN_DIR/xui_install_fnae_deps.sh" || true
+  fi
+  echo "[FNAE] Runtime dependency step complete."
 fi
 
 find_first_existing(){
@@ -11225,15 +11242,19 @@ fetch_url_to_file(){
   local url="$1"
   local out="$2"
   local ref="${3:-}"
+  local max_time="${XUI_FNAE_FETCH_TIMEOUT_SEC:-180}"
+  if ! [[ "$max_time" =~ ^[0-9]+$ ]] || [ "$max_time" -le 0 ]; then
+    max_time=180
+  fi
   if command -v curl >/dev/null 2>&1; then
     if [ -n "$ref" ]; then
       curl -fL --retry 5 --retry-delay 2 --retry-all-errors \
-        --connect-timeout 20 --max-time 0 \
+        --connect-timeout 20 --max-time "$max_time" \
         -A "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 XUI-FNAE" \
         -e "$ref" "$url" -o "$out" >/dev/null 2>&1
     else
       curl -fL --retry 5 --retry-delay 2 --retry-all-errors \
-        --connect-timeout 20 --max-time 0 \
+        --connect-timeout 20 --max-time "$max_time" \
         -A "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 XUI-FNAE" \
         "$url" -o "$out" >/dev/null 2>&1
     fi
@@ -11408,6 +11429,7 @@ download_mediafire_archive(){
   rm -f "$out_file" >/dev/null 2>&1 || true
   for src in "$@"; do
     [ -n "$src" ] || continue
+    echo "[FNAE] Download attempt: $src"
     if fetch_url_to_file "$src" "$out_file" "$src" && [ -s "$out_file" ] && ! is_html_file "$out_file" && "$validator" "$out_file"; then
       return 0
     fi
@@ -11415,6 +11437,7 @@ download_mediafire_archive(){
   done
   for src in "$@"; do
     [ -n "$src" ] || continue
+    echo "[FNAE] MediaFire parse attempt: $src"
     if download_from_mediafire "$src" "$out_file" && "$validator" "$out_file"; then
       return 0
     fi
@@ -11422,6 +11445,7 @@ download_mediafire_archive(){
   done
   for src in "$@"; do
     [ -n "$src" ] || continue
+    echo "[FNAE] Python MediaFire attempt: $src"
     if download_from_mediafire_python "$src" "$out_file" && "$validator" "$out_file"; then
       return 0
     fi
@@ -13432,6 +13456,7 @@ apply_update(){
     exit 1
   fi
 
+  echo "step=installer-start"
   (
     cd "$SRC"
     if command -v timeout >/dev/null 2>&1; then
@@ -13442,13 +13467,18 @@ apply_update(){
         bash "$installer" --no-auto-install --skip-apt-wait
     fi
   )
+  echo "step=installer-done"
 
   if [ -x "$HOME/.xui/bin/xui_install_fnae_deps.sh" ]; then
-    if command -v timeout >/dev/null 2>&1; then
-      XUI_NONINTERACTIVE=1 timeout "${XUI_FNAE_DEPS_TIMEOUT_SEC:-120}" "$HOME/.xui/bin/xui_install_fnae_deps.sh" || true
-    else
-      XUI_NONINTERACTIVE=1 "$HOME/.xui/bin/xui_install_fnae_deps.sh" || true
-    fi
+    # Keep mandatory update responsive: run FNAE deps best-effort in background.
+    (
+      if command -v timeout >/dev/null 2>&1; then
+        XUI_NONINTERACTIVE=1 timeout "${XUI_FNAE_DEPS_TIMEOUT_SEC:-90}" "$HOME/.xui/bin/xui_install_fnae_deps.sh" || true
+      else
+        XUI_NONINTERACTIVE=1 "$HOME/.xui/bin/xui_install_fnae_deps.sh" || true
+      fi
+    ) >/dev/null 2>&1 &
+    echo "step=fnae-deps-background"
   fi
 
   local installed_commit=""
@@ -13457,6 +13487,7 @@ apply_update(){
     installed_commit="$remote_commit"
   fi
   write_state "$installed_commit" "$branch" "$remote_date" "$SRC" >/dev/null
+  echo "step=state-written"
   echo "update-applied"
   echo "installed_commit=$installed_commit"
 }
