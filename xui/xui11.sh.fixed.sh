@@ -1076,6 +1076,7 @@ import subprocess
 import shutil
 import os
 import time
+import re
 import shlex
 import queue
 import socket
@@ -3654,6 +3655,28 @@ class UpdateProgressDialog(QtWidgets.QDialog):
         self.bar.setValue(100)
         self.detail.setText('Update installed successfully. Restarting dashboard...')
 
+    def _center_dialog(self):
+        parent = self.parentWidget()
+        if parent is not None and parent.isVisible():
+            g = parent.frameGeometry()
+            x = g.x() + max(0, (g.width() - self.width()) // 2)
+            y = g.y() + max(0, (g.height() - self.height()) // 2)
+            self.move(x, y)
+            return
+        scr = QtWidgets.QApplication.screenAt(QtGui.QCursor.pos()) if hasattr(QtWidgets.QApplication, 'screenAt') else None
+        if scr is None:
+            scr = QtWidgets.QApplication.primaryScreen()
+        if scr is None:
+            return
+        g = scr.availableGeometry()
+        x = g.x() + max(0, (g.width() - self.width()) // 2)
+        y = g.y() + max(0, (g.height() - self.height()) // 2)
+        self.move(x, y)
+
+    def showEvent(self, e):
+        super().showEvent(e)
+        QtCore.QTimer.singleShot(0, self._center_dialog)
+
 
 class InstallTaskProgressDialog(QtWidgets.QDialog):
     def __init__(self, app_title='App', parent=None):
@@ -3761,6 +3784,28 @@ class InstallTaskProgressDialog(QtWidgets.QDialog):
         self.bar.setValue(min(100, max(self.bar.value(), 97)))
         self.detail.setText(str(text or 'Install failed.'))
 
+    def _center_dialog(self):
+        parent = self.parentWidget()
+        if parent is not None and parent.isVisible():
+            g = parent.frameGeometry()
+            x = g.x() + max(0, (g.width() - self.width()) // 2)
+            y = g.y() + max(0, (g.height() - self.height()) // 2)
+            self.move(x, y)
+            return
+        scr = QtWidgets.QApplication.screenAt(QtGui.QCursor.pos()) if hasattr(QtWidgets.QApplication, 'screenAt') else None
+        if scr is None:
+            scr = QtWidgets.QApplication.primaryScreen()
+        if scr is None:
+            return
+        g = scr.availableGeometry()
+        x = g.x() + max(0, (g.width() - self.width()) // 2)
+        y = g.y() + max(0, (g.height() - self.height()) // 2)
+        self.move(x, y)
+
+    def showEvent(self, e):
+        super().showEvent(e)
+        QtCore.QTimer.singleShot(0, self._center_dialog)
+
 
 class XboxGuideMenu(QtWidgets.QDialog):
     def __init__(self, gamertag='Player1', parent=None):
@@ -3768,65 +3813,71 @@ class XboxGuideMenu(QtWidgets.QDialog):
         self.gamertag = str(gamertag or 'Player1')
         self._selection = None
         self._open_anim = None
-        self.setWindowTitle('Guia Xbox')
+        self._page_anim = None
+        self._page_animating = False
+        self._page_idx = 0
+        self._pages = [
+            ('Games & Apps', ['Xbox Home', 'Friends', 'Party', 'Messages', 'Beacons & Activity', 'Chat', 'Open Tray']),
+            ('Media', ['Video Marketplace', 'YouTube', 'Netflix', 'Twitch', 'Movie Trailers', 'Music Marketplace', 'System Music']),
+            ('Settings', ['Manage Storage', 'System Settings', 'Account Security', 'Network Setup', 'Family', 'Theme Toggle', 'Sign Out']),
+        ]
+        self.setWindowTitle('Xbox Guide')
         self.setWindowFlags(QtCore.Qt.Dialog | QtCore.Qt.FramelessWindowHint)
         self.setAttribute(QtCore.Qt.WA_TranslucentBackground, True)
         self.setModal(True)
-        self.resize(860, 500)
+        self.resize(900, 520)
         self.setStyleSheet('''
             QFrame#xguide_panel {
-                background:qlineargradient(x1:0,y1:0,x2:1,y2:1, stop:0 #3a3f46, stop:1 #1e242b);
-                border:2px solid rgba(214,223,235,0.52);
-                border-radius:7px;
+                background:qlineargradient(x1:0,y1:0,x2:1,y2:1, stop:0 #f4f6f8, stop:1 #e2e7ed);
+                border:2px solid rgba(234,241,247,0.92);
+                border-radius:4px;
             }
             QLabel#xguide_title {
-                color:#eef4f8;
-                font-size:28px;
+                color:#26313b;
+                font-size:30px;
                 font-weight:800;
             }
             QLabel#xguide_meta {
-                color:rgba(235,242,248,0.78);
-                font-size:17px;
+                color:rgba(35,45,55,0.88);
+                font-size:22px;
                 font-weight:600;
             }
             QListWidget#xguide_list {
-                background:rgba(236,239,242,0.92);
-                color:#20252b;
+                background:#f9fbfd;
+                color:#252c34;
                 border:1px solid rgba(0,0,0,0.26);
-                font-size:32px;
+                font-size:38px;
                 outline:none;
             }
             QListWidget#xguide_list::item {
-                padding:6px 10px;
+                padding:7px 12px;
                 border:1px solid transparent;
             }
             QListWidget#xguide_list::item:selected {
                 color:#f3fff2;
-                background:qlineargradient(x1:0,y1:0,x2:1,y2:0, stop:0 #4ea93f, stop:1 #2f8832);
+                background:qlineargradient(x1:0,y1:0,x2:1,y2:0, stop:0 #5fbe47, stop:1 #3f9f33);
                 border:1px solid rgba(255,255,255,0.25);
             }
-            QFrame#xguide_blades {
-                background:rgba(65,74,84,0.95);
-                border:1px solid rgba(194,206,222,0.25);
+            QLabel#xguide_blade_left {
+                background:qlineargradient(x1:0,y1:0,x2:0,y2:1, stop:0 #6a9abb, stop:1 #89b4d2);
+                color:#f4fbff;
+                font-size:36px;
+                font-weight:800;
+                padding:8px 6px;
+                border:1px solid rgba(255,255,255,0.32);
             }
-            QPushButton#xguide_blade_btn {
-                text-align:left;
-                padding:8px 10px;
-                color:#e9f1f8;
-                font-size:20px;
-                font-weight:700;
-                background:rgba(34,43,54,0.92);
-                border:1px solid rgba(186,205,224,0.24);
-            }
-            QPushButton#xguide_blade_btn:focus,
-            QPushButton#xguide_blade_btn:hover {
-                background:rgba(58,80,106,0.95);
-                border:1px solid rgba(218,233,246,0.52);
+            QLabel#xguide_blade_right {
+                background:qlineargradient(x1:0,y1:0,x2:0,y2:1, stop:0 #7da9c7, stop:1 #a2c3da);
+                color:#f4fbff;
+                font-size:36px;
+                font-weight:800;
+                padding:8px 6px;
+                border:1px solid rgba(255,255,255,0.32);
             }
             QLabel#xguide_hint {
-                color:rgba(238,245,250,0.84);
-                font-size:15px;
-                font-weight:600;
+                color:#1e2b36;
+                font-size:18px;
+                font-weight:700;
             }
         ''')
         outer = QtWidgets.QVBoxLayout(self)
@@ -3840,7 +3891,7 @@ class XboxGuideMenu(QtWidgets.QDialog):
         root.setSpacing(8)
 
         top = QtWidgets.QHBoxLayout()
-        title = QtWidgets.QLabel('Guia Xbox')
+        title = QtWidgets.QLabel('Xbox Guide')
         title.setObjectName('xguide_title')
         self.meta = QtWidgets.QLabel('')
         self.meta.setObjectName('xguide_meta')
@@ -3850,43 +3901,38 @@ class XboxGuideMenu(QtWidgets.QDialog):
         root.addLayout(top)
 
         body = QtWidgets.QHBoxLayout()
-        body.setSpacing(10)
-        self.listw = QtWidgets.QListWidget()
-        self.listw.setObjectName('xguide_list')
-        self.listw.addItems([
-            'Bing',
-            'Logros',
-            'Premios',
-            'Reciente',
-            'Mensajes recientes',
-            'Social global',
-            'Beacons',
-            'Mis juegos',
-            'Descargas activas',
-            'Canjear codigo',
-        ])
-        self.listw.setCurrentRow(0)
-        self.listw.itemActivated.connect(self._accept_current)
-        self.listw.itemDoubleClicked.connect(self._accept_current)
-        body.addWidget(self.listw, 4)
-
-        blades = QtWidgets.QFrame()
-        blades.setObjectName('xguide_blades')
-        blades_l = QtWidgets.QVBoxLayout(blades)
-        blades_l.setContentsMargins(8, 8, 8, 8)
-        blades_l.setSpacing(6)
-        for opt in ('Configuracion', 'Inicio de Xbox', 'Cerrar app actual', 'Cerrar sesion'):
-            b = QtWidgets.QPushButton(opt)
-            b.setObjectName('xguide_blade_btn')
-            b.clicked.connect(lambda _=False, opt=opt: self._accept_action(opt))
-            blades_l.addWidget(b)
-        blades_l.addStretch(1)
-        body.addWidget(blades, 2)
+        body.setSpacing(0)
+        self.blade_left = QtWidgets.QLabel('Games & Apps')
+        self.blade_left.setObjectName('xguide_blade_left')
+        self.blade_left.setAlignment(QtCore.Qt.AlignCenter)
+        body.addWidget(self.blade_left, 1)
+        self.page_host = QtWidgets.QWidget()
+        self.page_host.setMinimumWidth(420)
+        body.addWidget(self.page_host, 8)
+        self.blade_right = QtWidgets.QLabel('Media')
+        self.blade_right.setObjectName('xguide_blade_right')
+        self.blade_right.setAlignment(QtCore.Qt.AlignCenter)
+        body.addWidget(self.blade_right, 1)
         root.addLayout(body, 1)
 
-        hint = QtWidgets.QLabel('A/ENTER = Select | B/ESC = Back | Xbox Guide = F1 o HOME')
+        hint = QtWidgets.QLabel('<font color="#49b93e">A Select</font>   <font color="#cf2d2d">B Back</font>   <font color="#2b7fd8">X Sign Out</font>   <font color="#ddb126">Y Xbox Home</font>')
         hint.setObjectName('xguide_hint')
         root.addWidget(hint)
+
+        self.page_lists = []
+        for _title, items in self._pages:
+            lw = QtWidgets.QListWidget(self.page_host)
+            lw.setObjectName('xguide_list')
+            lw.addItems(list(items))
+            lw.setCurrentRow(0)
+            lw.itemActivated.connect(self._accept_current)
+            lw.itemDoubleClicked.connect(self._accept_current)
+            lw.hide()
+            self.page_lists.append(lw)
+        if self.page_lists:
+            self.page_lists[0].show()
+            self.page_lists[0].setFocus(QtCore.Qt.OtherFocusReason)
+        self._update_blades()
 
         self._clock = QtCore.QTimer(self)
         self._clock.timeout.connect(self._refresh_meta)
@@ -3897,8 +3943,39 @@ class XboxGuideMenu(QtWidgets.QDialog):
         now = QtCore.QDateTime.currentDateTime().toString('HH:mm')
         self.meta.setText(f'{self.gamertag}    {now}')
 
+    def _current_list(self):
+        if not self.page_lists:
+            return None
+        return self.page_lists[self._page_idx]
+
+    def _update_blades(self):
+        if not self._pages:
+            return
+        left = self._pages[self._page_idx][0]
+        right = self._pages[(self._page_idx + 1) % len(self._pages)][0]
+        self.blade_left.setText(str(left))
+        self.blade_right.setText(str(right))
+
+    def _relayout_lists(self):
+        rect = self.page_host.rect()
+        if rect.width() <= 0 or rect.height() <= 0:
+            return
+        for i, lw in enumerate(self.page_lists):
+            if i == self._page_idx and not self._page_animating:
+                lw.setGeometry(rect)
+                lw.show()
+            elif not self._page_animating:
+                lw.hide()
+
+    def resizeEvent(self, e):
+        super().resizeEvent(e)
+        self._relayout_lists()
+
     def _accept_current(self, *_):
-        it = self.listw.currentItem()
+        lw = self._current_list()
+        if lw is None:
+            return
+        it = lw.currentItem()
         if it is None:
             return
         self._selection = it.text()
@@ -3911,8 +3988,64 @@ class XboxGuideMenu(QtWidgets.QDialog):
     def selected(self):
         if self._selection:
             return self._selection
-        it = self.listw.currentItem()
+        lw = self._current_list()
+        if lw is None:
+            return None
+        it = lw.currentItem()
         return it.text() if it else None
+
+    def _switch_page(self, delta):
+        if self._page_animating or not self.page_lists:
+            return
+        total = len(self.page_lists)
+        target = (self._page_idx + int(delta)) % total
+        if target == self._page_idx:
+            return
+        host_rect = self.page_host.rect()
+        if host_rect.width() <= 8 or host_rect.height() <= 8:
+            self._page_idx = target
+            self._update_blades()
+            self._relayout_lists()
+            lw = self._current_list()
+            if lw is not None:
+                lw.setFocus(QtCore.Qt.OtherFocusReason)
+            return
+        self._page_animating = True
+        cur = self.page_lists[self._page_idx]
+        nxt = self.page_lists[target]
+        step = host_rect.width() if int(delta) > 0 else -host_rect.width()
+        cur.setGeometry(host_rect)
+        nxt.setGeometry(host_rect.translated(step, 0))
+        nxt.show()
+        nxt.raise_()
+        cur.raise_()
+        a_out = QtCore.QPropertyAnimation(cur, b'pos', self)
+        a_out.setDuration(180)
+        a_out.setStartValue(cur.pos())
+        a_out.setEndValue(QtCore.QPoint(cur.pos().x() - step, cur.pos().y()))
+        a_out.setEasingCurve(QtCore.QEasingCurve.OutCubic)
+        a_in = QtCore.QPropertyAnimation(nxt, b'pos', self)
+        a_in.setDuration(180)
+        a_in.setStartValue(nxt.pos())
+        a_in.setEndValue(host_rect.topLeft())
+        a_in.setEasingCurve(QtCore.QEasingCurve.OutCubic)
+        grp = QtCore.QParallelAnimationGroup(self)
+        grp.addAnimation(a_out)
+        grp.addAnimation(a_in)
+
+        def _done():
+            self._page_idx = target
+            self._update_blades()
+            cur.hide()
+            nxt.setGeometry(host_rect)
+            self._page_animating = False
+            lw = self._current_list()
+            if lw is not None:
+                lw.setFocus(QtCore.Qt.OtherFocusReason)
+
+        grp.finished.connect(_done)
+        self._page_anim = grp
+        grp.start(QtCore.QAbstractAnimation.DeleteWhenStopped)
 
     def showEvent(self, e):
         super().showEvent(e)
@@ -3924,6 +4057,7 @@ class XboxGuideMenu(QtWidgets.QDialog):
             x = parent.x() + max(20, int(parent.width() * 0.18))
             y = parent.y() + max(20, int(parent.height() * 0.12))
             self.move(max(0, x), max(0, y))
+        self._relayout_lists()
         self._refresh_meta()
         self._animate_open()
 
@@ -3951,6 +4085,20 @@ class XboxGuideMenu(QtWidgets.QDialog):
         self._open_anim.start(QtCore.QAbstractAnimation.DeleteWhenStopped)
 
     def keyPressEvent(self, e):
+        if e.key() in (QtCore.Qt.Key_Y, QtCore.Qt.Key_Tab):
+            self._selection = 'Xbox Home'
+            self.accept()
+            return
+        if e.key() in (QtCore.Qt.Key_X, QtCore.Qt.Key_Space):
+            self._selection = 'Sign Out'
+            self.accept()
+            return
+        if e.key() in (QtCore.Qt.Key_Left, QtCore.Qt.Key_PageUp, QtCore.Qt.Key_Backtab):
+            self._switch_page(-1)
+            return
+        if e.key() in (QtCore.Qt.Key_Right, QtCore.Qt.Key_PageDown):
+            self._switch_page(1)
+            return
         if e.key() in (QtCore.Qt.Key_Escape, QtCore.Qt.Key_Back):
             self.reject()
             return
@@ -5784,11 +5932,104 @@ class Dashboard(QtWidgets.QMainWindow):
             return
         self._menu(name, options)
 
+    def _steam_candidate_roots(self):
+        home = Path.home()
+        roots = [
+            home / '.local' / 'share' / 'Steam',
+            home / '.steam' / 'steam',
+            home / '.var' / 'app' / 'com.valvesoftware.Steam' / 'data' / 'Steam',
+        ]
+        out = []
+        seen = set()
+        for p in roots:
+            sp = str(p)
+            if sp in seen:
+                continue
+            seen.add(sp)
+            out.append(p)
+        return out
+
+    def _steam_library_dirs(self):
+        libs = []
+        seen = set()
+        for root in self._steam_candidate_roots():
+            steamapps = root / 'steamapps'
+            key = str(steamapps)
+            if steamapps.exists() and key not in seen:
+                libs.append(steamapps)
+                seen.add(key)
+            lf = steamapps / 'libraryfolders.vdf'
+            if not lf.exists():
+                continue
+            try:
+                raw = lf.read_text(encoding='utf-8', errors='ignore')
+            except Exception:
+                raw = ''
+            for m in re.finditer(r'"path"\s*"([^"]+)"', raw):
+                ptxt = str(m.group(1) or '').replace('\\\\', '\\').strip()
+                if not ptxt:
+                    continue
+                cand = Path(ptxt) / 'steamapps'
+                key2 = str(cand)
+                if cand.exists() and key2 not in seen:
+                    libs.append(cand)
+                    seen.add(key2)
+        return libs
+
+    def _steam_installed_games(self, limit=220):
+        games = []
+        seen = set()
+        for lib in self._steam_library_dirs():
+            try:
+                manifests = sorted(lib.glob('appmanifest_*.acf'))
+            except Exception:
+                manifests = []
+            for mf in manifests:
+                if len(games) >= int(limit):
+                    return games
+                try:
+                    raw = mf.read_text(encoding='utf-8', errors='ignore')
+                except Exception:
+                    continue
+                m_id = re.search(r'"appid"\s*"(\d+)"', raw)
+                m_name = re.search(r'"name"\s*"([^"]+)"', raw)
+                if not m_id:
+                    continue
+                appid = str(m_id.group(1)).strip()
+                if not appid or appid in seen:
+                    continue
+                seen.add(appid)
+                name = str(m_name.group(1)).strip() if m_name else f'Steam App {appid}'
+                games.append({
+                    'platform': 'steam',
+                    'appid': appid,
+                    'name': name,
+                })
+        return games
+
+    def _platform_games_tiles(self):
+        tiles = []
+        steam_games = self._steam_installed_games(limit=220)
+        for g in steam_games:
+            appid = str(g.get('appid', '')).strip()
+            name = str(g.get('name', '')).strip() or f'Steam App {appid}'
+            if not appid:
+                continue
+            tiles.append({
+                'label': f'{name}',
+                'play': f'Launch Steam Game::{appid}',
+                'install': '',
+                'uninstall': '',
+                'desc': f'Steam installed game (AppID {appid}). Launch directly from Games.',
+            })
+        return tiles
+
     def _open_games_hub_menu(self):
         self._play_sfx('open')
         if self._games_inline is None:
             return
-        items = [
+        platform_items = self._platform_games_tiles()
+        items = list(platform_items) + [
             {
                 'label': 'My Games',
                 'play': 'My Games',
@@ -6695,6 +6936,47 @@ exit 0
         name = str(action or '').strip()
         if not name:
             return
+        if name == 'Leave Game':
+            self.handle_action('Close Active App')
+            return
+        if name == 'Xbox Home':
+            if 'home' in self.tabs:
+                self._switch_tab(self.tabs.index('home'), animate=True, keep_tabs_focus=True)
+            return
+        if name == 'Sign Out':
+            prof = safe_json_read(PROFILE_FILE, {})
+            if not isinstance(prof, dict):
+                prof = {}
+            prof['signed_in'] = False
+            safe_json_write(PROFILE_FILE, prof)
+            self._msg('Sesion', 'Sesion cerrada.')
+            return
+        if name == 'Friends':
+            self.handle_action('Friends')
+            return
+        if name == 'Party':
+            self.handle_action('Party')
+            return
+        if name == 'Messages':
+            self.handle_action('Messages')
+            return
+        if name == 'Chat':
+            self.handle_action('Messages')
+            return
+        if name == 'Manage Storage':
+            self.handle_action('Storage')
+            return
+        passthrough = {
+            'Open Tray', 'Video Marketplace', 'YouTube', 'Netflix', 'Twitch',
+            'Movie Trailers', 'Music Marketplace', 'System Music',
+            'System Settings', 'Account Security', 'Network Setup', 'Family', 'Theme Toggle',
+        }
+        if name in passthrough:
+            self.handle_action(name)
+            return
+        if name == 'Beacons & Activity':
+            self._menu('Beacons & Activity', ['Beacons', 'Activity Feed'])
+            return
         if name == 'Bing':
             if 'bing' in self.tabs:
                 self._switch_tab(self.tabs.index('bing'), animate=True, keep_tabs_focus=True)
@@ -7017,6 +7299,16 @@ exit 0
         for launch_key in self._launch_event_keys(action):
             self._unlock_achievement_event('launch', launch_key)
         xui = str(XUI_HOME)
+        if str(action).startswith('Launch Steam Game::'):
+            appid = str(action).split('::', 1)[1].strip()
+            if appid.isdigit():
+                steam = XUI_HOME / 'bin' / 'xui_steam.sh'
+                if steam.exists():
+                    self._run('/bin/sh', ['-c', f'"{steam}" -applaunch {appid}'])
+                else:
+                    self._open_url_external(f'steam://run/{appid}', normal_mode=True)
+                self._unlock_achievement_event('launch', 'steam')
+                return
         if action == 'Games Hub':
             self._open_games_hub_menu()
         elif action in ('Hub', 'Bing Hub', 'Social Hub', 'Media Hub', 'Music Hub', 'Apps Hub', 'Settings Hub'):
@@ -13046,6 +13338,36 @@ def curated_web_sources():
             'price': 0.0,
         },
         {
+            'id': 'itch_mickthemage_corridor_9',
+            'name': 'Corridor 9',
+            'url': 'https://mickthemage.itch.io/corridor-9',
+            'source': 'Itch.io',
+            'cover': 'https://itch.io/favicon.ico',
+            'desc': 'Real game page from Itch.io.',
+            'pricing': 'free',
+            'price': 0.0,
+        },
+        {
+            'id': 'itch_lazyspar7an_reefer_rampage',
+            'name': 'Reefer Rampage',
+            'url': 'https://lazyspar7an.itch.io/reeferrampage',
+            'source': 'Itch.io',
+            'cover': 'https://itch.io/favicon.ico',
+            'desc': 'Real game page from Itch.io.',
+            'pricing': 'free',
+            'price': 0.0,
+        },
+        {
+            'id': 'itch_keshafilm_protestal',
+            'name': 'Protestal',
+            'url': 'https://keshafilm.itch.io/protestal',
+            'source': 'Itch.io',
+            'cover': 'https://itch.io/favicon.ico',
+            'desc': 'Real game page from Itch.io.',
+            'pricing': 'free',
+            'price': 0.0,
+        },
+        {
             'id': 'itch_efpse_mysticalmist_an_abstract_kind_of_hell_the_amazing_digital_circus_fan_game',
             'name': 'An Abstract Kind of Hell - The Amazing Digital Circus Fan Game',
             'url': 'https://mysticalmist.itch.io/an-abstract-kind-of-hell-the-amazing-digital-circus-fan-game',
@@ -15879,6 +16201,39 @@ now_iso(){
   date -u +"%Y-%m-%dT%H:%M:%SZ"
 }
 
+require_sudo_ticket(){
+  if [ "$(id -u)" -eq 0 ]; then
+    return 0
+  fi
+  if ! command -v sudo >/dev/null 2>&1; then
+    return 0
+  fi
+  sudo -v
+}
+
+start_sudo_keepalive(){
+  if [ "$(id -u)" -eq 0 ]; then
+    return 0
+  fi
+  if ! command -v sudo >/dev/null 2>&1; then
+    return 0
+  fi
+  (
+    while true; do
+      sudo -n true >/dev/null 2>&1 || exit 0
+      sleep 45
+    done
+  ) &
+  XUI_SUDO_KEEPALIVE_PID=$!
+}
+
+stop_sudo_keepalive(){
+  local pid="${XUI_SUDO_KEEPALIVE_PID:-}"
+  if [ -n "${pid:-}" ]; then
+    kill "$pid" >/dev/null 2>&1 || true
+  fi
+}
+
 read_state_commit(){
   python3 - "$STATE_FILE" <<'PY'
 import json,sys,pathlib
@@ -16121,6 +16476,14 @@ apply_update(){
     exit 1
   fi
 
+  echo "step=sudo-auth"
+  if ! require_sudo_ticket; then
+    echo "sudo authentication failed or cancelled."
+    exit 1
+  fi
+  start_sudo_keepalive || true
+  trap stop_sudo_keepalive EXIT
+
   echo "step=installer-start"
   (
     cd "$SRC"
@@ -16165,6 +16528,8 @@ apply_update(){
   echo "step=state-written"
   echo "update-applied"
   echo "installed_commit=$installed_commit"
+  stop_sudo_keepalive || true
+  trap - EXIT
 }
 
 pull_only(){
@@ -17388,7 +17753,15 @@ class Guide(QtWidgets.QDialog):
         self.gamertag = str(gamertag or 'Player1')
         self.action = ''
         self._open_anim = None
-        self.setWindowTitle('Guia Xbox')
+        self._page_anim = None
+        self._page_animating = False
+        self._page_idx = 0
+        self._pages = [
+            ('Games & Apps', ['Xbox Home', 'Friends', 'Party', 'Messages', 'Beacons & Activity', 'Chat', 'Open Tray']),
+            ('Media', ['Video Marketplace', 'YouTube', 'Netflix', 'Twitch', 'Movie Trailers', 'Music Marketplace', 'System Music']),
+            ('Settings', ['Manage Storage', 'System Settings', 'Account Security', 'Network Setup', 'Family', 'Theme Toggle', 'Sign Out']),
+        ]
+        self.setWindowTitle('Xbox Guide')
         self.setWindowFlags(
             QtCore.Qt.Dialog
             | QtCore.Qt.FramelessWindowHint
@@ -17396,61 +17769,59 @@ class Guide(QtWidgets.QDialog):
         )
         self.setAttribute(QtCore.Qt.WA_TranslucentBackground, True)
         self.setModal(True)
-        self.resize(860, 500)
+        self.resize(900, 520)
         self.setStyleSheet('''
             QFrame#xguide_panel {
-                background:qlineargradient(x1:0,y1:0,x2:1,y2:1, stop:0 #3a3f46, stop:1 #1e242b);
-                border:2px solid rgba(214,223,235,0.52);
-                border-radius:7px;
+                background:qlineargradient(x1:0,y1:0,x2:1,y2:1, stop:0 #f4f6f8, stop:1 #e2e7ed);
+                border:2px solid rgba(234,241,247,0.92);
+                border-radius:4px;
             }
             QLabel#xguide_title {
-                color:#eef4f8;
-                font-size:28px;
+                color:#26313b;
+                font-size:30px;
                 font-weight:800;
             }
             QLabel#xguide_meta {
-                color:rgba(235,242,248,0.78);
-                font-size:17px;
+                color:rgba(35,45,55,0.88);
+                font-size:22px;
                 font-weight:600;
             }
             QListWidget#xguide_list {
-                background:rgba(236,239,242,0.92);
-                color:#20252b;
+                background:#f9fbfd;
+                color:#252c34;
                 border:1px solid rgba(0,0,0,0.26);
-                font-size:32px;
+                font-size:38px;
                 outline:none;
             }
             QListWidget#xguide_list::item {
-                padding:6px 10px;
+                padding:7px 12px;
                 border:1px solid transparent;
             }
             QListWidget#xguide_list::item:selected {
                 color:#f3fff2;
-                background:qlineargradient(x1:0,y1:0,x2:1,y2:0, stop:0 #4ea93f, stop:1 #2f8832);
+                background:qlineargradient(x1:0,y1:0,x2:1,y2:0, stop:0 #5fbe47, stop:1 #3f9f33);
                 border:1px solid rgba(255,255,255,0.25);
             }
-            QFrame#xguide_blades {
-                background:rgba(65,74,84,0.95);
-                border:1px solid rgba(194,206,222,0.25);
+            QLabel#xguide_blade_left {
+                background:qlineargradient(x1:0,y1:0,x2:0,y2:1, stop:0 #6a9abb, stop:1 #89b4d2);
+                color:#f4fbff;
+                font-size:36px;
+                font-weight:800;
+                padding:8px 6px;
+                border:1px solid rgba(255,255,255,0.32);
             }
-            QPushButton#xguide_blade_btn {
-                text-align:left;
-                padding:8px 10px;
-                color:#e9f1f8;
-                font-size:20px;
-                font-weight:700;
-                background:rgba(34,43,54,0.92);
-                border:1px solid rgba(186,205,224,0.24);
-            }
-            QPushButton#xguide_blade_btn:focus,
-            QPushButton#xguide_blade_btn:hover {
-                background:rgba(58,80,106,0.95);
-                border:1px solid rgba(218,233,246,0.52);
+            QLabel#xguide_blade_right {
+                background:qlineargradient(x1:0,y1:0,x2:0,y2:1, stop:0 #7da9c7, stop:1 #a2c3da);
+                color:#f4fbff;
+                font-size:36px;
+                font-weight:800;
+                padding:8px 6px;
+                border:1px solid rgba(255,255,255,0.32);
             }
             QLabel#xguide_hint {
-                color:rgba(238,245,250,0.84);
-                font-size:15px;
-                font-weight:600;
+                color:#1e2b36;
+                font-size:18px;
+                font-weight:700;
             }
         ''')
         outer = QtWidgets.QVBoxLayout(self)
@@ -17464,7 +17835,7 @@ class Guide(QtWidgets.QDialog):
         root.setSpacing(8)
 
         top = QtWidgets.QHBoxLayout()
-        title = QtWidgets.QLabel('Guia Xbox')
+        title = QtWidgets.QLabel('Xbox Guide')
         title.setObjectName('xguide_title')
         self.meta = QtWidgets.QLabel('')
         self.meta.setObjectName('xguide_meta')
@@ -17474,41 +17845,38 @@ class Guide(QtWidgets.QDialog):
         root.addLayout(top)
 
         body = QtWidgets.QHBoxLayout()
-        body.setSpacing(10)
-        self.listw = QtWidgets.QListWidget()
-        self.listw.setObjectName('xguide_list')
-        self.listw.addItems([
-            'Logros',
-            'Premios',
-            'Reciente',
-            'Mensajes recientes',
-            'Social global',
-            'Mis juegos',
-            'Descargas activas',
-            'Canjear codigo',
-        ])
-        self.listw.setCurrentRow(0)
-        self.listw.itemActivated.connect(self._accept_current)
-        self.listw.itemDoubleClicked.connect(self._accept_current)
-        body.addWidget(self.listw, 4)
-
-        blades = QtWidgets.QFrame()
-        blades.setObjectName('xguide_blades')
-        blades_l = QtWidgets.QVBoxLayout(blades)
-        blades_l.setContentsMargins(8, 8, 8, 8)
-        blades_l.setSpacing(6)
-        for opt in ('Configuracion', 'Inicio de Xbox', 'Cerrar app actual', 'Cerrar sesion'):
-            b = QtWidgets.QPushButton(opt)
-            b.setObjectName('xguide_blade_btn')
-            b.clicked.connect(lambda _=False, opt=opt: self._accept_action(opt))
-            blades_l.addWidget(b)
-        blades_l.addStretch(1)
-        body.addWidget(blades, 2)
+        body.setSpacing(0)
+        self.blade_left = QtWidgets.QLabel('Games & Apps')
+        self.blade_left.setObjectName('xguide_blade_left')
+        self.blade_left.setAlignment(QtCore.Qt.AlignCenter)
+        body.addWidget(self.blade_left, 1)
+        self.page_host = QtWidgets.QWidget()
+        self.page_host.setMinimumWidth(420)
+        body.addWidget(self.page_host, 8)
+        self.blade_right = QtWidgets.QLabel('Media')
+        self.blade_right.setObjectName('xguide_blade_right')
+        self.blade_right.setAlignment(QtCore.Qt.AlignCenter)
+        body.addWidget(self.blade_right, 1)
         root.addLayout(body, 1)
 
-        hint = QtWidgets.QLabel('A/ENTER = Select | B/ESC = Back | Xbox Guide = F1 o HOME')
+        hint = QtWidgets.QLabel('<font color="#49b93e">A Select</font>   <font color="#cf2d2d">B Back</font>   <font color="#2b7fd8">X Sign Out</font>   <font color="#ddb126">Y Xbox Home</font>')
         hint.setObjectName('xguide_hint')
         root.addWidget(hint)
+
+        self.page_lists = []
+        for _title, items in self._pages:
+            lw = QtWidgets.QListWidget(self.page_host)
+            lw.setObjectName('xguide_list')
+            lw.addItems(list(items))
+            lw.setCurrentRow(0)
+            lw.itemActivated.connect(self._accept_current)
+            lw.itemDoubleClicked.connect(self._accept_current)
+            lw.hide()
+            self.page_lists.append(lw)
+        if self.page_lists:
+            self.page_lists[0].show()
+            self.page_lists[0].setFocus(QtCore.Qt.OtherFocusReason)
+        self._update_blades()
 
         self._clock = QtCore.QTimer(self)
         self._clock.timeout.connect(self._refresh_meta)
@@ -17520,8 +17888,39 @@ class Guide(QtWidgets.QDialog):
         pid_meta = f' PID:{self.paused_pid}' if self.paused_pid else ''
         self.meta.setText(f'{self.gamertag}    {now}{pid_meta}')
 
+    def _current_list(self):
+        if not self.page_lists:
+            return None
+        return self.page_lists[self._page_idx]
+
+    def _update_blades(self):
+        if not self._pages:
+            return
+        left = self._pages[self._page_idx][0]
+        right = self._pages[(self._page_idx + 1) % len(self._pages)][0]
+        self.blade_left.setText(str(left))
+        self.blade_right.setText(str(right))
+
+    def _relayout_lists(self):
+        rect = self.page_host.rect()
+        if rect.width() <= 0 or rect.height() <= 0:
+            return
+        for i, lw in enumerate(self.page_lists):
+            if i == self._page_idx and not self._page_animating:
+                lw.setGeometry(rect)
+                lw.show()
+            elif not self._page_animating:
+                lw.hide()
+
+    def resizeEvent(self, e):
+        super().resizeEvent(e)
+        self._relayout_lists()
+
     def _accept_current(self, *_):
-        it = self.listw.currentItem()
+        lw = self._current_list()
+        if lw is None:
+            return
+        it = lw.currentItem()
         if it is None:
             return
         self.action = it.text()
@@ -17530,6 +17929,59 @@ class Guide(QtWidgets.QDialog):
     def _accept_action(self, action):
         self.action = str(action or '')
         self.accept()
+
+    def _switch_page(self, delta):
+        if self._page_animating or not self.page_lists:
+            return
+        total = len(self.page_lists)
+        target = (self._page_idx + int(delta)) % total
+        if target == self._page_idx:
+            return
+        host_rect = self.page_host.rect()
+        if host_rect.width() <= 8 or host_rect.height() <= 8:
+            self._page_idx = target
+            self._update_blades()
+            self._relayout_lists()
+            lw = self._current_list()
+            if lw is not None:
+                lw.setFocus(QtCore.Qt.OtherFocusReason)
+            return
+        self._page_animating = True
+        cur = self.page_lists[self._page_idx]
+        nxt = self.page_lists[target]
+        step = host_rect.width() if int(delta) > 0 else -host_rect.width()
+        cur.setGeometry(host_rect)
+        nxt.setGeometry(host_rect.translated(step, 0))
+        nxt.show()
+        nxt.raise_()
+        cur.raise_()
+        a_out = QtCore.QPropertyAnimation(cur, b'pos', self)
+        a_out.setDuration(180)
+        a_out.setStartValue(cur.pos())
+        a_out.setEndValue(QtCore.QPoint(cur.pos().x() - step, cur.pos().y()))
+        a_out.setEasingCurve(QtCore.QEasingCurve.OutCubic)
+        a_in = QtCore.QPropertyAnimation(nxt, b'pos', self)
+        a_in.setDuration(180)
+        a_in.setStartValue(nxt.pos())
+        a_in.setEndValue(host_rect.topLeft())
+        a_in.setEasingCurve(QtCore.QEasingCurve.OutCubic)
+        grp = QtCore.QParallelAnimationGroup(self)
+        grp.addAnimation(a_out)
+        grp.addAnimation(a_in)
+
+        def _done():
+            self._page_idx = target
+            self._update_blades()
+            cur.hide()
+            nxt.setGeometry(host_rect)
+            self._page_animating = False
+            lw = self._current_list()
+            if lw is not None:
+                lw.setFocus(QtCore.Qt.OtherFocusReason)
+
+        grp.finished.connect(_done)
+        self._page_anim = grp
+        grp.start(QtCore.QAbstractAnimation.DeleteWhenStopped)
 
     def showEvent(self, e):
         super().showEvent(e)
@@ -17544,6 +17996,7 @@ class Guide(QtWidgets.QDialog):
             x = g.x() + max(20, int(g.width() * 0.18))
             y = g.y() + max(20, int(g.height() * 0.12))
             self.move(max(g.x(), x), max(g.y(), y))
+        self._relayout_lists()
         self._refresh_meta()
         self._animate_open()
 
@@ -17576,6 +18029,20 @@ class Guide(QtWidgets.QDialog):
         self._open_anim.start(QtCore.QAbstractAnimation.DeleteWhenStopped)
 
     def keyPressEvent(self, e):
+        if e.key() in (QtCore.Qt.Key_Y, QtCore.Qt.Key_Tab):
+            self.action = 'Xbox Home'
+            self.accept()
+            return
+        if e.key() in (QtCore.Qt.Key_X, QtCore.Qt.Key_Space):
+            self.action = 'Sign Out'
+            self.accept()
+            return
+        if e.key() in (QtCore.Qt.Key_Left, QtCore.Qt.Key_PageUp, QtCore.Qt.Key_Backtab):
+            self._switch_page(-1)
+            return
+        if e.key() in (QtCore.Qt.Key_Right, QtCore.Qt.Key_PageDown):
+            self._switch_page(1)
+            return
         if e.key() in (QtCore.Qt.Key_Escape, QtCore.Qt.Key_Back):
             self.action = ''
             self.reject()
@@ -17608,6 +18075,51 @@ def _launch_social_global(parent):
 def _handle_action(action, parent):
     name = str(action or '').strip()
     if not name:
+        _resume_paused()
+        return
+    if name == 'Xbox Home':
+        _activate_dashboard()
+        _resume_paused()
+        return
+    if name == 'Leave Game':
+        subprocess.getoutput(f'/bin/sh -c "{CLOSE_SCRIPT}"')
+        return
+    if name == 'Sign Out':
+        _close_session()
+        _msg(parent, 'Sesion', 'Sesion cerrada.')
+        _activate_dashboard()
+        _resume_paused()
+        return
+    if name == 'Friends':
+        _activate_dashboard()
+        _resume_paused()
+        return
+    if name == 'Party':
+        _msg(parent, 'Party', 'Party Center available in dashboard social hub.')
+        _resume_paused()
+        return
+    if name == 'Messages':
+        _launch_social_global(parent)
+        _resume_paused()
+        return
+    if name == 'Chat':
+        _launch_social_global(parent)
+        _resume_paused()
+        return
+    if name == 'Beacons & Activity':
+        _activate_dashboard()
+        _resume_paused()
+        return
+    if name == 'Manage Storage':
+        _activate_dashboard()
+        _resume_paused()
+        return
+    if name in (
+        'Open Tray', 'Video Marketplace', 'YouTube', 'Netflix', 'Twitch',
+        'Movie Trailers', 'Music Marketplace', 'System Music',
+        'System Settings', 'Account Security', 'Network Setup', 'Family', 'Theme Toggle',
+    ):
+        _activate_dashboard()
         _resume_paused()
         return
     if name == 'Reciente':
