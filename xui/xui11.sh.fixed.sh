@@ -5191,27 +5191,72 @@ class Dashboard(QtWidgets.QMainWindow):
         script = '''#!/usr/bin/env bash
 set -euo pipefail
 WRAP="$HOME/.xui/bin/xui_startup_and_dashboard.sh"
-sleep 0.6
-if command -v systemctl >/dev/null 2>&1; then
-  systemctl --user daemon-reload >/dev/null 2>&1 || true
-  systemctl --user restart xui-dashboard.service >/dev/null 2>&1 || true
-fi
-for _ in $(seq 1 30); do
-  if command -v pgrep >/dev/null 2>&1 && pgrep -u "$(id -u)" -f "pyqt_dashboard_improved.py" >/dev/null 2>&1; then
-    exit 0
+OLD_PID="${1:-}"
+
+dashboard_running(){
+  if ! command -v pgrep >/dev/null 2>&1; then
+    return 1
   fi
-  sleep 0.25
-done
-if [ -x "$WRAP" ]; then
-  nohup "$WRAP" >/dev/null 2>&1 &
-  sleep 0.5
-fi
-if command -v pgrep >/dev/null 2>&1 && pgrep -u "$(id -u)" -f "pyqt_dashboard_improved.py" >/dev/null 2>&1; then
+  pgrep -u "$(id -u)" -f "pyqt_dashboard_improved.py" >/dev/null 2>&1
+}
+
+wait_old_dashboard_exit(){
+  local pid="$1"
+  if [[ ! "$pid" =~ ^[0-9]+$ ]]; then
+    return 0
+  fi
+  if [ "$pid" -le 1 ]; then
+    return 0
+  fi
+  for _ in $(seq 1 140); do
+    if ! kill -0 "$pid" >/dev/null 2>&1; then
+      return 0
+    fi
+    sleep 0.10
+  done
+}
+
+restart_via_systemd(){
+  if ! command -v systemctl >/dev/null 2>&1; then
+    return 1
+  fi
+  systemctl --user daemon-reload >/dev/null 2>&1 || true
+  systemctl --user restart xui-dashboard.service >/dev/null 2>&1
+}
+
+start_via_wrapper(){
+  if [ -x "$WRAP" ]; then
+    nohup "$WRAP" >/dev/null 2>&1 &
+    return 0
+  fi
+  return 1
+}
+
+wait_old_dashboard_exit "$OLD_PID"
+sleep 0.20
+
+if dashboard_running; then
   exit 0
 fi
-if [ -x "$WRAP" ]; then
-  nohup "$WRAP" >/dev/null 2>&1 &
-fi
+
+restart_via_systemd || true
+for _ in $(seq 1 45); do
+  if dashboard_running; then
+    exit 0
+  fi
+  sleep 0.15
+done
+
+start_via_wrapper || true
+for _ in $(seq 1 45); do
+  if dashboard_running; then
+    exit 0
+  fi
+  sleep 0.15
+done
+
+restart_via_systemd || true
+start_via_wrapper || true
 exit 0
 '''
         try:
@@ -5221,12 +5266,13 @@ exit 0
         except Exception:
             pass
         helper_q = shlex.quote(str(helper))
+        current_pid_q = shlex.quote(str(os.getpid()))
         cmd = (
             f'if [ -x {helper_q} ]; then '
             'if command -v systemd-run >/dev/null 2>&1; then '
-            f'systemd-run --user --quiet --collect --unit "xui-postupdate-restart-$(date +%s)" {helper_q} >/dev/null 2>&1 || nohup {helper_q} >/dev/null 2>&1 & '
+            f'systemd-run --user --quiet --collect --unit "xui-postupdate-restart-$(date +%s)" {helper_q} {current_pid_q} >/dev/null 2>&1 || nohup {helper_q} {current_pid_q} >/dev/null 2>&1 & '
             'else '
-            f'nohup {helper_q} >/dev/null 2>&1 & '
+            f'nohup {helper_q} {current_pid_q} >/dev/null 2>&1 & '
             'fi; '
             'fi'
         )
@@ -7180,10 +7226,38 @@ class ControllerBridge:
         self.last_suppressed_snapshot = ()
         self.last_guide_open = 0.0
 
+    def _active_window_pid(self):
+        if not XDOTOOL:
+            return None
+        try:
+            wid = subprocess.check_output(
+                [XDOTOOL, 'getactivewindow'],
+                text=True,
+                stderr=subprocess.DEVNULL
+            ).strip()
+            if not wid:
+                return None
+            pid_txt = subprocess.check_output(
+                [XDOTOOL, 'getwindowpid', wid],
+                text=True,
+                stderr=subprocess.DEVNULL
+            ).strip()
+            if not pid_txt:
+                return None
+            pid = int(pid_txt)
+            if pid <= 1:
+                return None
+            return pid
+        except Exception:
+            return None
+
     def _active_window_dashboard(self):
         if not XDOTOOL:
             return False
         try:
+            pid = self._active_window_pid()
+            if pid and self._is_dashboard_pid(pid):
+                return True
             wid = subprocess.check_output(
                 [XDOTOOL, 'getactivewindow'],
                 text=True,
@@ -7198,19 +7272,7 @@ class ControllerBridge:
             ).strip().lower()
             if any(t in name for t in ('xui', 'dashboard', 'xbox style')):
                 return True
-            pid_txt = subprocess.check_output(
-                [XDOTOOL, 'getwindowpid', wid],
-                text=True,
-                stderr=subprocess.DEVNULL
-            ).strip()
-            if not pid_txt:
-                return False
-            cmdline = ''
-            try:
-                cmdline = open(f'/proc/{int(pid_txt)}/cmdline', 'rb').read().replace(b'\x00', b' ').decode('utf-8', 'ignore').lower()
-            except Exception:
-                cmdline = ''
-            return any(t in cmdline for t in ('pyqt_dashboard_improved.py', 'xui_startup_and_dashboard', 'xui-dashboard.service'))
+            return False
         except Exception:
             return False
 
@@ -7248,6 +7310,16 @@ class ControllerBridge:
             return None
         return pid
 
+    def _active_external_window_pid(self):
+        pid = self._active_window_pid()
+        if pid is None:
+            return None
+        if not os.path.exists(f'/proc/{pid}'):
+            return None
+        if self._is_dashboard_pid(pid):
+            return None
+        return pid
+
     def _open_global_guide(self):
         now = time.monotonic()
         if (now - self.last_guide_open) < GUIDE_COOLDOWN_SEC:
@@ -7256,7 +7328,11 @@ class ControllerBridge:
         if self._active_window_dashboard():
             emit_key('F1')
             return True
-        if self._tracked_external_game_pid() is None:
+        tracked_pid = self._tracked_external_game_pid()
+        if tracked_pid is None:
+            return False
+        active_pid = self._active_external_window_pid()
+        if active_pid is None or int(active_pid) != int(tracked_pid):
             return False
         if not os.path.exists(GUIDE_SCRIPT):
             return False
@@ -14238,6 +14314,19 @@ PY
 set -euo pipefail
 PYRUN="$HOME/.xui/bin/xui_python.sh"
 APP="$HOME/.xui/bin/xui_global_guide.py"
+if command -v xdotool >/dev/null 2>&1; then
+  wid="$(xdotool getactivewindow 2>/dev/null || true)"
+  if [ -n "${wid:-}" ]; then
+    pid="$(xdotool getwindowpid "$wid" 2>/dev/null || true)"
+    if [ -n "${pid:-}" ] && [ -r "/proc/$pid/cmdline" ]; then
+      cmdline="$(tr '\000' ' ' < "/proc/$pid/cmdline" | tr '[:upper:]' '[:lower:]')"
+      if echo "$cmdline" | grep -Eq 'pyqt_dashboard_improved\.py|xui_startup_and_dashboard|xui-dashboard\.service'; then
+        xdotool key --clearmodifiers F1 >/dev/null 2>&1 || true
+        exit 0
+      fi
+    fi
+  fi
+fi
 if [ -x "$PYRUN" ] && [ -f "$APP" ]; then
   exec "$PYRUN" "$APP" "$@"
 fi
