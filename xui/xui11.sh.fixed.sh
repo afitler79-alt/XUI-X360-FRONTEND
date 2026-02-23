@@ -7421,9 +7421,30 @@ write_startup_wrapper(){
   cat > "$BIN_DIR/xui_startup_and_dashboard.sh" <<'SH'
 #!/usr/bin/env bash
 set -euo pipefail
-ASSETS_DIR="$HOME/.xui/assets"
-DASH_SCRIPT="$HOME/.xui/dashboard/pyqt_dashboard_improved.py"
-PY_RUNNER="$HOME/.xui/bin/xui_python.sh"
+TARGET_HOME="${XUI_USER_HOME:-$HOME}"
+if [ "$(id -u)" -eq 0 ] && [ -n "${SUDO_USER:-}" ]; then
+  if command -v getent >/dev/null 2>&1; then
+    _su_home="$(getent passwd "$SUDO_USER" | cut -d: -f6 || true)"
+    [ -n "${_su_home:-}" ] && TARGET_HOME="$_su_home"
+  elif [ -d "/home/$SUDO_USER" ]; then
+    TARGET_HOME="/home/$SUDO_USER"
+  fi
+fi
+if [ "$(id -u)" -ne 0 ]; then
+  if command -v sudo >/dev/null 2>&1; then
+    if sudo -n --preserve-env=DISPLAY,XAUTHORITY,XDG_RUNTIME_DIR,DBUS_SESSION_BUS_ADDRESS,WAYLAND_DISPLAY,XDG_SESSION_TYPE,HOME,USER,LOGNAME,XUI_USER_HOME XUI_USER_HOME="$TARGET_HOME" "$0" "$@"; then
+      exit 0
+    fi
+  fi
+  echo "[WARN] Passwordless sudo is required. Install/update to write /etc/sudoers.d/xui-dashboard-\$USER." >&2
+  exit 1
+fi
+export HOME="$TARGET_HOME"
+export USER="${SUDO_USER:-${USER:-$(id -un)}}"
+export LOGNAME="${SUDO_USER:-${LOGNAME:-$USER}}"
+ASSETS_DIR="$TARGET_HOME/.xui/assets"
+DASH_SCRIPT="$TARGET_HOME/.xui/dashboard/pyqt_dashboard_improved.py"
+PY_RUNNER="$TARGET_HOME/.xui/bin/xui_python.sh"
 info(){ echo "[INFO] $*"; }
 if [ -f "$DASH_SCRIPT" ]; then
   if [ -x "$PY_RUNNER" ]; then
@@ -13460,12 +13481,36 @@ cat > "$BIN_DIR/xui_startup_and_dashboard.sh" <<'SH'
 #!/usr/bin/env bash
 set -euo pipefail
 
-ASSETS_DIR="$HOME/.xui/assets"
-DASH_SCRIPT="$HOME/.xui/dashboard/pyqt_dashboard_improved.py"
-SETUP_SCRIPT="$HOME/.xui/bin/xui_first_setup.py"
-SETUP_STATE="$HOME/.xui/data/setup_state.json"
-PY_RUNNER="$HOME/.xui/bin/xui_python.sh"
-LOCK_FILE="$HOME/.xui/data/dashboard-session.lock"
+TARGET_HOME="${XUI_USER_HOME:-$HOME}"
+if [ "$(id -u)" -eq 0 ] && [ -n "${SUDO_USER:-}" ]; then
+    if command -v getent >/dev/null 2>&1; then
+        _su_home="$(getent passwd "$SUDO_USER" | cut -d: -f6 || true)"
+        [ -n "${_su_home:-}" ] && TARGET_HOME="$_su_home"
+    elif [ -d "/home/$SUDO_USER" ]; then
+        TARGET_HOME="/home/$SUDO_USER"
+    fi
+fi
+
+if [ "$(id -u)" -ne 0 ]; then
+    if command -v sudo >/dev/null 2>&1; then
+        if sudo -n --preserve-env=DISPLAY,XAUTHORITY,XDG_RUNTIME_DIR,DBUS_SESSION_BUS_ADDRESS,WAYLAND_DISPLAY,XDG_SESSION_TYPE,HOME,USER,LOGNAME,XUI_USER_HOME XUI_USER_HOME="$TARGET_HOME" "$0" "$@"; then
+            exit 0
+        fi
+    fi
+    echo "[WARN] Passwordless sudo is required for dashboard launch." >&2
+    echo "[WARN] Re-run installer/update to configure /etc/sudoers.d/xui-dashboard-\$USER." >&2
+    exit 1
+fi
+
+export HOME="$TARGET_HOME"
+export USER="${SUDO_USER:-${USER:-$(id -un)}}"
+export LOGNAME="${SUDO_USER:-${LOGNAME:-$USER}}"
+ASSETS_DIR="$TARGET_HOME/.xui/assets"
+DASH_SCRIPT="$TARGET_HOME/.xui/dashboard/pyqt_dashboard_improved.py"
+SETUP_SCRIPT="$TARGET_HOME/.xui/bin/xui_first_setup.py"
+SETUP_STATE="$TARGET_HOME/.xui/data/setup_state.json"
+PY_RUNNER="$TARGET_HOME/.xui/bin/xui_python.sh"
+LOCK_FILE="$TARGET_HOME/.xui/data/dashboard-session.lock"
 
 info(){ echo -e "\e[34m[INFO]\e[0m $*"; }
 warn(){ echo -e "\e[33m[WARN]\e[0m $*" >&2; }
@@ -13479,7 +13524,7 @@ run_python(){
     fi
 }
 
-mkdir -p "$HOME/.xui/data" "$HOME/.xui/logs" "$ASSETS_DIR"
+mkdir -p "$TARGET_HOME/.xui/data" "$TARGET_HOME/.xui/logs" "$ASSETS_DIR"
 
 # Avoid duplicate dashboard instances when desktop autostart + systemd start at the same login.
 if command -v flock >/dev/null 2>&1; then
@@ -13667,6 +13712,22 @@ if command -v systemctl >/dev/null 2>&1; then
     }
 else
     echo "systemctl not found; enable ~/.config/autostart/xui-dashboard.desktop manually."
+fi
+
+# Configure passwordless sudo for dashboard wrapper (no prompt at launch time)
+if command -v sudo >/dev/null 2>&1; then
+    SUDOERS_FILE="/etc/sudoers.d/xui-dashboard-$USER"
+    TMPF="$(mktemp)"
+    printf '%s ALL=(root) NOPASSWD: %s, %s\n' "$USER" "$START_WRAPPER" "$XUI_HOME/bin/xui_start.sh" > "$TMPF"
+    if sudo -n install -m 0440 "$TMPF" "$SUDOERS_FILE" >/dev/null 2>&1; then
+        if command -v visudo >/dev/null 2>&1; then
+            sudo -n visudo -cf "$SUDOERS_FILE" >/dev/null 2>&1 || true
+        fi
+        echo "Configured passwordless sudo for dashboard launcher: $SUDOERS_FILE"
+    else
+        echo "Warning: could not configure $SUDOERS_FILE with sudo -n."
+    fi
+    rm -f "$TMPF"
 fi
 
 # Feedback
@@ -18617,6 +18678,48 @@ UNIT
 }
 
 
+configure_dashboard_passwordless_sudo(){
+  local target_user target_home sudoers_file cmd1 cmd2 tmpf
+  target_user="${SUDO_USER:-$USER}"
+  target_home="$HOME"
+  if [ -n "${SUDO_USER:-}" ]; then
+    if command -v getent >/dev/null 2>&1; then
+      local su_home
+      su_home="$(getent passwd "$SUDO_USER" | cut -d: -f6 || true)"
+      if [ -n "${su_home:-}" ]; then
+        target_home="$su_home"
+      fi
+    elif [ -d "/home/$SUDO_USER" ]; then
+      target_home="/home/$SUDO_USER"
+    fi
+  fi
+  cmd1="$target_home/.xui/bin/xui_startup_and_dashboard.sh"
+  cmd2="$target_home/.xui/bin/xui_start.sh"
+  sudoers_file="/etc/sudoers.d/xui-dashboard-${target_user}"
+  tmpf="$(mktemp /tmp/xui-sudoers.XXXXXX)"
+  printf '%s ALL=(root) NOPASSWD: %s, %s\n' "$target_user" "$cmd1" "$cmd2" > "$tmpf"
+
+  if ! run_as_root install -m 0440 "$tmpf" "$sudoers_file"; then
+    warn "Could not install sudoers rule for passwordless dashboard."
+    rm -f "$tmpf"
+    return 1
+  fi
+
+  if command -v visudo >/dev/null 2>&1; then
+    if ! run_as_root visudo -cf "$sudoers_file" >/dev/null 2>&1; then
+      warn "sudoers validation failed, removing $sudoers_file"
+      run_as_root rm -f "$sudoers_file" || true
+      rm -f "$tmpf"
+      return 1
+    fi
+  fi
+
+  rm -f "$tmpf"
+  info "Configured passwordless sudo for dashboard launch ($target_user)."
+  return 0
+}
+
+
 finish_setup(){
   info "Finalizing installation"
   run_user_systemctl(){
@@ -18638,6 +18741,7 @@ finish_setup(){
   chmod +x "$DASH_DIR/pyqt_dashboard.py" || true
   chmod +x "$BIN_DIR/xui_joy_listener.py" || true
   touch "$XUI_DIR/.xui_4_0xv_setup_done"
+  configure_dashboard_passwordless_sudo || warn "Dashboard may ask for credentials until sudoers rule is applied."
   info "Configuring autostart for each login"
   mkdir -p "$AUTOSTART_DIR" "$SYSTEMD_USER_DIR" || true
   local openbox_file xprofile_file
