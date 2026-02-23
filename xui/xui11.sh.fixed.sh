@@ -7432,7 +7432,7 @@ if [ "$(id -u)" -eq 0 ] && [ -n "${SUDO_USER:-}" ]; then
 fi
 if [ "$(id -u)" -ne 0 ]; then
   if command -v sudo >/dev/null 2>&1; then
-    if sudo -n --preserve-env=DISPLAY,XAUTHORITY,XDG_RUNTIME_DIR,DBUS_SESSION_BUS_ADDRESS,WAYLAND_DISPLAY,XDG_SESSION_TYPE,HOME,USER,LOGNAME,XUI_USER_HOME XUI_USER_HOME="$TARGET_HOME" "$0" "$@"; then
+    if sudo -n "$0" "$@"; then
       exit 0
     fi
   fi
@@ -9254,10 +9254,17 @@ PY
 
   cat > "$CASINO_DIR/casino.py" <<'PY'
 #!/usr/bin/env python3
+import json
+import queue
 import random
 import sys
+import threading
+import time
+import urllib.parse
+import urllib.request
+import uuid
 from pathlib import Path
-from PyQt5 import QtWidgets, QtCore
+from PyQt5 import QtCore, QtGui, QtWidgets
 
 sys.path.insert(0, str(Path.home() / '.xui' / 'bin'))
 from xui_game_lib import get_balance, change_balance, ensure_wallet, complete_mission, unlock_for_event
@@ -9266,19 +9273,188 @@ from xui_game_lib import get_balance, change_balance, ensure_wallet, complete_mi
 RED_NUMBERS = {1,3,5,7,9,12,14,16,18,19,21,23,25,27,30,32,34,36}
 
 
+def _load_gamertag():
+    prof = Path.home() / '.xui' / 'data' / 'profile.json'
+    try:
+        data = json.loads(prof.read_text(encoding='utf-8', errors='ignore'))
+        name = str(data.get('gamertag', 'Player1')).strip()
+        return name or 'Player1'
+    except Exception:
+        return 'Player1'
+
+
+class CasinoOnlineRelay:
+    def __init__(self, nickname):
+        self.nickname = str(nickname or 'Player1')
+        self.node_id = uuid.uuid4().hex[:12]
+        self.relay = str(
+            Path.home().joinpath('.xui').joinpath('data').as_posix()
+        )  # placeholder; replaced below
+        self.relay = str(
+            __import__('os').environ.get('XUI_WORLD_RELAY_URL', 'https://ntfy.sh')
+        ).strip().rstrip('/')
+        self.topic = self._sanitize_topic(
+            __import__('os').environ.get('XUI_CASINO_TOPIC', 'xui-casino-global')
+        )
+        self.enabled = True
+        self.events = queue.Queue()
+        self.running = False
+        self._thread = None
+        self._seen_ids = set()
+
+    def _sanitize_topic(self, text):
+        raw = ''.join(ch.lower() if ch.isalnum() or ch in ('-', '_', '.') else '-' for ch in str(text or '').strip())
+        while '--' in raw:
+            raw = raw.replace('--', '-')
+        raw = raw.strip('-._')
+        return raw or 'xui-casino-global'
+
+    def _topic_url(self, suffix=''):
+        topic = urllib.parse.quote(self.topic, safe='')
+        return f'{self.relay}/{topic}{suffix}'
+
+    def start(self):
+        if self.running:
+            return
+        self.running = True
+        self._thread = threading.Thread(target=self._recv_loop, daemon=True)
+        self._thread.start()
+        self.events.put(('status', f'Online relay connected: {self.topic}'))
+
+    def stop(self):
+        self.running = False
+        if self._thread is not None:
+            self._thread.join(timeout=0.2)
+
+    def set_enabled(self, enabled):
+        self.enabled = bool(enabled)
+        if self.enabled:
+            self.events.put(('status', f'Online relay enabled: {self.topic}'))
+        else:
+            self.events.put(('status', 'Online relay disabled'))
+
+    def send_roll(self, room, game, roll, stake):
+        payload = {
+            'kind': 'xui_casino_roll',
+            'node_id': self.node_id,
+            'from': self.nickname,
+            'room': str(room or 'global'),
+            'game': str(game or 'dice_duel'),
+            'roll': int(roll),
+            'stake': int(stake),
+            'ts': float(time.time()),
+        }
+        req = urllib.request.Request(
+            self._topic_url(''),
+            data=json.dumps(payload, ensure_ascii=False).encode('utf-8', errors='ignore'),
+            method='POST',
+            headers={
+                'Content-Type': 'text/plain; charset=utf-8',
+                'User-Agent': 'xui-casino-online',
+                'X-Title': f'XUI-Casino:{self.nickname}',
+            },
+        )
+        with urllib.request.urlopen(req, timeout=8) as r:
+            _ = r.read(128)
+
+    def _recv_loop(self):
+        backoff = 1.2
+        while self.running:
+            if not self.enabled:
+                time.sleep(0.4)
+                continue
+            req = urllib.request.Request(
+                self._topic_url('/json'),
+                headers={
+                    'User-Agent': 'xui-casino-online',
+                    'Cache-Control': 'no-cache',
+                    'Connection': 'keep-alive',
+                },
+            )
+            try:
+                with urllib.request.urlopen(req, timeout=30) as resp:
+                    backoff = 1.2
+                    while self.running and self.enabled:
+                        raw = resp.readline()
+                        if not raw:
+                            break
+                        line = raw.decode('utf-8', errors='ignore').strip()
+                        if not line:
+                            continue
+                        try:
+                            evt = json.loads(line)
+                        except Exception:
+                            continue
+                        if str(evt.get('event') or '') != 'message':
+                            continue
+                        msg_id = str(evt.get('id') or '')
+                        if msg_id:
+                            if msg_id in self._seen_ids:
+                                continue
+                            self._seen_ids.add(msg_id)
+                            if len(self._seen_ids) > 1200:
+                                self._seen_ids = set(list(self._seen_ids)[-600:])
+                        body = str(evt.get('message') or '').strip()
+                        if not body:
+                            continue
+                        try:
+                            payload = json.loads(body)
+                        except Exception:
+                            continue
+                        if str(payload.get('kind') or '') != 'xui_casino_roll':
+                            continue
+                        if str(payload.get('node_id') or '') == self.node_id:
+                            continue
+                        self.events.put(('roll', payload))
+            except Exception as exc:
+                self.events.put(('status', f'Online relay reconnecting: {exc}'))
+                time.sleep(min(8.0, backoff))
+                backoff = min(8.0, backoff * 1.5)
+
+
 class CasinoWindow(QtWidgets.QMainWindow):
     def __init__(self):
         super().__init__()
+        self.nickname = _load_gamertag()
         ensure_wallet()
         unlock_for_event('launch', 'casino', limit=2)
-        self.start_msg = 'Bienvenido al casino.'
+        self.start_msg = f'Bienvenido al casino, {self.nickname}.'
         m = complete_mission(mission_id='m1')
         if m.get('completed'):
             self.start_msg = f"Bienvenido al casino. Mission +EUR {m.get('reward', 0):.2f}"
+        self._slots_timer = QtCore.QTimer(self)
+        self._slots_timer.timeout.connect(self._slots_tick)
+        self._slots_pending = None
+        self._slots_ticks = 0
+        self._slots_target = ['7', 'BAR', 'CHERRY']
+        self._roulette_timer = QtCore.QTimer(self)
+        self._roulette_timer.timeout.connect(self._roulette_tick)
+        self._roulette_pending = None
+        self._roulette_ticks = 0
+        self._roulette_target = 0
+        self._coin_timer = QtCore.QTimer(self)
+        self._coin_timer.timeout.connect(self._coin_tick)
+        self._coin_pending = None
+        self._coin_ticks = 0
+        self._coin_target = 'HEADS'
+        self._bj_timer = QtCore.QTimer(self)
+        self._bj_timer.timeout.connect(self._blackjack_tick)
+        self._bj_steps = []
+        self._bj_step_idx = 0
+        self.hilo_card = random.randint(1, 13)
+        self.online_room = 'global'
+        self.online_rolls = []
+        self.online_points = {}
+        self.relay = CasinoOnlineRelay(self.nickname)
+        self.relay.start()
+        self.online_timer = QtCore.QTimer(self)
+        self.online_timer.timeout.connect(self._poll_online_events)
+        self.online_timer.start(160)
         self.setWindowTitle('XUI Casino')
-        self.resize(860, 560)
+        self.resize(1220, 760)
         self._build()
         self.refresh_balance(self.start_msg)
+        self._update_hilo_card()
 
     def _build(self):
         root = QtWidgets.QWidget()
@@ -9288,9 +9464,9 @@ class CasinoWindow(QtWidgets.QMainWindow):
         v.setSpacing(12)
 
         self.balance_lbl = QtWidgets.QLabel()
-        self.balance_lbl.setStyleSheet('font-size:24px; font-weight:700; color:#d8ffd8;')
+        self.balance_lbl.setStyleSheet('font-size:28px; font-weight:700; color:#d8ffd8;')
         self.info_lbl = QtWidgets.QLabel()
-        self.info_lbl.setStyleSheet('font-size:18px; color:#f0f7f0;')
+        self.info_lbl.setStyleSheet('font-size:20px; color:#f0f7f0;')
         v.addWidget(self.balance_lbl)
         v.addWidget(self.info_lbl)
 
@@ -9298,17 +9474,37 @@ class CasinoWindow(QtWidgets.QMainWindow):
         tabs.addTab(self._slots_tab(), 'Slots')
         tabs.addTab(self._roulette_tab(), 'Roulette')
         tabs.addTab(self._blackjack_tab(), 'Blackjack')
+        tabs.addTab(self._hilo_tab(), 'Hi-Lo')
+        tabs.addTab(self._coin_tab(), 'Coin Flip')
+        tabs.addTab(self._online_tab(), 'Dice Duel Online')
         v.addWidget(tabs, 1)
 
         self.setStyleSheet('''
-            QMainWindow { background:#13201b; color:#eef7ee; }
+            QMainWindow {
+                background:qlineargradient(x1:0,y1:0,x2:1,y2:1, stop:0 #122318, stop:1 #0a1510);
+                color:#eef7ee;
+            }
             QTabWidget::pane { border:1px solid #2a4738; background:#0f1a15; }
-            QTabBar::tab { background:#1e3529; color:#e9f5e9; padding:8px 16px; }
+            QTabBar::tab { background:#1e3529; color:#e9f5e9; padding:10px 18px; font-size:16px; }
             QTabBar::tab:selected { background:#2f9f49; color:#ffffff; font-weight:700; }
             QPushButton { background:#2ea84a; color:white; border:none; padding:8px 14px; border-radius:4px; }
             QPushButton:hover { background:#37bc55; }
             QSpinBox, QComboBox { background:#1d2a23; color:white; border:1px solid #3b5244; padding:4px; }
             QLabel#result { font-size:30px; font-weight:700; color:#f8fff8; }
+            QListWidget {
+                background:#09130f;
+                border:1px solid #2d4e3d;
+                color:#e8f6e8;
+                font-size:15px;
+            }
+            QLineEdit {
+                background:#142119;
+                border:1px solid #355b46;
+                color:#f2fbf2;
+                padding:6px;
+                font-size:15px;
+                font-weight:700;
+            }
         ''')
 
     def refresh_balance(self, text=''):
@@ -9329,7 +9525,7 @@ class CasinoWindow(QtWidgets.QMainWindow):
         self.slots_bet = QtWidgets.QSpinBox()
         self.slots_bet.setRange(1, 1000)
         self.slots_bet.setValue(10)
-        spin_btn = QtWidgets.QPushButton('Spin')
+        spin_btn = QtWidgets.QPushButton('Spin (Animated)')
         spin_btn.clicked.connect(self.play_slots)
         row.addWidget(QtWidgets.QLabel('Bet:'))
         row.addWidget(self.slots_bet)
@@ -9346,14 +9542,37 @@ class CasinoWindow(QtWidgets.QMainWindow):
         return w
 
     def play_slots(self):
+        if self._slots_timer.isActive():
+            self.refresh_balance('Slots animation in progress...')
+            return
         bet = int(self.slots_bet.value())
         bal = get_balance()
         if bet <= 0 or bet > bal:
             self.refresh_balance('Apuesta inválida para el balance actual.')
             return
         symbols = ['7', 'BAR', 'CHERRY', 'BELL', 'X']
-        reels = [random.choice(symbols) for _ in range(3)]
+        self._slots_pending = bet
+        self._slots_target = [random.choice(symbols) for _ in range(3)]
+        self._slots_ticks = 0
+        self._slots_timer.start(75)
+        self.refresh_balance('Slots spinning...')
+
+    def _slots_tick(self):
+        symbols = ['7', 'BAR', 'CHERRY', 'BELL', 'X']
+        self._slots_ticks += 1
+        reels = [random.choice(symbols), random.choice(symbols), random.choice(symbols)]
         self.slots_result.setText(' | '.join(reels))
+        if self._slots_ticks % 2 == 0:
+            self.slots_result.setStyleSheet('font-size:34px; font-weight:800; color:#e8ffe8;')
+        else:
+            self.slots_result.setStyleSheet('font-size:34px; font-weight:800; color:#8cffaf;')
+        if self._slots_ticks < 18:
+            return
+        self._slots_timer.stop()
+        bet = int(self._slots_pending or 0)
+        reels = list(self._slots_target)
+        self.slots_result.setText(' | '.join(reels))
+        self.slots_result.setStyleSheet('font-size:36px; font-weight:900; color:#ffffff;')
         payout = 0
         if reels[0] == reels[1] == reels[2]:
             payout = bet * (12 if reels[0] == '7' else 6)
@@ -9363,6 +9582,7 @@ class CasinoWindow(QtWidgets.QMainWindow):
         new_bal = change_balance(delta)
         if payout > 0:
             self.refresh_balance(f'Slots: +EUR {payout:.2f} (neto {delta:+.2f})')
+            unlock_for_event('win', 'casino_slots', limit=2)
         else:
             self.refresh_balance(f'Slots: -EUR {bet:.2f}')
         self.balance_lbl.setText(f'Balance: EUR {new_bal:.2f}')
@@ -9384,7 +9604,7 @@ class CasinoWindow(QtWidgets.QMainWindow):
         self.roulette_number.setValue(7)
         self.roulette_result = QtWidgets.QLabel('Resultado: -')
         self.roulette_result.setStyleSheet('font-size:24px; font-weight:700;')
-        play_btn = QtWidgets.QPushButton('Spin Roulette')
+        play_btn = QtWidgets.QPushButton('Spin Roulette (Animated)')
         play_btn.clicked.connect(self.play_roulette)
 
         g.addWidget(QtWidgets.QLabel('Bet:'), 0, 0)
@@ -9399,18 +9619,45 @@ class CasinoWindow(QtWidgets.QMainWindow):
         return w
 
     def play_roulette(self):
+        if self._roulette_timer.isActive():
+            self.refresh_balance('Roulette spin in progress...')
+            return
         bet = int(self.roulette_bet.value())
         bal = get_balance()
         if bet <= 0 or bet > bal:
             self.refresh_balance('Apuesta inválida para roulette.')
             return
-        mode = self.roulette_mode.currentText()
-        result = random.randint(0, 36)
+        self._roulette_pending = {
+            'bet': bet,
+            'mode': self.roulette_mode.currentText(),
+            'exact': int(self.roulette_number.value()),
+        }
+        self._roulette_target = random.randint(0, 36)
+        self._roulette_ticks = 0
+        self._roulette_timer.start(70)
+        self.refresh_balance('Roulette spinning...')
+
+    def _roulette_tick(self):
+        self._roulette_ticks += 1
+        n = random.randint(0, 36)
+        color = 'Green' if n == 0 else ('Red' if n in RED_NUMBERS else 'Black')
+        tone = '#96ff8e' if self._roulette_ticks % 2 else '#f0fff0'
+        self.roulette_result.setStyleSheet(f'font-size:30px; font-weight:900; color:{tone};')
+        self.roulette_result.setText(f'Spinning: {n} ({color})')
+        if self._roulette_ticks < 22:
+            return
+        self._roulette_timer.stop()
+        pend = dict(self._roulette_pending or {})
+        bet = int(pend.get('bet') or 0)
+        mode = str(pend.get('mode') or 'Red')
+        exact = int(pend.get('exact') or 0)
+        result = int(self._roulette_target)
         color = 'Green' if result == 0 else ('Red' if result in RED_NUMBERS else 'Black')
         payout = 0
+        mode = self.roulette_mode.currentText()
 
         if mode == 'Exact':
-            if result == int(self.roulette_number.value()):
+            if result == exact:
                 payout = bet * 36
         elif mode == 'Red':
             if color == 'Red':
@@ -9427,9 +9674,11 @@ class CasinoWindow(QtWidgets.QMainWindow):
 
         delta = -bet + payout
         new_bal = change_balance(delta)
+        self.roulette_result.setStyleSheet('font-size:32px; font-weight:900; color:#ffffff;')
         self.roulette_result.setText(f'Resultado: {result} ({color})')
         if payout > 0:
             self.refresh_balance(f'Roulette: +EUR {payout:.2f} (neto {delta:+.2f})')
+            unlock_for_event('win', 'casino_roulette', limit=2)
         else:
             self.refresh_balance(f'Roulette: -EUR {bet:.2f}')
         self.balance_lbl.setText(f'Balance: EUR {new_bal:.2f}')
@@ -9444,7 +9693,7 @@ class CasinoWindow(QtWidgets.QMainWindow):
         self.bj_bet = QtWidgets.QSpinBox()
         self.bj_bet.setRange(1, 1000)
         self.bj_bet.setValue(15)
-        btn = QtWidgets.QPushButton('Play Hand')
+        btn = QtWidgets.QPushButton('Play Hand (Animated Deal)')
         btn.clicked.connect(self.play_blackjack)
         row.addWidget(QtWidgets.QLabel('Bet:'))
         row.addWidget(self.bj_bet)
@@ -9462,18 +9711,44 @@ class CasinoWindow(QtWidgets.QMainWindow):
         return w
 
     def play_blackjack(self):
+        if self._bj_timer.isActive():
+            self.refresh_balance('Blackjack deal in progress...')
+            return
         bet = int(self.bj_bet.value())
         bal = get_balance()
         if bet <= 0 or bet > bal:
             self.refresh_balance('Apuesta inválida para blackjack.')
             return
-        player = random.randint(14, 23)
-        dealer = random.randint(14, 23)
+        p1 = random.randint(2, 11)
+        p2 = random.randint(2, 11)
+        d1 = random.randint(2, 11)
+        d2 = random.randint(2, 11)
+        player = p1 + p2 + random.randint(0, 9)
+        dealer = d1 + d2 + random.randint(0, 9)
+        self._bj_steps = [
+            f'Player deals {p1}, Dealer deals {d1}',
+            f'Player draws {p2}, Dealer draws hidden',
+            f'Player total now ~ {p1 + p2}, Dealer showing {d1}',
+            f'Final hand -> Player {player} | Dealer {dealer}',
+        ]
+        self._bj_step_idx = 0
+        self._bj_pending = {'bet': bet, 'player': player, 'dealer': dealer}
+        self._bj_timer.start(260)
+        self.refresh_balance('Blackjack dealing...')
+
+    def _blackjack_tick(self):
+        if self._bj_step_idx < len(self._bj_steps):
+            self.bj_result.setText(self._bj_steps[self._bj_step_idx])
+            self._bj_step_idx += 1
+            return
+        self._bj_timer.stop()
+        bet = int(self._bj_pending.get('bet') or 0)
+        player = int(self._bj_pending.get('player') or 0)
+        dealer = int(self._bj_pending.get('dealer') or 0)
         payout = 0
-        msg = 'Empate'
+        msg = 'Push'
         if player > 21:
             msg = 'Te pasaste'
-            payout = 0
         elif dealer > 21 or player > dealer:
             msg = 'Ganaste'
             payout = bet * 2
@@ -9482,18 +9757,342 @@ class CasinoWindow(QtWidgets.QMainWindow):
             payout = bet
         else:
             msg = 'Perdiste'
-            payout = 0
         delta = -bet + payout
         new_bal = change_balance(delta)
         self.bj_result.setText(f'Player: {player} | Dealer: {dealer} -> {msg}')
         self.refresh_balance(f'Blackjack neto: {delta:+.2f}')
+        if payout > bet:
+            unlock_for_event('win', 'casino_blackjack', limit=2)
         self.balance_lbl.setText(f'Balance: EUR {new_bal:.2f}')
+
+    def _hilo_tab(self):
+        w = QtWidgets.QWidget()
+        v = QtWidgets.QVBoxLayout(w)
+        v.setContentsMargins(16, 16, 16, 16)
+        v.setSpacing(10)
+        self.hilo_card_lbl = QtWidgets.QLabel('Current card: ?')
+        self.hilo_card_lbl.setObjectName('result')
+        self.hilo_card_lbl.setAlignment(QtCore.Qt.AlignCenter)
+        row = QtWidgets.QHBoxLayout()
+        self.hilo_bet = QtWidgets.QSpinBox()
+        self.hilo_bet.setRange(1, 1000)
+        self.hilo_bet.setValue(12)
+        self.hilo_high = QtWidgets.QPushButton('Higher')
+        self.hilo_low = QtWidgets.QPushButton('Lower')
+        self.hilo_high.clicked.connect(lambda: self.play_hilo('high'))
+        self.hilo_low.clicked.connect(lambda: self.play_hilo('low'))
+        row.addWidget(QtWidgets.QLabel('Bet:'))
+        row.addWidget(self.hilo_bet)
+        row.addWidget(self.hilo_high)
+        row.addWidget(self.hilo_low)
+        row.addStretch(1)
+        hint = QtWidgets.QLabel('Adivina si la siguiente carta sera mayor o menor. Acierto x2, empate push.')
+        hint.setStyleSheet('font-size:16px; color:#d4e9d4;')
+        v.addWidget(self.hilo_card_lbl)
+        v.addLayout(row)
+        v.addWidget(hint)
+        v.addStretch(1)
+        return w
+
+    def _update_hilo_card(self):
+        names = {1: 'A', 11: 'J', 12: 'Q', 13: 'K'}
+        text = names.get(int(self.hilo_card), str(int(self.hilo_card)))
+        self.hilo_card_lbl.setText(f'Current card: {text}')
+
+    def play_hilo(self, guess):
+        bet = int(self.hilo_bet.value())
+        bal = get_balance()
+        if bet <= 0 or bet > bal:
+            self.refresh_balance('Apuesta inválida para Hi-Lo.')
+            return
+        prev = int(self.hilo_card)
+        nxt = random.randint(1, 13)
+        self.hilo_card = nxt
+        self._update_hilo_card()
+        payout = 0
+        if nxt == prev:
+            payout = bet
+            msg = f'Empate ({prev}->{nxt}), push.'
+        elif (guess == 'high' and nxt > prev) or (guess == 'low' and nxt < prev):
+            payout = bet * 2
+            msg = f'Acierto ({prev}->{nxt}), ganaste.'
+        else:
+            msg = f'Fallaste ({prev}->{nxt}).'
+        delta = -bet + payout
+        new_bal = change_balance(delta)
+        self.refresh_balance(f'Hi-Lo: {msg} Neto {delta:+.2f}')
+        if payout > bet:
+            unlock_for_event('win', 'casino_hilo', limit=2)
+        self.balance_lbl.setText(f'Balance: EUR {new_bal:.2f}')
+
+    def _coin_tab(self):
+        w = QtWidgets.QWidget()
+        v = QtWidgets.QVBoxLayout(w)
+        v.setContentsMargins(16, 16, 16, 16)
+        v.setSpacing(10)
+        self.coin_face_lbl = QtWidgets.QLabel('Coin: HEADS')
+        self.coin_face_lbl.setObjectName('result')
+        self.coin_face_lbl.setAlignment(QtCore.Qt.AlignCenter)
+        row = QtWidgets.QHBoxLayout()
+        self.coin_bet = QtWidgets.QSpinBox()
+        self.coin_bet.setRange(1, 1000)
+        self.coin_bet.setValue(10)
+        self.coin_pick = QtWidgets.QComboBox()
+        self.coin_pick.addItems(['HEADS', 'TAILS'])
+        self.coin_btn = QtWidgets.QPushButton('Flip Coin (Animated)')
+        self.coin_btn.clicked.connect(self.play_coin)
+        row.addWidget(QtWidgets.QLabel('Bet:'))
+        row.addWidget(self.coin_bet)
+        row.addWidget(QtWidgets.QLabel('Pick:'))
+        row.addWidget(self.coin_pick)
+        row.addWidget(self.coin_btn)
+        row.addStretch(1)
+        hint = QtWidgets.QLabel('Acierto x2, fallo pierde apuesta.')
+        hint.setStyleSheet('font-size:16px; color:#d4e9d4;')
+        v.addWidget(self.coin_face_lbl)
+        v.addLayout(row)
+        v.addWidget(hint)
+        v.addStretch(1)
+        return w
+
+    def play_coin(self):
+        if self._coin_timer.isActive():
+            self.refresh_balance('Coin animation in progress...')
+            return
+        bet = int(self.coin_bet.value())
+        bal = get_balance()
+        if bet <= 0 or bet > bal:
+            self.refresh_balance('Apuesta inválida para Coin Flip.')
+            return
+        self._coin_pending = {'bet': bet, 'pick': str(self.coin_pick.currentText()).strip().upper()}
+        self._coin_target = random.choice(['HEADS', 'TAILS'])
+        self._coin_ticks = 0
+        self._coin_timer.start(90)
+        self.refresh_balance('Coin flipping...')
+
+    def _coin_tick(self):
+        self._coin_ticks += 1
+        side = 'HEADS' if self._coin_ticks % 2 == 0 else 'TAILS'
+        self.coin_face_lbl.setText(f'Coin: {side}')
+        if self._coin_ticks < 16:
+            return
+        self._coin_timer.stop()
+        self.coin_face_lbl.setText(f'Coin: {self._coin_target}')
+        bet = int(self._coin_pending.get('bet') or 0)
+        pick = str(self._coin_pending.get('pick') or 'HEADS')
+        payout = bet * 2 if pick == self._coin_target else 0
+        delta = -bet + payout
+        new_bal = change_balance(delta)
+        if payout > 0:
+            self.refresh_balance(f'Coin Flip win: +EUR {payout:.2f} (neto {delta:+.2f})')
+            unlock_for_event('win', 'casino_coin', limit=2)
+        else:
+            self.refresh_balance(f'Coin Flip lose: -EUR {bet:.2f}')
+        self.balance_lbl.setText(f'Balance: EUR {new_bal:.2f}')
+
+    def _online_tab(self):
+        w = QtWidgets.QWidget()
+        root = QtWidgets.QVBoxLayout(w)
+        root.setContentsMargins(16, 16, 16, 16)
+        root.setSpacing(10)
+
+        row1 = QtWidgets.QHBoxLayout()
+        self.online_room_edit = QtWidgets.QLineEdit(self.online_room)
+        self.online_room_edit.setPlaceholderText('Room name')
+        btn_set_room = QtWidgets.QPushButton('Set Room')
+        self.online_toggle = QtWidgets.QPushButton('Online: ON')
+        btn_set_room.clicked.connect(self._set_online_room)
+        self.online_toggle.clicked.connect(self._toggle_online)
+        row1.addWidget(QtWidgets.QLabel('Room:'))
+        row1.addWidget(self.online_room_edit, 1)
+        row1.addWidget(btn_set_room)
+        row1.addWidget(self.online_toggle)
+
+        row2 = QtWidgets.QHBoxLayout()
+        self.online_bet = QtWidgets.QSpinBox()
+        self.online_bet.setRange(1, 1000)
+        self.online_bet.setValue(20)
+        self.online_roll_btn = QtWidgets.QPushButton('Roll Online')
+        self.online_roll_btn.clicked.connect(self.play_online_dice)
+        self.online_last_lbl = QtWidgets.QLabel('Your roll: -')
+        self.online_last_lbl.setStyleSheet('font-size:20px; font-weight:800; color:#d5ffd5;')
+        row2.addWidget(QtWidgets.QLabel('Stake:'))
+        row2.addWidget(self.online_bet)
+        row2.addWidget(self.online_roll_btn)
+        row2.addStretch(1)
+        row2.addWidget(self.online_last_lbl)
+
+        body = QtWidgets.QHBoxLayout()
+        self.online_feed = QtWidgets.QListWidget()
+        self.online_board = QtWidgets.QListWidget()
+        self.online_feed.setMinimumWidth(640)
+        self.online_board.setMinimumWidth(300)
+        body.addWidget(self.online_feed, 2)
+        body.addWidget(self.online_board, 1)
+
+        self.online_status = QtWidgets.QLabel('Online duel compares your roll against room median from real players.')
+        self.online_status.setStyleSheet('font-size:16px; color:#d4e9d4;')
+
+        root.addLayout(row1)
+        root.addLayout(row2)
+        root.addLayout(body, 1)
+        root.addWidget(self.online_status)
+        return w
+
+    def _set_online_room(self):
+        room = str(self.online_room_edit.text() or '').strip().lower()
+        if not room:
+            room = 'global'
+        if len(room) > 60:
+            room = room[:60]
+        self.online_room = ''.join(ch if ch.isalnum() or ch in ('-', '_', '.') else '-' for ch in room)
+        self.online_room_edit.setText(self.online_room)
+        self.online_status.setText(f'Online room set: {self.online_room}')
+        self._refresh_online_board()
+
+    def _toggle_online(self):
+        self.relay.set_enabled(not self.relay.enabled)
+        if self.relay.enabled:
+            self.online_toggle.setText('Online: ON')
+            self.online_status.setText(f'Online enabled on topic {self.relay.topic}')
+        else:
+            self.online_toggle.setText('Online: OFF')
+            self.online_status.setText('Online disabled')
+
+    def _record_roll(self, payload, local=False):
+        item = {
+            'from': str(payload.get('from') or 'Unknown'),
+            'room': str(payload.get('room') or 'global'),
+            'roll': int(payload.get('roll') or 0),
+            'stake': int(payload.get('stake') or 0),
+            'game': str(payload.get('game') or 'dice_duel'),
+            'ts': float(payload.get('ts') or time.time()),
+            'local': bool(local),
+        }
+        self.online_rolls.append(item)
+        if len(self.online_rolls) > 700:
+            self.online_rolls = self.online_rolls[-500:]
+        if item['room'] == self.online_room:
+            stamp = time.strftime('%H:%M:%S', time.localtime(item['ts']))
+            prefix = 'YOU' if local else item['from']
+            self.online_feed.insertItem(0, f"[{stamp}] {prefix} rolled {item['roll']} (stake {item['stake']})")
+            while self.online_feed.count() > 90:
+                self.online_feed.takeItem(self.online_feed.count() - 1)
+        self._refresh_online_board()
+
+    def _refresh_online_board(self):
+        now = time.time()
+        room_events = [
+            e for e in self.online_rolls
+            if str(e.get('room')) == self.online_room and (now - float(e.get('ts', 0))) <= 1800.0
+        ]
+        stats = {}
+        for e in room_events:
+            who = str(e.get('from') or 'Unknown')
+            data = stats.setdefault(who, {'sum': 0.0, 'n': 0, 'high': 0})
+            roll = int(e.get('roll') or 0)
+            data['sum'] += float(roll)
+            data['n'] += 1
+            data['high'] = max(int(data['high']), roll)
+        ranking = []
+        for who, d in stats.items():
+            avg = float(d['sum']) / max(1, int(d['n']))
+            ranking.append((avg, int(d['high']), int(d['n']), who))
+        ranking.sort(key=lambda x: (-x[0], -x[1], -x[2], x[3].lower()))
+        self.online_board.clear()
+        if not ranking:
+            self.online_board.addItem('No online players yet in this room.')
+            return
+        for i, (avg, high, n, who) in enumerate(ranking[:14], 1):
+            self.online_board.addItem(f'{i:02d}. {who} | AVG {avg:.1f} | HIGH {high} | ROUNDS {n}')
+
+    def play_online_dice(self):
+        if not self.relay.enabled:
+            self.refresh_balance('Online mode is disabled.')
+            return
+        stake = int(self.online_bet.value())
+        bal = get_balance()
+        if stake <= 0 or stake > bal:
+            self.refresh_balance('Stake invalid for online duel.')
+            return
+        room = str(self.online_room or 'global')
+        now = time.time()
+        opponent_rolls = [
+            int(e.get('roll') or 0)
+            for e in self.online_rolls
+            if str(e.get('room')) == room
+            and str(e.get('from')) != self.nickname
+            and (now - float(e.get('ts', 0))) <= 900.0
+        ]
+        roll = random.randint(1, 100)
+        payout = 0
+        if len(opponent_rolls) < 2:
+            # Not enough opponents: no loss, no gain.
+            delta = 0
+            self.online_status.setText('Not enough online opponents yet. Stake refunded.')
+        else:
+            med = sorted(opponent_rolls)[len(opponent_rolls) // 2]
+            if roll > med:
+                payout = int(round(stake * 2.2))
+            elif roll == med:
+                payout = stake
+            delta = -stake + payout
+            self.online_status.setText(f'Opponent median: {med} | Your roll: {roll}')
+        new_bal = change_balance(delta)
+        self.balance_lbl.setText(f'Balance: EUR {new_bal:.2f}')
+        self.online_last_lbl.setText(f'Your roll: {roll}')
+        if delta > 0:
+            self.refresh_balance(f'Online duel win! Neto {delta:+.2f}')
+            unlock_for_event('social', 'casino_online_win', limit=2)
+        elif delta < 0:
+            self.refresh_balance(f'Online duel lose. Neto {delta:+.2f}')
+        else:
+            self.refresh_balance('Online duel push/refund.')
+        payload = {
+            'from': self.nickname,
+            'room': room,
+            'game': 'dice_duel',
+            'roll': int(roll),
+            'stake': int(stake),
+            'ts': float(now),
+        }
+        self._record_roll(payload, local=True)
+        try:
+            self.relay.send_roll(room, 'dice_duel', int(roll), int(stake))
+        except Exception as exc:
+            self.online_status.setText(f'Online send failed: {exc}')
+
+    def _poll_online_events(self):
+        while True:
+            try:
+                evt = self.relay.events.get_nowait()
+            except queue.Empty:
+                break
+            kind = evt[0]
+            if kind == 'status':
+                self.online_status.setText(str(evt[1]))
+                continue
+            if kind == 'roll':
+                payload = dict(evt[1] or {})
+                self._record_roll(payload, local=False)
 
     def keyPressEvent(self, e):
         if e.key() in (QtCore.Qt.Key_Escape, QtCore.Qt.Key_Back):
             self.close()
             return
         super().keyPressEvent(e)
+
+    def closeEvent(self, e):
+        for t in (self._slots_timer, self._roulette_timer, self._coin_timer, self._bj_timer, self.online_timer):
+            try:
+                t.stop()
+            except Exception:
+                pass
+        try:
+            self.relay.stop()
+        except Exception:
+            pass
+        super().closeEvent(e)
 
 
 def main():
@@ -9765,6 +10364,7 @@ PY
 #!/usr/bin/env python3
 import json
 import random
+import shlex
 import shutil
 import subprocess
 import sys
@@ -9827,6 +10427,15 @@ def _norm_item(raw):
     it['install'] = str(it.get('install', '')).strip()
     it['cover'] = str(it.get('cover', '')).strip()
     it['cover_local'] = str(it.get('cover_local', '')).strip()
+    pricing = str(it.get('pricing', '')).strip().lower()
+    if pricing not in ('free', 'paid'):
+        pricing = 'paid' if float(it['price']) > 0 else 'free'
+    it['pricing'] = pricing
+    it['purchase_url'] = str(it.get('purchase_url', '')).strip()
+    it['external_checkout'] = bool(
+        bool(it.get('external_checkout', False))
+        or (it['pricing'] == 'paid' and bool(it['purchase_url']))
+    )
     return it
 
 
@@ -10002,6 +10611,54 @@ def _curated_items():
             'desc': 'Real Game Jolt catalog filtered for FNAF fan games.',
             'launch': str(XUI_BIN / 'xui_browser.sh') + ' --hub https://gamejolt.com/games?tags=fnaf',
         },
+        {
+            'id': 'hub_paid_itch',
+            'name': 'Itch.io Paid Games Hub',
+            'price': 0,
+            'pricing': 'paid',
+            'external_checkout': True,
+            'purchase_url': 'https://itch.io/games/price-paid',
+            'category': 'Games',
+            'source': 'Itch.io',
+            'desc': 'Browse paid games on Itch.io. Purchase happens on official Itch pages.',
+            'launch': str(XUI_BIN / 'xui_browser.sh') + ' --hub https://itch.io/games/price-paid',
+        },
+        {
+            'id': 'hub_paid_gamejolt_market',
+            'name': 'Game Jolt Marketplace',
+            'price': 0,
+            'pricing': 'paid',
+            'external_checkout': True,
+            'purchase_url': 'https://gamejolt.com/marketplace',
+            'category': 'Games',
+            'source': 'Game Jolt',
+            'desc': 'Paid creator content and products on Game Jolt official marketplace.',
+            'launch': str(XUI_BIN / 'xui_browser.sh') + ' --hub https://gamejolt.com/marketplace',
+        },
+        {
+            'id': 'hub_paid_steam',
+            'name': 'Steam Paid Games Hub',
+            'price': 0,
+            'pricing': 'paid',
+            'external_checkout': True,
+            'purchase_url': 'https://store.steampowered.com/search/?maxprice=70',
+            'category': 'Games',
+            'source': 'Steam',
+            'desc': 'Paid games on Steam store. Purchase is completed on official Steam pages.',
+            'launch': str(XUI_BIN / 'xui_browser.sh') + ' --hub https://store.steampowered.com/search/?maxprice=70',
+        },
+        {
+            'id': 'hub_paid_gog',
+            'name': 'GOG Paid Games Hub',
+            'price': 0,
+            'pricing': 'paid',
+            'external_checkout': True,
+            'purchase_url': 'https://www.gog.com/en/games',
+            'category': 'Games',
+            'source': 'GOG',
+            'desc': 'Paid PC games catalog on GOG official store.',
+            'launch': str(XUI_BIN / 'xui_browser.sh') + ' --hub https://www.gog.com/en/games',
+        },
     ]
 
 def _rotation_key():
@@ -10153,7 +10810,13 @@ class StoreTile(QtWidgets.QFrame):
 
     def _price_text(self):
         price = float(self.item.get('price', 0))
-        return 'FREE' if price <= 0 else f'EUR {price:.2f}'
+        pricing = str(self.item.get('pricing', 'free')).strip().lower()
+        external_paid = bool(self.item.get('external_checkout', False))
+        if pricing == 'paid' and external_paid:
+            return 'PAID'
+        if pricing == 'free' or price <= 0:
+            return 'FREE'
+        return f'EUR {price:.2f}'
 
     def _build(self):
         c1, c2 = self._tile_colors()
@@ -10531,6 +11194,8 @@ class StoreWindow(QtWidgets.QMainWindow):
         'Windows 8': {'Apps', 'Themes'},
         'Windows Phone': {'Accessories', 'MiniGames'},
         'Web': {'Browser'},
+        'Free': 'pricing:free',
+        'Paid': 'pricing:paid',
     }
 
     def __init__(self):
@@ -10648,7 +11313,7 @@ class StoreWindow(QtWidgets.QMainWindow):
         filters = QtWidgets.QHBoxLayout()
         filters.setContentsMargins(0, 0, 0, 0)
         filters.setSpacing(2)
-        for name in ['Xbox One', 'Xbox 360', 'Windows 8', 'Windows Phone', 'Web', 'All']:
+        for name in ['Xbox One', 'Xbox 360', 'Windows 8', 'Windows Phone', 'Web', 'Free', 'Paid', 'All']:
             b = QtWidgets.QPushButton(name)
             b.setObjectName('platform_btn')
             b.clicked.connect(lambda _=False, name=name: self.set_category(name))
@@ -11039,7 +11704,12 @@ class StoreWindow(QtWidgets.QMainWindow):
     def _item_matches(self, item):
         cat = str(item.get('category', 'Apps'))
         allowed = self.FILTER_MAP.get(self.category)
-        if allowed and cat not in allowed:
+        if isinstance(allowed, str) and allowed.startswith('pricing:'):
+            want = allowed.split(':', 1)[1].strip().lower()
+            pricing = str(item.get('pricing', 'free')).strip().lower()
+            if pricing != want:
+                return False
+        elif allowed and cat not in allowed:
             return False
         q = self.search_text.strip().lower()
         if not q:
@@ -11049,6 +11719,8 @@ class StoreWindow(QtWidgets.QMainWindow):
             str(item.get('desc', '')),
             str(item.get('id', '')),
             cat,
+            str(item.get('pricing', '')),
+            str(item.get('source', '')),
         ]).lower()
         return q in blob
 
@@ -11164,6 +11836,7 @@ class StoreWindow(QtWidgets.QMainWindow):
             self.sel_name.setText('Select an item')
             self.sel_meta.setText('Category | Price | State')
             self.sel_desc.setText('Choose a tile to view details.')
+            self.buy_btn.setText('Buy')
             self.buy_btn.setEnabled(False)
             self.install_btn.setEnabled(False)
             self.launch_btn.setEnabled(False)
@@ -11173,17 +11846,31 @@ class StoreWindow(QtWidgets.QMainWindow):
         cat = str(item.get('category', 'Apps'))
         desc = str(item.get('desc', 'No description available.'))
         price = float(item.get('price', 0))
-        price_txt = 'FREE' if price <= 0 else f'EUR {price:.2f}'
+        pricing = str(item.get('pricing', 'free')).strip().lower()
+        external_paid = bool(item.get('external_checkout', False)) and pricing == 'paid'
+        if external_paid:
+            price_txt = 'PAID (Official Store)'
+        elif pricing == 'paid':
+            price_txt = f'EUR {price:.2f}' if price > 0 else 'PAID'
+        else:
+            price_txt = 'FREE'
         owned = iid in self._inventory_ids()
-        state = 'OWNED' if owned else 'NOT OWNED'
+        state = 'OFFICIAL PURCHASE' if external_paid else ('OWNED' if owned else 'NOT OWNED')
         source = str(item.get('source', 'XUI'))
+        install_cmd = str(item.get('install', '')).strip()
+        launch_cmd = str(item.get('launch', '')).strip()
+        purchase_url = str(item.get('purchase_url', '')).strip()
 
         self.sel_name.setText(name)
         self.sel_meta.setText(f'{cat} | {source} | {price_txt} | {state}')
         self.sel_desc.setText(desc)
-        self.buy_btn.setEnabled(not owned)
-        self.install_btn.setEnabled(bool(str(item.get('install', '')).strip()))
-        can_launch = bool(str(item.get('launch', '')).strip()) and (owned or price <= 0)
+        self.buy_btn.setText('Buy Official' if external_paid else 'Buy')
+        if external_paid:
+            self.buy_btn.setEnabled(bool(purchase_url or launch_cmd))
+        else:
+            self.buy_btn.setEnabled((pricing == 'paid') and (not owned))
+        self.install_btn.setEnabled(bool(install_cmd) and (owned or pricing == 'free'))
+        can_launch = bool(launch_cmd) and (owned or pricing == 'free' or external_paid)
         self.launch_btn.setEnabled(can_launch)
 
     def reload(self, msg=''):
@@ -11216,9 +11903,26 @@ class StoreWindow(QtWidgets.QMainWindow):
         name = str(item.get('name', item.get('id', 'Item')))
         price = float(item.get('price', 0))
         iid = str(item.get('id', name))
+        pricing = str(item.get('pricing', 'free')).strip().lower()
+        external_paid = bool(item.get('external_checkout', False)) and pricing == 'paid'
+        purchase_url = str(item.get('purchase_url', '')).strip()
+        if external_paid:
+            if purchase_url:
+                target_cmd = str(XUI_BIN / 'xui_browser.sh') + ' --hub ' + shlex.quote(purchase_url)
+            else:
+                target_cmd = str(item.get('launch', '')).strip()
+            if not target_cmd:
+                self.reload('Official purchase page is missing for this item.')
+                return
+            self._run_detached(target_cmd)
+            self.reload(f'Opening official purchase page: {name}')
+            return
         inv_ids = self._inventory_ids()
         if iid in inv_ids:
             self.reload(f'You already own: {name}')
+            return
+        if pricing != 'paid':
+            self.reload('This item is free. Use Launch or Install.')
             return
         bal = get_balance()
         if bal < price:
@@ -11260,12 +11964,17 @@ class StoreWindow(QtWidgets.QMainWindow):
             self.reload('Select an item to install first.')
             return
         iid = str(item.get('id', ''))
+        pricing = str(item.get('pricing', 'free')).strip().lower()
+        external_paid = bool(item.get('external_checkout', False)) and pricing == 'paid'
         inv_ids = self._inventory_ids()
-        if iid not in inv_ids and float(item.get('price', 0)) > 0:
+        if iid not in inv_ids and pricing == 'paid' and not external_paid:
             self.reload('Buy this item before running install.')
             return
         cmd = str(item.get('install', '')).strip()
         if not cmd:
+            if external_paid:
+                self.reload('Paid external item: use Buy Official to purchase from the source store.')
+                return
             self.reload('This item does not need installation.')
             return
         if iid == 'game_fnae_fangame':
@@ -11291,11 +12000,17 @@ class StoreWindow(QtWidgets.QMainWindow):
             self.reload('Select an item to launch first.')
             return
         iid = str(item.get('id', ''))
+        pricing = str(item.get('pricing', 'free')).strip().lower()
+        external_paid = bool(item.get('external_checkout', False)) and pricing == 'paid'
         inv_ids = self._inventory_ids()
-        if iid not in inv_ids and float(item.get('price', 0)) > 0:
+        if iid not in inv_ids and pricing == 'paid' and not external_paid:
             self.reload('Buy this item before launching.')
             return
         cmd = str(item.get('launch', '')).strip()
+        if not cmd and external_paid:
+            purchase_url = str(item.get('purchase_url', '')).strip()
+            if purchase_url:
+                cmd = str(XUI_BIN / 'xui_browser.sh') + ' --hub ' + shlex.quote(purchase_url)
         if not cmd:
             self.reload('No launcher defined for this item.')
             return
@@ -11679,6 +12394,7 @@ def flathub_items(limit=260):
                 'id': rid,
                 'name': name,
                 'price': 0,
+                'pricing': 'free',
                 'category': 'Games',
                 'source': 'Flathub',
                 'desc': summary,
@@ -11692,62 +12408,185 @@ def flathub_items(limit=260):
     return items
 
 def curated_web_sources():
-    # Real games and official hubs from Itch.io / Game Jolt / ModDB.
-    games = [
-        ('itch_holocure', 'HoloCure (Itch.io)', 'https://kay-yu.itch.io/holocure', 0, 'https://itch.io/favicon.ico'),
-        ('itch_deltarune', 'DELTARUNE (Itch.io)', 'https://tobyfox.itch.io/deltarune', 0, 'https://itch.io/favicon.ico'),
-        ('itch_oneshot_fangame', 'OneShot Fangames (Itch.io)', 'https://itch.io/games/tag-oneshot', 0, 'https://itch.io/favicon.ico'),
-        ('itch_horror_spotlight', 'Itch.io Horror Spotlight', 'https://itch.io/games/tag-horror', 0, 'https://itch.io/favicon.ico'),
-        ('gj_fnaf_fangames', 'FNAF Fan Games (Game Jolt)', 'https://gamejolt.com/games?tags=fnaf', 0, 'https://m.gjcdn.net/assets/favicons/favicon-196x196.png'),
-        ('gj_horror_spotlight', 'Game Jolt Horror Spotlight', 'https://gamejolt.com/games?tags=horror', 0, 'https://m.gjcdn.net/assets/favicons/favicon-196x196.png'),
-        ('gj_platformer_spotlight', 'Game Jolt Platformer Spotlight', 'https://gamejolt.com/games?tags=platformer', 0, 'https://m.gjcdn.net/assets/favicons/favicon-196x196.png'),
-        ('moddb_openra', 'OpenRA (ModDB)', 'https://www.moddb.com/games/openra', 0, 'https://www.moddb.com/favicon.ico'),
-        ('moddb_xonotic', 'Xonotic (ModDB)', 'https://www.moddb.com/games/xonotic', 0, 'https://www.moddb.com/favicon.ico'),
-        ('moddb_0ad', '0 A.D. (ModDB)', 'https://www.moddb.com/games/0-ad', 0, 'https://www.moddb.com/favicon.ico'),
-        ('moddb_wesnoth', 'Battle for Wesnoth (ModDB)', 'https://www.moddb.com/games/the-battle-for-wesnoth', 0, 'https://www.moddb.com/favicon.ico'),
+    # Real cards from official pages. Paid cards always redirect to official checkout.
+    entries = [
+        {
+            'id': 'itch_holocure',
+            'name': 'HoloCure (Itch.io)',
+            'url': 'https://kay-yu.itch.io/holocure',
+            'source': 'Itch.io',
+            'cover': 'https://itch.io/favicon.ico',
+            'desc': 'Real game page from Itch.io.',
+            'pricing': 'free',
+            'price': 0.0,
+        },
+        {
+            'id': 'itch_deltarune',
+            'name': 'DELTARUNE (Itch.io)',
+            'url': 'https://tobyfox.itch.io/deltarune',
+            'source': 'Itch.io',
+            'cover': 'https://itch.io/favicon.ico',
+            'desc': 'Real game page from Itch.io.',
+            'pricing': 'free',
+            'price': 0.0,
+        },
+        {
+            'id': 'itch_horror_spotlight',
+            'name': 'Itch.io Horror Spotlight',
+            'url': 'https://itch.io/games/tag-horror',
+            'source': 'Itch.io',
+            'cover': 'https://itch.io/favicon.ico',
+            'desc': 'Browse horror games on Itch.io.',
+            'pricing': 'free',
+            'price': 0.0,
+        },
+        {
+            'id': 'gj_fnaf_fangames',
+            'name': 'FNAF Fan Games (Game Jolt)',
+            'url': 'https://gamejolt.com/games?tags=fnaf',
+            'source': 'Game Jolt',
+            'cover': 'https://m.gjcdn.net/assets/favicons/favicon-196x196.png',
+            'desc': 'Real Game Jolt catalog filtered by FNAF.',
+            'pricing': 'free',
+            'price': 0.0,
+        },
+        {
+            'id': 'gj_horror_spotlight',
+            'name': 'Game Jolt Horror Spotlight',
+            'url': 'https://gamejolt.com/games?tags=horror',
+            'source': 'Game Jolt',
+            'cover': 'https://m.gjcdn.net/assets/favicons/favicon-196x196.png',
+            'desc': 'Browse horror games on Game Jolt.',
+            'pricing': 'free',
+            'price': 0.0,
+        },
+        {
+            'id': 'moddb_openra',
+            'name': 'OpenRA (ModDB)',
+            'url': 'https://www.moddb.com/games/openra',
+            'source': 'ModDB',
+            'cover': 'https://www.moddb.com/favicon.ico',
+            'desc': 'Real game page on ModDB.',
+            'pricing': 'free',
+            'price': 0.0,
+        },
+        {
+            'id': 'moddb_xonotic',
+            'name': 'Xonotic (ModDB)',
+            'url': 'https://www.moddb.com/games/xonotic',
+            'source': 'ModDB',
+            'cover': 'https://www.moddb.com/favicon.ico',
+            'desc': 'Real game page on ModDB.',
+            'pricing': 'free',
+            'price': 0.0,
+        },
+        {
+            'id': 'moddb_0ad',
+            'name': '0 A.D. (ModDB)',
+            'url': 'https://www.moddb.com/games/0-ad',
+            'source': 'ModDB',
+            'cover': 'https://www.moddb.com/favicon.ico',
+            'desc': 'Real game page on ModDB.',
+            'pricing': 'free',
+            'price': 0.0,
+        },
+        {
+            'id': 'itch_hub_free',
+            'name': 'Itch.io Free Games Hub',
+            'url': 'https://itch.io/games/free',
+            'source': 'Itch.io',
+            'cover': 'https://itch.io/favicon.ico',
+            'desc': 'Browse free games on Itch.io.',
+            'pricing': 'free',
+            'price': 0.0,
+        },
+        {
+            'id': 'gamejolt_hub_games',
+            'name': 'Game Jolt Games Hub',
+            'url': 'https://gamejolt.com/games',
+            'source': 'Game Jolt',
+            'cover': 'https://m.gjcdn.net/assets/favicons/favicon-196x196.png',
+            'desc': 'Browse free and paid games on Game Jolt.',
+            'pricing': 'free',
+            'price': 0.0,
+        },
+        {
+            'id': 'moddb_hub_games',
+            'name': 'ModDB Games Hub',
+            'url': 'https://www.moddb.com/games',
+            'source': 'ModDB',
+            'cover': 'https://www.moddb.com/favicon.ico',
+            'desc': 'Browse game pages on ModDB.',
+            'pricing': 'free',
+            'price': 0.0,
+        },
+        {
+            'id': 'itch_hub_paid',
+            'name': 'Itch.io Paid Games Hub',
+            'url': 'https://itch.io/games/price-paid',
+            'source': 'Itch.io',
+            'cover': 'https://itch.io/favicon.ico',
+            'desc': 'Paid games on Itch.io. Purchase happens on official pages.',
+            'pricing': 'paid',
+            'price': 0.0,
+            'external_checkout': True,
+            'purchase_url': 'https://itch.io/games/price-paid',
+        },
+        {
+            'id': 'gamejolt_hub_market',
+            'name': 'Game Jolt Marketplace',
+            'url': 'https://gamejolt.com/marketplace',
+            'source': 'Game Jolt',
+            'cover': 'https://m.gjcdn.net/assets/favicons/favicon-196x196.png',
+            'desc': 'Paid products on Game Jolt Marketplace.',
+            'pricing': 'paid',
+            'price': 0.0,
+            'external_checkout': True,
+            'purchase_url': 'https://gamejolt.com/marketplace',
+        },
+        {
+            'id': 'steam_hub_paid',
+            'name': 'Steam Paid Games Hub',
+            'url': 'https://store.steampowered.com/search/?maxprice=70',
+            'source': 'Steam',
+            'cover': 'https://store.steampowered.com/favicon.ico',
+            'desc': 'Paid games on Steam official store.',
+            'pricing': 'paid',
+            'price': 0.0,
+            'external_checkout': True,
+            'purchase_url': 'https://store.steampowered.com/search/?maxprice=70',
+        },
+        {
+            'id': 'gog_hub_paid',
+            'name': 'GOG Paid Games Hub',
+            'url': 'https://www.gog.com/en/games',
+            'source': 'GOG',
+            'cover': 'https://www.gog.com/favicon.ico',
+            'desc': 'Paid games on GOG official store.',
+            'pricing': 'paid',
+            'price': 0.0,
+            'external_checkout': True,
+            'purchase_url': 'https://www.gog.com/en/games',
+        },
     ]
     out = []
-    for rid, name, url, price, cover in games:
-        if rid.startswith('itch_'):
-            src = 'Itch.io'
-        elif rid.startswith('gj_'):
-            src = 'Game Jolt'
-        else:
-            src = 'ModDB'
+    for entry in entries:
+        rid = str(entry.get('id', '')).strip()
+        url = str(entry.get('url', '')).strip()
+        if not rid or not url:
+            continue
+        cover = str(entry.get('cover', '')).strip()
         cover_local = cache_cover(cover, rid)
         out.append({
             'id': rid,
-            'name': name,
-            'price': float(max(0, price)),
+            'name': str(entry.get('name', rid)),
+            'price': float(max(0.0, float(entry.get('price', 0.0)))),
+            'pricing': str(entry.get('pricing', 'free')).strip().lower(),
+            'external_checkout': bool(entry.get('external_checkout', False)),
+            'purchase_url': str(entry.get('purchase_url', '')).strip(),
             'category': 'Games',
-            'source': src,
-            'desc': f'Real game/source card from {src}.',
-            'cover': cover,
-            'cover_local': cover_local,
-            'launch': str(BIN / 'xui_browser.sh') + f' --hub {url}',
-        })
-    # Source hubs for discovery.
-    hubs = [
-        ('itch_hub_free', 'Itch.io Free Games Hub', 'https://itch.io/favicon.ico', 'https://itch.io/games/free', 'Browse free games on Itch.io.'),
-        ('itch_hub_popular', 'Itch.io Popular Hub', 'https://itch.io/favicon.ico', 'https://itch.io/games/popular', 'Browse popular games on Itch.io.'),
-        ('gamejolt_hub_games', 'Game Jolt Games Hub', 'https://m.gjcdn.net/assets/favicons/favicon-196x196.png', 'https://gamejolt.com/games', 'Browse Game Jolt games.'),
-        ('moddb_hub_games', 'ModDB Games Hub', 'https://www.moddb.com/favicon.ico', 'https://www.moddb.com/games', 'Browse ModDB games.'),
-    ]
-    for rid, name, cover, url, desc in hubs:
-        cover_local = cache_cover(cover, rid)
-        if 'itch' in rid:
-            src = 'Itch.io'
-        elif 'moddb' in rid:
-            src = 'ModDB'
-        else:
-            src = 'Game Jolt'
-        out.append({
-            'id': rid,
-            'name': name,
-            'price': 0.0,
-            'category': 'Games',
-            'source': src,
-            'desc': desc,
+            'source': str(entry.get('source', 'Web')),
+            'desc': str(entry.get('desc', 'Real source card')),
             'cover': cover,
             'cover_local': cover_local,
             'launch': str(BIN / 'xui_browser.sh') + f' --hub {url}',
@@ -13493,7 +14332,7 @@ fi
 
 if [ "$(id -u)" -ne 0 ]; then
     if command -v sudo >/dev/null 2>&1; then
-        if sudo -n --preserve-env=DISPLAY,XAUTHORITY,XDG_RUNTIME_DIR,DBUS_SESSION_BUS_ADDRESS,WAYLAND_DISPLAY,XDG_SESSION_TYPE,HOME,USER,LOGNAME,XUI_USER_HOME XUI_USER_HOME="$TARGET_HOME" "$0" "$@"; then
+        if sudo -n "$0" "$@"; then
             exit 0
         fi
     fi
