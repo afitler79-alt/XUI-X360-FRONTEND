@@ -1744,6 +1744,8 @@ class SocialOverlay(QtWidgets.QDialog):
         self.peer_data = {}
         self.friends = []
         self.friend_requests = []
+        self._community_mode = 'messages'
+        self._focus_zone = 0
         self.setModal(True)
         self.setWindowFlags(QtCore.Qt.Dialog | QtCore.Qt.FramelessWindowHint)
         self.setAttribute(QtCore.Qt.WA_TranslucentBackground, True)
@@ -1827,18 +1829,34 @@ class SocialOverlay(QtWidgets.QDialog):
         root.setSpacing(10)
 
         top = QtWidgets.QHBoxLayout()
-        title = QtWidgets.QLabel('social / messages')
-        title.setObjectName('social_title')
+        self.title_lbl = QtWidgets.QLabel('community / messages')
+        self.title_lbl.setObjectName('social_title')
         hint = QtWidgets.QLabel(f'gamertag: {self.nickname}')
         hint.setObjectName('social_hint')
         btn_close = QtWidgets.QPushButton('Close (ESC)')
         btn_close.clicked.connect(self.reject)
-        top.addWidget(title)
+        top.addWidget(self.title_lbl)
         top.addStretch(1)
         top.addWidget(hint)
         top.addSpacing(14)
         top.addWidget(btn_close)
         root.addLayout(top)
+
+        tabs_row = QtWidgets.QHBoxLayout()
+        tabs_row.setSpacing(8)
+        self.community_tabs = {}
+        for key, label in (
+            ('friends', 'Friends'),
+            ('party', 'Party'),
+            ('messages', 'Messages'),
+            ('players', 'Players'),
+        ):
+            b = QtWidgets.QPushButton(label)
+            b.clicked.connect(lambda _=False, mode=key: self._set_community_mode(mode))
+            self.community_tabs[key] = b
+            tabs_row.addWidget(b)
+        tabs_row.addStretch(1)
+        root.addLayout(tabs_row)
 
         body = QtWidgets.QHBoxLayout()
         body.setSpacing(10)
@@ -1848,11 +1866,11 @@ class SocialOverlay(QtWidgets.QDialog):
         left = QtWidgets.QVBoxLayout(left_wrap)
         left.setContentsMargins(8, 8, 8, 8)
         left.setSpacing(6)
-        left_lbl = QtWidgets.QLabel('Messages / Peers')
-        left_lbl.setObjectName('social_col_title')
+        self.left_lbl = QtWidgets.QLabel('Messages / Peers')
+        self.left_lbl.setObjectName('social_col_title')
         self.peers = QtWidgets.QListWidget()
         self.peers.setMinimumWidth(340)
-        left.addWidget(left_lbl)
+        left.addWidget(self.left_lbl)
         left.addWidget(self.peers, 1)
 
         center_wrap = QtWidgets.QFrame()
@@ -1916,15 +1934,244 @@ class SocialOverlay(QtWidgets.QDialog):
         self.actions.itemDoubleClicked.connect(self._run_selected_action)
         self.peers.currentItemChanged.connect(lambda *_: self._update_peer_meta())
 
-        bottom = QtWidgets.QLabel('A/ENTER = select | B/ESC = close | X = quick send | Text input opens virtual keyboard')
+        bottom = QtWidgets.QLabel('A/ENTER = select | B/ESC = close | X = quick action | Y = change community tab | LB/RB = previous/next tab')
         bottom.setObjectName('social_hint')
         root.addWidget(bottom)
+        self._refresh_community_tabs()
+        self._set_community_mode('messages')
+        self._set_focus_zone(0)
 
     def _add_action_item(self, key, text):
         it = QtWidgets.QListWidgetItem(str(text))
         it.setData(QtCore.Qt.UserRole, str(key))
         self.actions.addItem(it)
         self._action_items[str(key)] = it
+
+    def _community_order(self):
+        return ['friends', 'party', 'messages', 'players']
+
+    def _recent_players(self):
+        arr = safe_json_read(SOCIAL_MESSAGES_FILE, [])
+        if not isinstance(arr, list):
+            arr = []
+        out = []
+        seen = set()
+        for row in arr:
+            if not isinstance(row, dict):
+                continue
+            who = str(row.get('from') or '').strip()
+            if not who:
+                continue
+            low = who.lower()
+            if low.startswith('you') or '[world]' in low:
+                continue
+            clean = who.replace('[PM]', '').replace('[pm]', '').strip()
+            if not clean:
+                continue
+            if clean.lower() in seen:
+                continue
+            seen.add(clean.lower())
+            out.append({
+                'name': clean,
+                'host': '',
+                'port': 0,
+                'source': 'RECENT',
+                'last': str(row.get('text') or '').strip()[:72],
+            })
+            if len(out) >= 48:
+                break
+        return out
+
+    def _refresh_community_tabs(self):
+        friends_n = len(self.friends)
+        party_n = len([f for f in self.friends if bool(f.get('online'))])
+        messages_n = len([p for p in self.peer_data.values() if str(p.get('source')) != 'WORLD'])
+        players_n = len(self._recent_players())
+        counts = {
+            'friends': friends_n,
+            'party': party_n,
+            'messages': messages_n,
+            'players': players_n,
+        }
+        labels = {
+            'friends': 'Friends',
+            'party': 'Party',
+            'messages': 'Messages',
+            'players': 'Players',
+        }
+        for key, btn in self.community_tabs.items():
+            active = (key == self._community_mode)
+            btn.setText(f'{labels.get(key, key)} ({counts.get(key, 0)})')
+            if active:
+                btn.setStyleSheet(
+                    'QPushButton { background:qlineargradient(x1:0,y1:0,x2:1,y2:0, stop:0 #67c84a, stop:1 #3d9533);'
+                    ' color:#f4fff2; border:1px solid rgba(255,255,255,0.34); font-size:16px; font-weight:800; }'
+                )
+            else:
+                btn.setStyleSheet(
+                    'QPushButton { background:rgba(49,58,71,0.95); color:#e8f0f6; border:1px solid rgba(202,216,232,0.24);'
+                    ' font-size:16px; font-weight:700; }'
+                )
+
+    def _set_community_mode(self, mode):
+        mode = str(mode or 'messages').strip().lower()
+        if mode not in self._community_order():
+            mode = 'messages'
+        self._community_mode = mode
+        title_map = {
+            'friends': 'community / friends',
+            'party': 'community / party',
+            'messages': 'community / messages',
+            'players': 'community / players',
+        }
+        if hasattr(self, 'title_lbl'):
+            self.title_lbl.setText(title_map.get(mode, 'community / messages'))
+        if mode == 'messages':
+            self.left_lbl.setText('Messages / Peers')
+            self._rebuild_message_peers()
+        elif mode == 'friends':
+            self.left_lbl.setText('Friends')
+            self._rebuild_community_rows(self._community_friends_rows())
+        elif mode == 'party':
+            self.left_lbl.setText('Party')
+            self._rebuild_community_rows(self._community_party_rows())
+        else:
+            self.left_lbl.setText('Players')
+            self._rebuild_community_rows(self._community_players_rows())
+        self._refresh_community_tabs()
+        self._set_focus_zone(0)
+        self._update_peer_meta()
+
+    def _cycle_community_mode(self, step=1):
+        order = self._community_order()
+        cur = order.index(self._community_mode) if self._community_mode in order else 0
+        nxt = (cur + int(step)) % len(order)
+        self._set_community_mode(order[nxt])
+
+    def _community_friends_rows(self):
+        rows = []
+        for f in sorted(
+            self.friends,
+            key=lambda x: (0 if bool(x.get('online')) else 1, str(x.get('name') or '').lower()),
+        ):
+            rows.append({
+                'name': str(f.get('name') or 'Friend'),
+                'host': str(f.get('host') or ''),
+                'port': int(f.get('port') or 0),
+                'source': 'FRIEND',
+                'online': bool(f.get('online')),
+                'last_seen': int(f.get('last_seen') or 0),
+            })
+        return rows
+
+    def _community_party_rows(self):
+        rows = []
+        for f in self._community_friends_rows():
+            if bool(f.get('online')):
+                rows.append(dict(f))
+        if not rows:
+            rows = self._community_friends_rows()[:12]
+        return rows
+
+    def _community_players_rows(self):
+        return self._recent_players()
+
+    def _community_row_text(self, row):
+        name = str(row.get('name') or 'Player')
+        src = str(row.get('source') or '')
+        if src in ('FRIEND', 'PARTY'):
+            status = 'Online' if bool(row.get('online')) else 'Offline'
+            host = str(row.get('host') or '')
+            port = int(row.get('port') or 0)
+            endpoint = f' [{host}:{port}]' if host and port > 0 else ''
+            return f'{name}  -  {status}{endpoint}'
+        if src == 'RECENT':
+            last = str(row.get('last') or '').strip()
+            return f'{name}  -  {last}' if last else name
+        host = str(row.get('host') or '')
+        port = int(row.get('port') or 0)
+        if host and port > 0:
+            return f'{name}  [{host}:{port}]'
+        return name
+
+    def _rebuild_community_rows(self, rows):
+        prev = self.peers.currentItem().text() if self.peers.currentItem() is not None else ''
+        self.peers.clear()
+        self.peer_items = {}
+        keep_row = -1
+        for row in rows:
+            it = QtWidgets.QListWidgetItem(self._community_row_text(row))
+            it.setData(QtCore.Qt.UserRole, dict(row))
+            self.peers.addItem(it)
+            if keep_row < 0 and prev and it.text() == prev:
+                keep_row = self.peers.count() - 1
+        if self.peers.count() > 0:
+            if keep_row >= 0:
+                self.peers.setCurrentRow(keep_row)
+            else:
+                self.peers.setCurrentRow(0)
+
+    def _rebuild_message_peers(self):
+        self.peers.clear()
+        self.peer_items = {}
+        ordered = sorted(
+            self.peer_data.items(),
+            key=lambda kv: (0 if str(kv[1].get('source')) == 'WORLD' else 1, str(kv[1].get('name') or '').lower()),
+        )
+        for key, row in ordered:
+            it = QtWidgets.QListWidgetItem(self._peer_row(row))
+            it.setData(QtCore.Qt.UserRole, key)
+            self.peers.addItem(it)
+            self.peer_items[key] = it
+        if self.peers.count() > 0:
+            self.peers.setCurrentRow(0)
+
+    def _set_focus_zone(self, zone):
+        self._focus_zone = max(0, min(3, int(zone)))
+        if self._focus_zone == 0:
+            self.peers.setFocus(QtCore.Qt.OtherFocusReason)
+        elif self._focus_zone == 1:
+            self.actions.setFocus(QtCore.Qt.OtherFocusReason)
+        elif self._focus_zone == 2:
+            self.input.setFocus(QtCore.Qt.OtherFocusReason)
+        else:
+            self.btn_send.setFocus(QtCore.Qt.OtherFocusReason)
+
+    def _move_in_list(self, listw, delta):
+        n = int(listw.count())
+        if n <= 0:
+            return
+        row = int(listw.currentRow())
+        if row < 0:
+            row = 0
+        row = max(0, min(n - 1, row + int(delta)))
+        listw.setCurrentRow(row)
+
+    def _select_message_peer(self, host='', port=0, name=''):
+        host = str(host or '').strip().lower()
+        try:
+            port = int(port or 0)
+        except Exception:
+            port = 0
+        name = str(name or '').strip().lower()
+        for i in range(self.peers.count()):
+            it = self.peers.item(i)
+            if it is None:
+                continue
+            key = it.data(QtCore.Qt.UserRole)
+            peer = self.peer_data.get(key)
+            if not isinstance(peer, dict):
+                continue
+            ph = str(peer.get('host') or '').strip().lower()
+            pp = int(peer.get('port') or 0)
+            pn = str(peer.get('name') or '').strip().lower()
+            if host and port > 0 and ph == host and pp == port:
+                self.peers.setCurrentRow(i)
+                return True
+            if name and pn == name:
+                self.peers.setCurrentRow(i)
+                return True
+        return False
 
     def _run_selected_action(self, *_):
         it = self.actions.currentItem()
@@ -1967,6 +2214,19 @@ class SocialOverlay(QtWidgets.QDialog):
         peer = self._selected_peer()
         if not peer:
             self.peer_meta.setText('Select a peer to chat.')
+            return
+        src = str(peer.get('source') or '').upper()
+        if src in ('FRIEND', 'PARTY', 'RECENT'):
+            name = str(peer.get('name') or 'Player')
+            online = bool(peer.get('online', False))
+            host = str(peer.get('host') or '')
+            port = int(peer.get('port') or 0)
+            endpoint = f' [{host}:{port}]' if host and port > 0 else ''
+            if src == 'RECENT':
+                last = str(peer.get('last') or '').strip()
+                self.peer_meta.setText(f'{name}{endpoint}  (RECENT){(" - " + last) if last else ""}')
+            else:
+                self.peer_meta.setText(f'{name}{endpoint}  ({src})  {"Online" if online else "Offline"}')
             return
         if str(peer.get('source')) == 'WORLD':
             self.peer_meta.setText(f"WORLD relay room #{self.engine.world_topic}")
@@ -2013,10 +2273,74 @@ class SocialOverlay(QtWidgets.QDialog):
         x = parent.x() + (pw - self.width()) // 2
         y = parent.y() + (ph - self.height()) // 2
         self.move(max(0, x), max(0, y))
+        QtCore.QTimer.singleShot(0, lambda: self._set_focus_zone(self._focus_zone))
 
     def keyPressEvent(self, e):
-        if e.key() in (QtCore.Qt.Key_Escape, QtCore.Qt.Key_Back):
+        k = e.key()
+        if k in (QtCore.Qt.Key_Escape, QtCore.Qt.Key_Back):
             self.reject()
+            return
+        if k in (QtCore.Qt.Key_Prior,):
+            self._cycle_community_mode(-1)
+            return
+        if k in (QtCore.Qt.Key_Next,):
+            self._cycle_community_mode(1)
+            return
+        if k in (QtCore.Qt.Key_Y, QtCore.Qt.Key_Space):
+            self._cycle_community_mode(1)
+            return
+        if k in (QtCore.Qt.Key_Left,):
+            if self._focus_zone == 0:
+                self._cycle_community_mode(-1)
+            else:
+                self._set_focus_zone(self._focus_zone - 1)
+            return
+        if k in (QtCore.Qt.Key_Right,):
+            if self._focus_zone == 0:
+                self._cycle_community_mode(1)
+            else:
+                self._set_focus_zone(self._focus_zone + 1)
+            return
+        if k in (QtCore.Qt.Key_Up,):
+            if self._focus_zone == 0:
+                self._move_in_list(self.peers, -1)
+            elif self._focus_zone == 1:
+                self._move_in_list(self.actions, -1)
+            return
+        if k in (QtCore.Qt.Key_Down,):
+            if self._focus_zone == 0:
+                self._move_in_list(self.peers, 1)
+            elif self._focus_zone == 1:
+                self._move_in_list(self.actions, 1)
+            return
+        if k in (QtCore.Qt.Key_Tab,):
+            self._set_focus_zone((self._focus_zone + 1) % 4)
+            return
+        if k in (QtCore.Qt.Key_X,):
+            if self._focus_zone == 0 and self._community_mode in ('friends', 'party', 'players'):
+                self._send_friend_request()
+            else:
+                self._send_current()
+            return
+        if k in (QtCore.Qt.Key_Return, QtCore.Qt.Key_Enter):
+            if self._focus_zone == 0:
+                if self._community_mode == 'messages':
+                    self._open_chat_keyboard()
+                else:
+                    chosen = self._selected_peer() or {}
+                    self._set_community_mode('messages')
+                    self._select_message_peer(
+                        host=chosen.get('host'),
+                        port=chosen.get('port'),
+                        name=chosen.get('name'),
+                    )
+                    self._open_chat_keyboard()
+            elif self._focus_zone == 1:
+                self._run_selected_action()
+            elif self._focus_zone == 2:
+                self._open_chat_keyboard()
+            else:
+                self._send_current()
             return
         super().keyPressEvent(e)
 
@@ -2174,18 +2498,8 @@ class SocialOverlay(QtWidgets.QDialog):
         self._save_friend_requests()
 
     def _show_friends(self):
-        if not self.friends:
-            QtWidgets.QMessageBox.information(self, 'Friends', 'No friends yet.')
-            return
-        lines = []
-        for i, f in enumerate(self.friends, 1):
-            name = str(f.get('name') or 'Friend')
-            host = str(f.get('host') or '-')
-            port = int(f.get('port') or 0)
-            online = 'Online' if bool(f.get('online')) else 'Offline'
-            endpoint = f'{host}:{port}' if host and port > 0 else host
-            lines.append(f'{i}. {name} - {online} - {endpoint}')
-        QtWidgets.QMessageBox.information(self, 'Friends', '\n'.join(lines))
+        self._set_community_mode('friends')
+        self.status.setText('Community: Friends')
 
     def _send_friend_request(self):
         peer = self._selected_peer()
@@ -2212,41 +2526,45 @@ class SocialOverlay(QtWidgets.QDialog):
         if not self.friend_requests:
             QtWidgets.QMessageBox.information(self, 'Friend Requests', 'No pending requests.')
             return
-        lines = []
+        options = []
+        descriptions = {}
         for i, req in enumerate(self.friend_requests[:40], 1):
+            name = str(req.get('name') or 'Unknown')
+            host = str(req.get('host') or '-')
+            port = int(req.get('port') or 0)
             note = str(req.get('note') or '').strip()
-            suffix = f' | {note}' if note else ''
-            lines.append(
-                f"{i}. {req.get('name','Unknown')} [{req.get('host','-')}:{int(req.get('port') or 0)}]{suffix}"
-            )
-        idx, ok = QtWidgets.QInputDialog.getInt(
-            self,
-            'Friend Requests',
-            'Select request number to accept/reject:\n\n' + '\n'.join(lines),
-            1,
-            1,
-            len(self.friend_requests),
-            1,
-        )
-        if not ok:
+            op = f'{i:02d}. {name}'
+            options.append(op)
+            descriptions[op] = f'{host}:{port}' + (f' | {note}' if note else '')
+        options.append('Back')
+        pick = self.parent()._choose_from_menu('Friend Requests', options, descriptions) if self.parent() else None
+        if not pick or pick == 'Back':
             return
-        req = self.friend_requests[int(idx) - 1]
-        ans = QtWidgets.QMessageBox.question(
-            self,
+        try:
+            idx = int(str(pick).split('.', 1)[0]) - 1
+        except Exception:
+            return
+        if idx < 0 or idx >= len(self.friend_requests):
+            return
+        req = self.friend_requests[idx]
+        ask = self.parent()._choose_from_menu(
             'Friend Request',
-            f"Accept friend request from {req.get('name','Unknown')}?",
-            QtWidgets.QMessageBox.Yes | QtWidgets.QMessageBox.No | QtWidgets.QMessageBox.Cancel,
-            QtWidgets.QMessageBox.Yes,
-        )
-        if ans == QtWidgets.QMessageBox.Cancel:
+            ['Accept', 'Reject', 'Cancel'],
+            {
+                'Accept': f"Add {req.get('name','Unknown')} to friends.",
+                'Reject': f"Reject request from {req.get('name','Unknown')}.",
+                'Cancel': 'Go back.',
+            },
+        ) if self.parent() else None
+        if not ask or ask == 'Cancel':
             return
-        if ans == QtWidgets.QMessageBox.Yes:
+        if ask == 'Accept':
             self._upsert_friend(req.get('name'), req.get('host'), req.get('port'))
             self._append_system(f"Friend added: {req.get('name', 'Unknown')}")
             self.status.setText(f"Friend added: {req.get('name', 'Unknown')}")
         else:
             self._append_system(f"Friend request rejected: {req.get('name', 'Unknown')}")
-        self.friend_requests.pop(int(idx) - 1)
+        self.friend_requests.pop(idx)
         self._save_friend_requests()
 
     def _peer_row(self, peer):
@@ -2268,15 +2586,20 @@ class SocialOverlay(QtWidgets.QDialog):
             return
         if data['source'] != 'WORLD' and data['port'] <= 0:
             return
-        if key in self.peer_items:
+        if key in self.peer_data:
             self.peer_data[key].update(data)
+        else:
+            self.peer_data[key] = data
+        if self._community_mode != 'messages':
+            self._refresh_community_tabs()
+            return
+        if key in self.peer_items:
             self.peer_items[key].setText(self._peer_row(self.peer_data[key]))
         else:
-            it = QtWidgets.QListWidgetItem(self._peer_row(data))
+            it = QtWidgets.QListWidgetItem(self._peer_row(self.peer_data[key]))
             it.setData(QtCore.Qt.UserRole, key)
             self.peers.addItem(it)
             self.peer_items[key] = it
-            self.peer_data[key] = data
             if self.peers.currentRow() < 0:
                 self.peers.setCurrentRow(0)
         self._update_peer_meta()
@@ -2284,20 +2607,24 @@ class SocialOverlay(QtWidgets.QDialog):
             self._save_manual_peers()
 
     def _remove_peer(self, key):
-        it = self.peer_items.pop(key, None)
         self.peer_data.pop(key, None)
+        it = self.peer_items.pop(key, None)
         if it is None:
+            self._refresh_community_tabs()
             return
         row = self.peers.row(it)
         if row >= 0:
             self.peers.takeItem(row)
         self._update_peer_meta()
+        self._refresh_community_tabs()
 
     def _selected_peer(self):
         it = self.peers.currentItem()
         if not it:
             return None
         key = it.data(QtCore.Qt.UserRole)
+        if isinstance(key, dict):
+            return dict(key)
         return self.peer_data.get(key)
 
     def _host_priority(self, host):
@@ -2411,6 +2738,10 @@ class SocialOverlay(QtWidgets.QDialog):
             self._append_system('Opened global Voice/Call hub.')
         except Exception as exc:
             self.status.setText(f'Cannot open Voice/Call hub: {exc}')
+
+    def _stop_call_session(self, notify=False):
+        if notify:
+            self.status.setText('No active call session in inline social overlay.')
 
     def _load_world_settings(self):
         cfg = safe_json_read(WORLD_CHAT_FILE, {})
@@ -2582,6 +2913,14 @@ class SocialOverlay(QtWidgets.QDialog):
                 _kind, room = evt
                 self._refresh_world_peer()
                 self.status.setText(f'World room: {room}')
+        self._refresh_community_tabs()
+        if self._community_mode != 'messages':
+            if self._community_mode == 'friends':
+                self._rebuild_community_rows(self._community_friends_rows())
+            elif self._community_mode == 'party':
+                self._rebuild_community_rows(self._community_party_rows())
+            elif self._community_mode == 'players':
+                self._rebuild_community_rows(self._community_players_rows())
 
     def closeEvent(self, e):
         try:
@@ -3106,7 +3445,7 @@ class QuickMenu(QtWidgets.QDialog):
         v.addLayout(body, 1)
         self.listw.currentTextChanged.connect(self._update_description)
         self._update_description(self.selected() or '')
-        hint = QtWidgets.QLabel('ESC = Back | ENTER = Select')
+        hint = QtWidgets.QLabel('A/ENTER = Select | B/ESC = Back | LB/RB = Page')
         hint.setObjectName('guide_hint')
         v.addWidget(hint)
 
@@ -3158,8 +3497,22 @@ class QuickMenu(QtWidgets.QDialog):
         self.info_text.setText(txt)
 
     def keyPressEvent(self, e):
-        if e.key() in (QtCore.Qt.Key_Escape, QtCore.Qt.Key_Back):
+        k = e.key()
+        if k in (QtCore.Qt.Key_Escape, QtCore.Qt.Key_Back):
             self.reject()
+            return
+        if k in (QtCore.Qt.Key_Return, QtCore.Qt.Key_Enter):
+            self.accept()
+            return
+        if k in (QtCore.Qt.Key_Prior, QtCore.Qt.Key_Next):
+            step = -8 if k == QtCore.Qt.Key_Prior else 8
+            n = int(self.listw.count())
+            if n > 0:
+                row = int(self.listw.currentRow())
+                if row < 0:
+                    row = 0
+                row = max(0, min(n - 1, row + step))
+                self.listw.setCurrentRow(row)
             return
         super().keyPressEvent(e)
 
@@ -3401,6 +3754,16 @@ class GamesHubMenu(QtWidgets.QDialog):
             return
         if e.key() in (QtCore.Qt.Key_Return, QtCore.Qt.Key_Enter):
             self._accept_current()
+            return
+        if e.key() in (QtCore.Qt.Key_Prior, QtCore.Qt.Key_Next):
+            n = int(self.listw.count())
+            if n > 0:
+                step = -7 if e.key() == QtCore.Qt.Key_Prior else 7
+                row = int(self.listw.currentRow())
+                if row < 0:
+                    row = 0
+                row = max(0, min(n - 1, row + step))
+                self.listw.setCurrentRow(row)
             return
         super().keyPressEvent(e)
 
@@ -4192,6 +4555,16 @@ class XboxGuideMenu(QtWidgets.QDialog):
             self._sfx('select')
             self.accept()
             return
+        if e.key() in (QtCore.Qt.Key_Prior, QtCore.Qt.Key_Next):
+            n = int(self.listw.count())
+            if n > 0:
+                step = -5 if e.key() == QtCore.Qt.Key_Prior else 5
+                row = int(self.listw.currentRow())
+                if row < 0:
+                    row = 0
+                row = max(0, min(n - 1, row + step))
+                self.listw.setCurrentRow(row)
+            return
         if e.key() in (QtCore.Qt.Key_Escape, QtCore.Qt.Key_Back):
             self.reject()
             return
@@ -4450,6 +4823,16 @@ class GamesInlineOverlay(QtWidgets.QFrame):
             return
         if k == QtCore.Qt.Key_Tab:
             self._uninstall_current()
+            return
+        if k in (QtCore.Qt.Key_Prior, QtCore.Qt.Key_Next):
+            n = int(self.listw.count())
+            if n > 0:
+                step = -6 if k == QtCore.Qt.Key_Prior else 6
+                row = int(self.listw.currentRow())
+                if row < 0:
+                    row = 0
+                row = max(0, min(n - 1, row + step))
+                self.listw.setCurrentRow(row)
             return
         super().keyPressEvent(e)
 
@@ -5448,6 +5831,21 @@ class AchievementsHubDialog(QtWidgets.QDialog):
             return
         if e.key() in (QtCore.Qt.Key_Return, QtCore.Qt.Key_Enter):
             self._show_current_detail()
+            return
+        if e.key() in (QtCore.Qt.Key_Prior, QtCore.Qt.Key_Next):
+            n = int(self.listw.count())
+            if n > 0:
+                step = -8 if e.key() == QtCore.Qt.Key_Prior else 8
+                row = int(self.listw.currentRow())
+                if row < 0:
+                    row = 0
+                row = max(0, min(n - 1, row + step))
+                self.listw.setCurrentRow(row)
+            return
+        if e.key() == QtCore.Qt.Key_Y:
+            order = ['all', 'unlocked', 'locked']
+            cur = order.index(self._filter) if self._filter in order else 0
+            self._set_filter(order[(cur + 1) % len(order)])
             return
         if e.key() == QtCore.Qt.Key_X:
             self.reload()
@@ -6800,9 +7198,13 @@ exit 0
             return
         self._run('/bin/sh', ['-c', f'xdg-open "{u}"'])
 
-    def _open_social_chat(self):
+    def _open_social_chat(self, initial_mode='messages'):
         self._play_sfx('open')
         d = SocialOverlay(self)
+        try:
+            d._set_community_mode(initial_mode)
+        except Exception:
+            pass
         d.exec_()
         self._play_sfx('close')
 
@@ -7587,7 +7989,7 @@ exit 0
         elif action == 'LAN':
             self._menu('LAN', ['LAN Chat', 'LAN Status', 'P2P Internet Help'])
         elif action in ('Messages', 'LAN Chat'):
-            self._open_social_chat()
+            self._open_social_chat('messages')
         elif action == 'LAN Status':
             out = subprocess.getoutput(f'/bin/sh -c "{xui}/bin/xui_lan_status.sh"')
             self._msg('LAN Status', out or 'No network data.')
@@ -7598,8 +8000,7 @@ exit 0
                       'Alternativa directa: conecta por IP:PUERTO (reenvia puerto TCP 38600 en el router).\n\n'
                       f'{out}')
         elif action == 'Party':
-            out = subprocess.getoutput("who | awk '{print $1}' | sort -u")
-            self._msg('Party', out or 'No active users detected.')
+            self._open_social_chat('party')
         elif action == 'Gamer Card':
             try:
                 p = json.loads(PROFILE_FILE.read_text()) if PROFILE_FILE.exists() else {}
@@ -7610,12 +8011,7 @@ exit 0
         elif action == 'Social Apps':
             self._menu('Social Apps', ['Friends', 'Messages', 'LAN Chat', 'LAN Status', 'P2P Internet Help', 'Party', 'Beacons', 'Avatar Store'])
         elif action == 'Friends':
-            try:
-                friends = json.loads(FRIENDS_FILE.read_text()) if FRIENDS_FILE.exists() else []
-                txt = '\n'.join([f"{f.get('name','Friend')} - {'Online' if f.get('online') else 'Offline'}" for f in friends])
-            except Exception:
-                txt = ''
-            self._msg('Friends', txt or 'No friends found.')
+            self._open_social_chat('friends')
         elif action == 'Sign In':
             try:
                 p = json.loads(PROFILE_FILE.read_text()) if PROFILE_FILE.exists() else {}
@@ -19117,6 +19513,8 @@ class SocialChatWindow(QtWidgets.QWidget):
         self._vk_opening = False
         self._vk_last_close = 0.0
         self._action_items = {}
+        self._community_mode = 'messages'
+        self._focus_zone = 0
         self._build_ui()
         self._load_manual_peers()
         self._load_world_settings()
@@ -19181,7 +19579,7 @@ class SocialChatWindow(QtWidgets.QWidget):
         root.setSpacing(8)
 
         top = QtWidgets.QHBoxLayout()
-        self.title = QtWidgets.QLabel('social / messages')
+        self.title = QtWidgets.QLabel('community / messages')
         self.title.setObjectName('social_title')
         self.gamer = QtWidgets.QLabel(f'gamertag: {self.nickname}')
         self.gamer.setObjectName('social_hint')
@@ -19189,6 +19587,22 @@ class SocialChatWindow(QtWidgets.QWidget):
         top.addStretch(1)
         top.addWidget(self.gamer)
         root.addLayout(top)
+
+        tabs_row = QtWidgets.QHBoxLayout()
+        tabs_row.setSpacing(8)
+        self.community_tabs = {}
+        for key, label in (
+            ('friends', 'Friends'),
+            ('party', 'Party'),
+            ('messages', 'Messages'),
+            ('players', 'Players'),
+        ):
+            b = QtWidgets.QPushButton(label)
+            b.clicked.connect(lambda _=False, mode=key: self._set_community_mode(mode))
+            self.community_tabs[key] = b
+            tabs_row.addWidget(b)
+        tabs_row.addStretch(1)
+        root.addLayout(tabs_row)
 
         body = QtWidgets.QHBoxLayout()
         body.setSpacing(10)
@@ -19198,13 +19612,13 @@ class SocialChatWindow(QtWidgets.QWidget):
         left = QtWidgets.QVBoxLayout(left_wrap)
         left.setContentsMargins(8, 8, 8, 8)
         left.setSpacing(6)
-        left_title = QtWidgets.QLabel('Messages / Peers')
-        left_title.setObjectName('social_title')
+        self.left_title = QtWidgets.QLabel('Messages / Peers')
+        self.left_title.setObjectName('social_title')
         self.peer_list = QtWidgets.QListWidget()
         self.peer_list.setMinimumWidth(340)
         self.peer_list.currentItemChanged.connect(lambda *_: self._update_peer_meta())
 
-        left.addWidget(left_title)
+        left.addWidget(self.left_title)
         left.addWidget(self.peer_list, 1)
 
         center_wrap = QtWidgets.QFrame()
@@ -19272,15 +19686,220 @@ class SocialChatWindow(QtWidgets.QWidget):
         if self.actions.count() > 0:
             self.actions.setCurrentRow(0)
 
-        hint = QtWidgets.QLabel('A/ENTER = select | B/ESC = close | Text input opens virtual keyboard')
+        hint = QtWidgets.QLabel('A/ENTER = select | B/ESC = close | X = quick action | Y = change tab | LB/RB = previous/next tab')
         hint.setObjectName('social_hint')
         root.addWidget(hint)
+        self._refresh_community_tabs()
+        self._set_community_mode('messages')
+        self._set_focus_zone(0)
 
     def _add_action_item(self, key, text):
         it = QtWidgets.QListWidgetItem(str(text))
         it.setData(QtCore.Qt.UserRole, str(key))
         self.actions.addItem(it)
         self._action_items[str(key)] = it
+
+    def _community_order(self):
+        return ['friends', 'party', 'messages', 'players']
+
+    def _recent_players(self):
+        arr = safe_json_read(SOCIAL_MESSAGES_FILE, [])
+        if not isinstance(arr, list):
+            arr = []
+        out = []
+        seen = set()
+        for row in arr:
+            if not isinstance(row, dict):
+                continue
+            who = str(row.get('from') or '').strip()
+            if not who:
+                continue
+            low = who.lower()
+            if low.startswith('you') or '[world]' in low:
+                continue
+            clean = who.replace('[PM]', '').replace('[pm]', '').strip()
+            if not clean:
+                continue
+            if clean.lower() in seen:
+                continue
+            seen.add(clean.lower())
+            out.append({
+                'name': clean,
+                'host': '',
+                'port': 0,
+                'source': 'RECENT',
+                'last': str(row.get('text') or '').strip()[:72],
+            })
+            if len(out) >= 48:
+                break
+        return out
+
+    def _refresh_community_tabs(self):
+        friends_n = len([p for p in self.peer_data.values() if str(p.get('source')).lower() == 'manual'])
+        party_n = len([p for p in self.peer_data.values() if str(p.get('source')).lower() == 'lan'])
+        messages_n = len([p for p in self.peer_data.values() if str(p.get('source')) != 'WORLD'])
+        players_n = len(self._recent_players())
+        counts = {
+            'friends': friends_n,
+            'party': party_n,
+            'messages': messages_n,
+            'players': players_n,
+        }
+        labels = {
+            'friends': 'Friends',
+            'party': 'Party',
+            'messages': 'Messages',
+            'players': 'Players',
+        }
+        for key, btn in self.community_tabs.items():
+            active = (key == self._community_mode)
+            btn.setText(f'{labels.get(key, key)} ({counts.get(key, 0)})')
+            if active:
+                btn.setStyleSheet(
+                    'QPushButton { background:qlineargradient(x1:0,y1:0,x2:1,y2:0, stop:0 #67c84a, stop:1 #3d9533);'
+                    ' color:#f4fff2; border:1px solid rgba(255,255,255,0.34); font-size:16px; font-weight:800; }'
+                )
+            else:
+                btn.setStyleSheet(
+                    'QPushButton { background:rgba(49,58,71,0.95); color:#e8f0f6; border:1px solid rgba(202,216,232,0.24);'
+                    ' font-size:16px; font-weight:700; }'
+                )
+
+    def _community_rows(self, mode):
+        mode = str(mode or '').strip().lower()
+        if mode == 'players':
+            return self._recent_players()
+        rows = []
+        for p in self.peer_data.values():
+            src = str(p.get('source') or '').lower()
+            if mode == 'friends':
+                if src == 'manual':
+                    rows.append(dict(p))
+            elif mode == 'party':
+                if src == 'lan':
+                    rows.append(dict(p))
+        rows.sort(key=lambda x: str(x.get('name') or '').lower())
+        return rows
+
+    def _community_row_text(self, row):
+        name = str(row.get('name') or 'Player')
+        src = str(row.get('source') or '')
+        if src == 'RECENT':
+            last = str(row.get('last') or '').strip()
+            return f'{name}  -  {last}' if last else name
+        host = str(row.get('host') or '')
+        port = int(row.get('port') or 0)
+        endpoint = f' [{host}:{port}]' if host and port > 0 else ''
+        return f'{name}{endpoint} ({src})'
+
+    def _rebuild_mode_rows(self, rows):
+        prev = self.peer_list.currentItem().text() if self.peer_list.currentItem() is not None else ''
+        self.peer_list.clear()
+        keep_row = -1
+        for row in rows:
+            it = QtWidgets.QListWidgetItem(self._community_row_text(row))
+            it.setData(QtCore.Qt.UserRole, dict(row))
+            self.peer_list.addItem(it)
+            if keep_row < 0 and prev and it.text() == prev:
+                keep_row = self.peer_list.count() - 1
+        if self.peer_list.count() > 0:
+            self.peer_list.setCurrentRow(keep_row if keep_row >= 0 else 0)
+
+    def _rebuild_message_rows(self):
+        self.peer_list.clear()
+        self.peer_items = {}
+        ordered = sorted(
+            self.peer_data.items(),
+            key=lambda kv: (0 if str(kv[1].get('source')) == 'WORLD' else 1, str(kv[1].get('name') or '').lower()),
+        )
+        for key, row in ordered:
+            it = QtWidgets.QListWidgetItem(self._peer_row_text(row))
+            it.setData(QtCore.Qt.UserRole, key)
+            self.peer_list.addItem(it)
+            self.peer_items[key] = it
+        if self.peer_list.count() > 0:
+            self.peer_list.setCurrentRow(0)
+
+    def _set_community_mode(self, mode):
+        mode = str(mode or 'messages').strip().lower()
+        if mode not in self._community_order():
+            mode = 'messages'
+        self._community_mode = mode
+        title_map = {
+            'friends': 'community / friends',
+            'party': 'community / party',
+            'messages': 'community / messages',
+            'players': 'community / players',
+        }
+        self.title.setText(title_map.get(mode, 'community / messages'))
+        if mode == 'messages':
+            self.left_title.setText('Messages / Peers')
+            self._rebuild_message_rows()
+        elif mode == 'friends':
+            self.left_title.setText('Friends')
+            self._rebuild_mode_rows(self._community_rows('friends'))
+        elif mode == 'party':
+            self.left_title.setText('Party')
+            self._rebuild_mode_rows(self._community_rows('party'))
+        else:
+            self.left_title.setText('Players')
+            self._rebuild_mode_rows(self._community_rows('players'))
+        self._refresh_community_tabs()
+        self._set_focus_zone(0)
+        self._update_peer_meta()
+
+    def _cycle_community_mode(self, step=1):
+        order = self._community_order()
+        cur = order.index(self._community_mode) if self._community_mode in order else 0
+        nxt = (cur + int(step)) % len(order)
+        self._set_community_mode(order[nxt])
+
+    def _set_focus_zone(self, zone):
+        self._focus_zone = max(0, min(3, int(zone)))
+        if self._focus_zone == 0:
+            self.peer_list.setFocus(QtCore.Qt.OtherFocusReason)
+        elif self._focus_zone == 1:
+            self.actions.setFocus(QtCore.Qt.OtherFocusReason)
+        elif self._focus_zone == 2:
+            self.msg.setFocus(QtCore.Qt.OtherFocusReason)
+        else:
+            self.btn_send.setFocus(QtCore.Qt.OtherFocusReason)
+
+    def _move_in_list(self, listw, delta):
+        n = int(listw.count())
+        if n <= 0:
+            return
+        row = int(listw.currentRow())
+        if row < 0:
+            row = 0
+        row = max(0, min(n - 1, row + int(delta)))
+        listw.setCurrentRow(row)
+
+    def _select_message_peer(self, host='', port=0, name=''):
+        host = str(host or '').strip().lower()
+        try:
+            port = int(port or 0)
+        except Exception:
+            port = 0
+        name = str(name or '').strip().lower()
+        for i in range(self.peer_list.count()):
+            it = self.peer_list.item(i)
+            if it is None:
+                continue
+            key = it.data(QtCore.Qt.UserRole)
+            peer = self.peer_data.get(key)
+            if not isinstance(peer, dict):
+                continue
+            ph = str(peer.get('host') or '').strip().lower()
+            pp = int(peer.get('port') or 0)
+            pn = str(peer.get('name') or '').strip().lower()
+            if host and port > 0 and ph == host and pp == port:
+                self.peer_list.setCurrentRow(i)
+                return True
+            if name and pn == name:
+                self.peer_list.setCurrentRow(i)
+                return True
+        return False
 
     def _run_selected_action(self, *_):
         it = self.actions.currentItem()
@@ -19330,6 +19949,12 @@ class SocialChatWindow(QtWidgets.QWidget):
         if not peer:
             self.peer_meta.setText('Select a peer to chat.')
             return
+        src = str(peer.get('source') or '').upper()
+        if src == 'RECENT':
+            name = str(peer.get('name') or 'Player')
+            last = str(peer.get('last') or '').strip()
+            self.peer_meta.setText(f'{name}  (RECENT){(" - " + last) if last else ""}')
+            return
         if str(peer.get('source')) == 'WORLD':
             self.peer_meta.setText(f"WORLD relay room #{self.engine.world_topic}")
             return
@@ -19362,6 +19987,82 @@ class SocialChatWindow(QtWidgets.QWidget):
                     QtCore.QTimer.singleShot(0, self._open_chat_keyboard)
         return super().eventFilter(obj, event)
 
+    def keyPressEvent(self, e):
+        k = e.key()
+        if k in (QtCore.Qt.Key_Escape, QtCore.Qt.Key_Back):
+            self.close()
+            return
+        if k in (QtCore.Qt.Key_Prior,):
+            self._cycle_community_mode(-1)
+            return
+        if k in (QtCore.Qt.Key_Next,):
+            self._cycle_community_mode(1)
+            return
+        if k in (QtCore.Qt.Key_Y, QtCore.Qt.Key_Space):
+            self._cycle_community_mode(1)
+            return
+        if k in (QtCore.Qt.Key_Left,):
+            if self._focus_zone == 0:
+                self._cycle_community_mode(-1)
+            else:
+                self._set_focus_zone(self._focus_zone - 1)
+            return
+        if k in (QtCore.Qt.Key_Right,):
+            if self._focus_zone == 0:
+                self._cycle_community_mode(1)
+            else:
+                self._set_focus_zone(self._focus_zone + 1)
+            return
+        if k in (QtCore.Qt.Key_Up,):
+            if self._focus_zone == 0:
+                self._move_in_list(self.peer_list, -1)
+            elif self._focus_zone == 1:
+                self._move_in_list(self.actions, -1)
+            return
+        if k in (QtCore.Qt.Key_Down,):
+            if self._focus_zone == 0:
+                self._move_in_list(self.peer_list, 1)
+            elif self._focus_zone == 1:
+                self._move_in_list(self.actions, 1)
+            return
+        if k in (QtCore.Qt.Key_Tab,):
+            self._set_focus_zone((self._focus_zone + 1) % 4)
+            return
+        if k in (QtCore.Qt.Key_X,):
+            if self._focus_zone == 0 and self._community_mode != 'messages':
+                chosen = self._current_peer() or {}
+                self._set_community_mode('messages')
+                self._select_message_peer(
+                    host=chosen.get('host'),
+                    port=chosen.get('port'),
+                    name=chosen.get('name'),
+                )
+                self._open_chat_keyboard()
+            else:
+                self._send_current()
+            return
+        if k in (QtCore.Qt.Key_Return, QtCore.Qt.Key_Enter):
+            if self._focus_zone == 0:
+                if self._community_mode == 'messages':
+                    self._open_chat_keyboard()
+                else:
+                    chosen = self._current_peer() or {}
+                    self._set_community_mode('messages')
+                    self._select_message_peer(
+                        host=chosen.get('host'),
+                        port=chosen.get('port'),
+                        name=chosen.get('name'),
+                    )
+                    self._open_chat_keyboard()
+            elif self._focus_zone == 1:
+                self._run_selected_action()
+            elif self._focus_zone == 2:
+                self._open_chat_keyboard()
+            else:
+                self._send_current()
+            return
+        super().keyPressEvent(e)
+
     def _peer_row_text(self, p):
         if str(p.get('source')) == 'WORLD':
             return f"{p['name']}  [global relay]  (WORLD)"
@@ -19377,15 +20078,20 @@ class SocialChatWindow(QtWidgets.QWidget):
             'node_id': str(node_id or ''),
             '_world': bool(str(source) == 'WORLD'),
         }
-        if key in self.peer_items:
+        if key in self.peer_data:
             self.peer_data[key].update(data)
+        else:
+            self.peer_data[key] = data
+        if self._community_mode != 'messages':
+            self._refresh_community_tabs()
+            return
+        if key in self.peer_items:
             self.peer_items[key].setText(self._peer_row_text(self.peer_data[key]))
         else:
-            item = QtWidgets.QListWidgetItem(self._peer_row_text(data))
+            item = QtWidgets.QListWidgetItem(self._peer_row_text(self.peer_data[key]))
             item.setData(QtCore.Qt.UserRole, key)
             self.peer_list.addItem(item)
             self.peer_items[key] = item
-            self.peer_data[key] = data
             if self.peer_list.currentRow() < 0:
                 self.peer_list.setCurrentRow(0)
         self._update_peer_meta()
@@ -19393,14 +20099,16 @@ class SocialChatWindow(QtWidgets.QWidget):
             self._save_manual_peers()
 
     def _remove_peer(self, key):
-        item = self.peer_items.pop(key, None)
         self.peer_data.pop(key, None)
+        item = self.peer_items.pop(key, None)
         if item is None:
+            self._refresh_community_tabs()
             return
         row = self.peer_list.row(item)
         if row >= 0:
             self.peer_list.takeItem(row)
         self._update_peer_meta()
+        self._refresh_community_tabs()
 
     def _append_line(self, line):
         self.chat.appendPlainText(line)
@@ -19432,6 +20140,8 @@ class SocialChatWindow(QtWidgets.QWidget):
         if not item:
             return None
         key = item.data(QtCore.Qt.UserRole)
+        if isinstance(key, dict):
+            return dict(key)
         return self.peer_data.get(key)
 
     def _world_peer_payload(self):
@@ -20000,12 +20710,16 @@ class SocialChatWindow(QtWidgets.QWidget):
                 self.status.setText(f'World room: {room}')
                 self._refresh_world_peer()
                 continue
+        self._refresh_community_tabs()
+        if self._community_mode != 'messages':
+            self._rebuild_mode_rows(self._community_rows(self._community_mode))
 
     def closeEvent(self, e):
         try:
             self.timer.stop()
         except Exception:
             pass
+        self._stop_call_session(notify=False)
         self._save_world_settings()
         self.engine.stop()
         super().closeEvent(e)
