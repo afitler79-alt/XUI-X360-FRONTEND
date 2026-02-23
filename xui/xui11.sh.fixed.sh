@@ -4644,6 +4644,7 @@ class Dashboard(QtWidgets.QMainWindow):
                 'right': [
                     ('Family', 'Family', (270, 130)),
                     ('Theme Toggle', 'Account', (270, 130)),
+                    ('WiFi Toggle', 'WiFi', (270, 130)),
                     ('Battery Info', 'Battery', (270, 130)),
                     ('Setup Wizard', 'Setup', (270, 130)),
                     ('Turn Off', 'Turn Off', (270, 130)),
@@ -4664,6 +4665,7 @@ class Dashboard(QtWidgets.QMainWindow):
         self._tab_animating = False
         self._tab_anim_group = None
         self._web_windows = []
+        self._fullscreen_enforced = False
         self._ui_scale = 1.0
         self._compact_ui = False
         self._stage_layout = None
@@ -4678,6 +4680,7 @@ class Dashboard(QtWidgets.QMainWindow):
         self._mandatory_update_proc = None
         self._mandatory_update_progress = None
         self._mandatory_update_output = ''
+        self._guide_open_last_at = 0.0
         self._games_inline = None
         self._qgamepads = {}
         self._gp_last_emit = {}
@@ -4838,6 +4841,7 @@ class Dashboard(QtWidgets.QMainWindow):
 
     def showEvent(self, e):
         super().showEvent(e)
+        QtCore.QTimer.singleShot(0, self._ensure_fullscreen)
         QtCore.QTimer.singleShot(0, self._apply_responsive_layout)
         if not self._startup_update_checked:
             self._startup_update_checked = True
@@ -4856,6 +4860,18 @@ class Dashboard(QtWidgets.QMainWindow):
     def resizeEvent(self, e):
         super().resizeEvent(e)
         self._apply_responsive_layout()
+
+    def _ensure_fullscreen(self):
+        if self._fullscreen_enforced:
+            return
+        self._fullscreen_enforced = True
+        try:
+            self.setWindowState(self.windowState() | QtCore.Qt.WindowFullScreen)
+            self.showFullScreen()
+            self.raise_()
+            self.activateWindow()
+        except Exception:
+            pass
 
     def _current_page(self):
         return self.pages[self.tab_idx]
@@ -5171,20 +5187,51 @@ class Dashboard(QtWidgets.QMainWindow):
             dlg.set_detail(tail)
 
     def _restart_dashboard_after_update(self):
+        helper = XUI_HOME / 'bin' / 'xui_postupdate_restart.sh'
+        script = '''#!/usr/bin/env bash
+set -euo pipefail
+WRAP="$HOME/.xui/bin/xui_startup_and_dashboard.sh"
+sleep 0.6
+if command -v systemctl >/dev/null 2>&1; then
+  systemctl --user daemon-reload >/dev/null 2>&1 || true
+  systemctl --user restart xui-dashboard.service >/dev/null 2>&1 || true
+fi
+for _ in $(seq 1 30); do
+  if command -v pgrep >/dev/null 2>&1 && pgrep -u "$(id -u)" -f "pyqt_dashboard_improved.py" >/dev/null 2>&1; then
+    exit 0
+  fi
+  sleep 0.25
+done
+if [ -x "$WRAP" ]; then
+  nohup "$WRAP" >/dev/null 2>&1 &
+  sleep 0.5
+fi
+if command -v pgrep >/dev/null 2>&1 && pgrep -u "$(id -u)" -f "pyqt_dashboard_improved.py" >/dev/null 2>&1; then
+  exit 0
+fi
+if [ -x "$WRAP" ]; then
+  nohup "$WRAP" >/dev/null 2>&1 &
+fi
+exit 0
+'''
+        try:
+            helper.parent.mkdir(parents=True, exist_ok=True)
+            helper.write_text(script, encoding='utf-8')
+            helper.chmod(0o755)
+        except Exception:
+            pass
+        helper_q = shlex.quote(str(helper))
         cmd = (
-            'if command -v systemctl >/dev/null 2>&1; then '
-            'systemctl --user daemon-reload >/dev/null 2>&1 || true; '
-            'systemctl --user restart xui-dashboard.service >/dev/null 2>&1 || true; '
-            'fi; '
-            '(sleep 3; '
-            'if command -v pgrep >/dev/null 2>&1; then '
-            'pgrep -u "$(id -u)" -f "pyqt_dashboard_improved.py" >/dev/null 2>&1 || nohup "$HOME/.xui/bin/xui_startup_and_dashboard.sh" >/dev/null 2>&1 & '
+            f'if [ -x {helper_q} ]; then '
+            'if command -v systemd-run >/dev/null 2>&1; then '
+            f'systemd-run --user --quiet --collect --unit "xui-postupdate-restart-$(date +%s)" {helper_q} >/dev/null 2>&1 || nohup {helper_q} >/dev/null 2>&1 & '
             'else '
-            'nohup "$HOME/.xui/bin/xui_startup_and_dashboard.sh" >/dev/null 2>&1 & '
-            'fi) >/dev/null 2>&1 &'
+            f'nohup {helper_q} >/dev/null 2>&1 & '
+            'fi; '
+            'fi'
         )
         QtCore.QProcess.startDetached('/bin/sh', ['-lc', cmd])
-        QtCore.QTimer.singleShot(220, QtWidgets.QApplication.quit)
+        QtCore.QTimer.singleShot(340, QtWidgets.QApplication.quit)
 
     def _on_mandatory_update_error(self, err):
         self._on_mandatory_update_output()
@@ -5616,6 +5663,10 @@ class Dashboard(QtWidgets.QMainWindow):
         return 'No se detectan descargas activas.'
 
     def _show_xbox_guide(self):
+        now = time.monotonic()
+        if (now - float(self._guide_open_last_at)) < 0.65:
+            return
+        self._guide_open_last_at = now
         self._play_sfx('open')
         d = XboxGuideMenu(current_gamertag(), self)
         if d.exec_() == QtWidgets.QDialog.Accepted:
@@ -6821,6 +6872,7 @@ if JOYCON_COMBINED_MODE not in ('auto', 'prefer-combined', 'split'):
     JOYCON_COMBINED_MODE = 'auto'
 XDOTOOL = shutil.which('xdotool')
 GUIDE_SCRIPT = os.path.expanduser('~/.xui/bin/xui_global_guide.sh')
+ACTIVE_GAME_FILE = os.path.expanduser('~/.xui/data/active_game.pid')
 NINTENDO_VENDOR = 0x057E
 MICROSOFT_VENDOR = 0x045E
 HYPERKIN_VENDOR = 0x2E24
@@ -7162,14 +7214,50 @@ class ControllerBridge:
         except Exception:
             return False
 
+    def _cmdline_of_pid(self, pid):
+        try:
+            return open(f'/proc/{int(pid)}/cmdline', 'rb').read().replace(b'\x00', b' ').decode('utf-8', 'ignore').lower()
+        except Exception:
+            return ''
+
+    def _is_dashboard_pid(self, pid):
+        cl = self._cmdline_of_pid(pid)
+        return any(t in cl for t in ('pyqt_dashboard_improved.py', 'xui_startup_and_dashboard', 'xui-dashboard.service'))
+
+    def _tracked_external_game_pid(self):
+        if not os.path.exists(ACTIVE_GAME_FILE):
+            return None
+        pid = 0
+        try:
+            pid = int((open(ACTIVE_GAME_FILE, 'r', encoding='utf-8', errors='ignore').read() or '0').strip() or '0')
+        except Exception:
+            pid = 0
+        if pid <= 1:
+            try:
+                os.remove(ACTIVE_GAME_FILE)
+            except Exception:
+                pass
+            return None
+        if not os.path.exists(f'/proc/{pid}'):
+            try:
+                os.remove(ACTIVE_GAME_FILE)
+            except Exception:
+                pass
+            return None
+        if self._is_dashboard_pid(pid):
+            return None
+        return pid
+
     def _open_global_guide(self):
         now = time.monotonic()
         if (now - self.last_guide_open) < GUIDE_COOLDOWN_SEC:
             return True
         self.last_guide_open = now
         if self._active_window_dashboard():
-            if emit_key('F1'):
-                return True
+            emit_key('F1')
+            return True
+        if self._tracked_external_game_pid() is None:
+            return False
         if not os.path.exists(GUIDE_SCRIPT):
             return False
         try:
