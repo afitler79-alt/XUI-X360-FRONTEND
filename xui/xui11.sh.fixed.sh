@@ -15443,6 +15443,7 @@ BASH
 import argparse
 import json
 import sys
+import time
 from pathlib import Path
 from PyQt5 import QtCore, QtGui, QtWidgets
 try:
@@ -15630,6 +15631,7 @@ class WebHub(QtWidgets.QMainWindow):
         self.kiosk = bool(kiosk)
         self.pending_url = normalize_url(url)
         self._kbd_opening = False
+        self._kbd_last_close = 0.0
         self._skip_web_return_once = 0
         self._gp = None
         self._gp_prev = {}
@@ -15853,6 +15855,15 @@ class WebHub(QtWidgets.QMainWindow):
         QtWidgets.QApplication.postEvent(w, press)
         QtWidgets.QApplication.postEvent(w, rel)
 
+    def _active_virtual_keyboard(self):
+        w = QtWidgets.QApplication.activeModalWidget()
+        if isinstance(w, VirtualKeyboardDialog) and bool(w.isVisible()):
+            return w
+        for tw in QtWidgets.QApplication.topLevelWidgets():
+            if isinstance(tw, VirtualKeyboardDialog) and bool(tw.isVisible()):
+                return tw
+        return None
+
     def _poll_gamepad(self):
         gp = self._gp
         if gp is None:
@@ -15872,6 +15883,25 @@ class WebHub(QtWidgets.QMainWindow):
 
         def pressed(name):
             return cur.get(name, False) and not self._gp_prev.get(name, False)
+
+        vk = self._active_virtual_keyboard()
+        if vk is not None:
+            if pressed('guide') or pressed('b'):
+                self._send_key_focus(QtCore.Qt.Key_Escape)
+            elif pressed('a'):
+                self._send_key_focus(QtCore.Qt.Key_Return)
+            elif pressed('x'):
+                self._send_key_focus(QtCore.Qt.Key_Backspace)
+            elif pressed('left'):
+                self._send_key_focus(QtCore.Qt.Key_Left)
+            elif pressed('right'):
+                self._send_key_focus(QtCore.Qt.Key_Right)
+            elif pressed('up'):
+                self._send_key_focus(QtCore.Qt.Key_Up)
+            elif pressed('down'):
+                self._send_key_focus(QtCore.Qt.Key_Down)
+            self._gp_prev = cur
+            return
 
         if pressed('guide'):
             self._show_guide()
@@ -15908,6 +15938,8 @@ class WebHub(QtWidgets.QMainWindow):
     def _open_virtual_keyboard_for_addr(self):
         if self._kbd_opening:
             return
+        if (time.monotonic() - float(self._kbd_last_close)) < 0.35:
+            return
         self._kbd_opening = True
         try:
             d = VirtualKeyboardDialog(self.addr.text(), self)
@@ -15917,6 +15949,7 @@ class WebHub(QtWidgets.QMainWindow):
                 if txt.strip():
                     self._open_from_bar()
         finally:
+            self._kbd_last_close = time.monotonic()
             self._kbd_opening = False
 
     def _inject_text_into_page(self, text):
@@ -15977,11 +16010,16 @@ class WebHub(QtWidgets.QMainWindow):
     def _open_virtual_keyboard_for_web(self):
         if self.web is None:
             return
+        if (time.monotonic() - float(self._kbd_last_close)) < 0.35:
+            return
         d = VirtualKeyboardDialog('', self)
-        if d.exec_() == QtWidgets.QDialog.Accepted:
-            txt = d.text()
-            if txt:
-                self._inject_text_into_page(txt)
+        try:
+            if d.exec_() == QtWidgets.QDialog.Accepted:
+                txt = d.text()
+                if txt:
+                    self._inject_text_into_page(txt)
+        finally:
+            self._kbd_last_close = time.monotonic()
 
     def _open_virtual_keyboard_contextual(self):
         if self.stack.currentWidget() is self.hub:
@@ -15990,8 +16028,9 @@ class WebHub(QtWidgets.QMainWindow):
             self._open_virtual_keyboard_for_web()
 
     def eventFilter(self, obj, event):
-        if obj is self.addr and event.type() == QtCore.QEvent.FocusIn:
-            QtCore.QTimer.singleShot(0, self._open_virtual_keyboard_for_addr)
+        if obj is self.addr and event.type() in (QtCore.QEvent.FocusIn, QtCore.QEvent.MouseButtonPress):
+            if not self._kbd_opening and (time.monotonic() - float(self._kbd_last_close)) >= 0.35:
+                QtCore.QTimer.singleShot(0, self._open_virtual_keyboard_for_addr)
         if obj is self.web and event.type() == QtCore.QEvent.KeyPress:
             if event.key() in (QtCore.Qt.Key_Return, QtCore.Qt.Key_Enter):
                 if self._skip_web_return_once > 0:
