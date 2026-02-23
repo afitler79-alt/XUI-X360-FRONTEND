@@ -5852,13 +5852,18 @@ class Dashboard(QtWidgets.QMainWindow):
         script = '''#!/usr/bin/env bash
 set -euo pipefail
 WRAP="$HOME/.xui/bin/xui_startup_and_dashboard.sh"
+START_SH="$HOME/.xui/bin/xui_start.sh"
+PYRUN="$HOME/.xui/bin/xui_python.sh"
+DASH="$HOME/.xui/dashboard/pyqt_dashboard_improved.py"
 OLD_PID="${1:-}"
+RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
+DBUS_ADDR="${DBUS_SESSION_BUS_ADDRESS:-unix:path=${RUNTIME_DIR}/bus}"
 
 dashboard_running(){
   if ! command -v pgrep >/dev/null 2>&1; then
     return 1
   fi
-  pgrep -u "$(id -u)" -f "pyqt_dashboard_improved.py" >/dev/null 2>&1
+  pgrep -u "$(id -u)" -f "pyqt_dashboard_improved.py|xui_startup_and_dashboard.sh|xui_start.sh" >/dev/null 2>&1
 }
 
 wait_old_dashboard_exit(){
@@ -5881,13 +5886,31 @@ restart_via_systemd(){
   if ! command -v systemctl >/dev/null 2>&1; then
     return 1
   fi
-  systemctl --user daemon-reload >/dev/null 2>&1 || true
-  systemctl --user restart xui-dashboard.service >/dev/null 2>&1
+  XDG_RUNTIME_DIR="$RUNTIME_DIR" DBUS_SESSION_BUS_ADDRESS="$DBUS_ADDR" \
+    systemctl --user daemon-reload >/dev/null 2>&1 || true
+  XDG_RUNTIME_DIR="$RUNTIME_DIR" DBUS_SESSION_BUS_ADDRESS="$DBUS_ADDR" \
+    systemctl --user restart xui-dashboard.service >/dev/null 2>&1
 }
 
 start_via_wrapper(){
   if [ -x "$WRAP" ]; then
-    nohup "$WRAP" >/dev/null 2>&1 &
+    nohup env XDG_RUNTIME_DIR="$RUNTIME_DIR" DBUS_SESSION_BUS_ADDRESS="$DBUS_ADDR" "$WRAP" >/dev/null 2>&1 &
+    return 0
+  fi
+  if [ -x "$START_SH" ]; then
+    nohup env XDG_RUNTIME_DIR="$RUNTIME_DIR" DBUS_SESSION_BUS_ADDRESS="$DBUS_ADDR" "$START_SH" >/dev/null 2>&1 &
+    return 0
+  fi
+  return 1
+}
+
+start_direct_dashboard(){
+  if [ -x "$PYRUN" ] && [ -f "$DASH" ]; then
+    nohup env XDG_RUNTIME_DIR="$RUNTIME_DIR" DBUS_SESSION_BUS_ADDRESS="$DBUS_ADDR" "$PYRUN" "$DASH" >/dev/null 2>&1 &
+    return 0
+  fi
+  if command -v python3 >/dev/null 2>&1 && [ -f "$DASH" ]; then
+    nohup env XDG_RUNTIME_DIR="$RUNTIME_DIR" DBUS_SESSION_BUS_ADDRESS="$DBUS_ADDR" python3 "$DASH" >/dev/null 2>&1 &
     return 0
   fi
   return 1
@@ -5918,6 +5941,14 @@ done
 
 restart_via_systemd || true
 start_via_wrapper || true
+for _ in $(seq 1 30); do
+  if dashboard_running; then
+    exit 0
+  fi
+  sleep 0.15
+done
+
+start_direct_dashboard || true
 exit 0
 '''
         try:
@@ -5938,7 +5969,7 @@ exit 0
             'fi'
         )
         QtCore.QProcess.startDetached('/bin/sh', ['-lc', cmd])
-        QtCore.QTimer.singleShot(340, QtWidgets.QApplication.quit)
+        QtCore.QTimer.singleShot(520, QtWidgets.QApplication.quit)
 
     def _on_mandatory_update_error(self, err):
         self._on_mandatory_update_output()
