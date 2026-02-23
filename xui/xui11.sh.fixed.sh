@@ -3653,6 +3653,7 @@ class XboxGuideMenu(QtWidgets.QDialog):
             'Premios',
             'Reciente',
             'Mensajes recientes',
+            'Social global',
             'Mis juegos',
             'Descargas activas',
             'Canjear codigo',
@@ -6353,6 +6354,9 @@ exit 0
             return
         if name == 'Mensajes recientes':
             self._msg('Mensajes recientes', self._xbox_guide_recent_messages_text())
+            return
+        if name == 'Social global':
+            self._open_social_chat()
             return
         if name == 'Mis juegos':
             if 'games' in self.tabs:
@@ -15223,6 +15227,9 @@ PROFILE_FILE = DATA / 'profile.json'
 REDEEM_FILE = DATA / 'redeemed_codes.json'
 LOCK_FILE = DATA / 'guide_global.lock'
 CLOSE_SCRIPT = str(Path.home() / '.xui' / 'bin' / 'xui_close_active_app.sh')
+XUI_BIN = Path.home() / '.xui' / 'bin'
+SOCIAL_CHAT_APP = XUI_BIN / 'xui_social_chat.py'
+PYRUN = XUI_BIN / 'xui_python.sh'
 
 
 def _json_read(path, default):
@@ -15491,6 +15498,7 @@ class Guide(QtWidgets.QDialog):
             'Premios',
             'Reciente',
             'Mensajes recientes',
+            'Social global',
             'Mis juegos',
             'Descargas activas',
             'Canjear codigo',
@@ -15598,6 +15606,21 @@ def _msg(parent, title, text):
     QtWidgets.QMessageBox.information(parent, str(title), str(text))
 
 
+def _launch_social_global(parent):
+    if not SOCIAL_CHAT_APP.exists():
+        _msg(parent, 'Social global', f'No se encontro: {SOCIAL_CHAT_APP}')
+        return
+    cmd = []
+    if PYRUN.exists() and os.access(str(PYRUN), os.X_OK):
+        cmd = [str(PYRUN), str(SOCIAL_CHAT_APP)]
+    else:
+        cmd = ['python3', str(SOCIAL_CHAT_APP)]
+    try:
+        subprocess.call(cmd)
+    except Exception as exc:
+        _msg(parent, 'Social global', f'No se pudo abrir Social global:\n{exc}')
+
+
 def _handle_action(action, parent):
     name = str(action or '').strip()
     if not name:
@@ -15609,6 +15632,10 @@ def _handle_action(action, parent):
         return
     if name == 'Mensajes recientes':
         _msg(parent, 'Mensajes recientes', _messages_text())
+        _resume_paused()
+        return
+    if name == 'Social global':
+        _launch_social_global(parent)
         _resume_paused()
         return
     if name == 'Descargas activas':
@@ -15724,6 +15751,7 @@ import socket
 import subprocess
 import threading
 import time
+import urllib.parse
 import urllib.request
 import uuid
 from pathlib import Path
@@ -15733,6 +15761,8 @@ XUI_HOME = Path.home() / '.xui'
 DATA_HOME = XUI_HOME / 'data'
 PROFILE_FILE = DATA_HOME / 'profile.json'
 PEERS_FILE = DATA_HOME / 'social_peers.json'
+WORLD_CHAT_FILE = DATA_HOME / 'world_chat.json'
+SOCIAL_MESSAGES_FILE = DATA_HOME / 'social_messages_recent.json'
 
 DISCOVERY_PORT = int(os.environ.get('XUI_CHAT_DISCOVERY_PORT', '38655'))
 CHAT_PORT_BASE = int(os.environ.get('XUI_CHAT_PORT', '38600'))
@@ -15858,16 +15888,50 @@ class SocialNetworkEngine:
         self.nickname = nickname
         self.node_id = uuid.uuid4().hex[:12]
         self.chat_port = choose_port(CHAT_PORT_BASE)
+        self.world_relay = os.environ.get('XUI_WORLD_RELAY_URL', 'https://ntfy.sh').strip().rstrip('/')
+        self.world_topic = self._sanitize_topic(os.environ.get('XUI_WORLD_TOPIC', 'xui-world-global'))
+        self.world_enabled = True
         self.events = queue.Queue()
         self.running = False
         self.threads = []
         self.peers = {}
         self.lock = threading.Lock()
         self.local_ips = set(list_local_ips())
+        self._seen_world_ids = set()
+
+    def _sanitize_topic(self, text):
+        raw = ''.join(ch.lower() if ch.isalnum() or ch in ('-', '_', '.') else '-' for ch in str(text or '').strip())
+        while '--' in raw:
+            raw = raw.replace('--', '-')
+        raw = raw.strip('-._')
+        return raw or 'xui-world-global'
+
+    def set_world_topic(self, topic):
+        new_topic = self._sanitize_topic(topic)
+        if new_topic == self.world_topic:
+            return
+        self.world_topic = new_topic
+        self._seen_world_ids.clear()
+        self.events.put(('world_room', self.world_topic))
+        self.events.put(('status', f'World chat room set to: {self.world_topic}'))
+
+    def set_world_enabled(self, enabled):
+        self.world_enabled = bool(enabled)
+        self.events.put(('world_status', self.world_enabled, self.world_topic))
+        if self.world_enabled:
+            self.events.put(('status', f'World chat connected: {self.world_topic}'))
+        else:
+            self.events.put(('status', 'World chat disconnected'))
 
     def start(self):
         self.running = True
-        for target in (self._tcp_server_loop, self._discovery_listener_loop, self._discovery_sender_loop, self._peer_gc_loop):
+        for target in (
+            self._tcp_server_loop,
+            self._discovery_listener_loop,
+            self._discovery_sender_loop,
+            self._peer_gc_loop,
+            self._world_recv_loop,
+        ):
             t = threading.Thread(target=target, daemon=True)
             self.threads.append(t)
             t.start()
@@ -15875,11 +15939,17 @@ class SocialNetworkEngine:
             self.events.put(('status', f'Chat TCP listening on port {self.chat_port}'))
         else:
             self.events.put(('status', 'No free TCP chat port found.'))
+        self.events.put(('world_status', self.world_enabled, self.world_topic))
 
     def stop(self):
         self.running = False
         for t in self.threads:
             t.join(timeout=0.2)
+
+    def _send_packet(self, host, port, payload):
+        body = (json.dumps(payload, ensure_ascii=False) + '\n').encode('utf-8', errors='ignore')
+        with socket.create_connection((str(host), int(port)), timeout=4) as s:
+            s.sendall(body)
 
     def send_chat(self, host, port, text):
         payload = {
@@ -15890,9 +15960,34 @@ class SocialNetworkEngine:
             'ts': time.time(),
             'reply_port': self.chat_port,
         }
-        body = (json.dumps(payload, ensure_ascii=False) + '\n').encode('utf-8', errors='ignore')
-        with socket.create_connection((host, int(port)), timeout=4) as s:
-            s.sendall(body)
+        self._send_packet(host, port, payload)
+
+    def _world_url(self, suffix=''):
+        topic = urllib.parse.quote(self.world_topic, safe='')
+        return f'{self.world_relay}/{topic}{suffix}'
+
+    def send_world_chat(self, text):
+        msg = {
+            'kind': 'xui_world_chat',
+            'node_id': self.node_id,
+            'from': self.nickname,
+            'text': str(text or ''),
+            'room': self.world_topic,
+            'ts': time.time(),
+        }
+        data = json.dumps(msg, ensure_ascii=False).encode('utf-8', errors='ignore')
+        req = urllib.request.Request(
+            self._world_url(''),
+            data=data,
+            method='POST',
+            headers={
+                'Content-Type': 'text/plain; charset=utf-8',
+                'User-Agent': 'xui-social-global-chat',
+                'X-Title': f'XUI:{self.nickname}',
+            },
+        )
+        with urllib.request.urlopen(req, timeout=8) as r:
+            _ = r.read(256)
 
     def _is_local_host(self, host):
         h = str(host or '').strip()
@@ -16086,6 +16181,72 @@ class SocialNetworkEngine:
                     self.events.put(('chat', name, host, reply_port, text, float(msg.get('ts') or time.time())))
         srv.close()
 
+    def _world_recv_loop(self):
+        backoff = 1.2
+        while self.running:
+            if not self.world_enabled:
+                time.sleep(0.4)
+                continue
+            req = urllib.request.Request(
+                self._world_url('/json'),
+                headers={
+                    'User-Agent': 'xui-social-global-chat',
+                    'Cache-Control': 'no-cache',
+                    'Connection': 'keep-alive',
+                },
+            )
+            try:
+                with urllib.request.urlopen(req, timeout=30) as resp:
+                    backoff = 1.2
+                    while self.running and self.world_enabled:
+                        raw = resp.readline()
+                        if not raw:
+                            break
+                        line = raw.decode('utf-8', errors='ignore').strip()
+                        if not line:
+                            continue
+                        try:
+                            evt = json.loads(line)
+                        except Exception:
+                            continue
+                        if str(evt.get('event') or '') != 'message':
+                            continue
+                        msg_id = str(evt.get('id') or '')
+                        if msg_id:
+                            if msg_id in self._seen_world_ids:
+                                continue
+                            self._seen_world_ids.add(msg_id)
+                            if len(self._seen_world_ids) > 1200:
+                                self._seen_world_ids = set(list(self._seen_world_ids)[-600:])
+                        body = str(evt.get('message') or '').strip()
+                        if not body:
+                            continue
+                        try:
+                            payload = json.loads(body)
+                        except Exception:
+                            payload = {
+                                'kind': 'xui_world_chat',
+                                'node_id': '',
+                                'from': str(evt.get('title') or 'WORLD'),
+                                'text': body,
+                                'room': self.world_topic,
+                                'ts': evt.get('time', time.time()),
+                            }
+                        if str(payload.get('kind') or '') != 'xui_world_chat':
+                            continue
+                        if str(payload.get('room') or self.world_topic) != self.world_topic:
+                            continue
+                        if str(payload.get('node_id') or '') == self.node_id:
+                            continue
+                        who = str(payload.get('from') or 'WORLD')
+                        txt = str(payload.get('text') or '').strip()
+                        if txt:
+                            self.events.put(('world_chat', who, txt))
+            except Exception as exc:
+                self.events.put(('status', f'World relay reconnecting: {exc}'))
+                time.sleep(min(8.0, backoff))
+                backoff = min(8.0, backoff * 1.5)
+
 
 class SocialChatWindow(QtWidgets.QWidget):
     def __init__(self):
@@ -16099,11 +16260,14 @@ class SocialChatWindow(QtWidgets.QWidget):
         self.peer_data = {}
         self._build_ui()
         self._load_manual_peers()
+        self._load_world_settings()
         self.engine.start()
+        self._refresh_world_peer()
         self.timer = QtCore.QTimer(self)
         self.timer.timeout.connect(self._poll_events)
         self.timer.start(120)
         self._append_system('LAN autodiscovery enabled (broadcast + probe). Add manual peer for Internet P2P.')
+        self._append_system(f"World chat ready via relay ({self.engine.world_relay}) room: {self.engine.world_topic}")
 
     def _build_ui(self):
         self.setStyleSheet('''
@@ -16119,22 +16283,28 @@ class SocialChatWindow(QtWidgets.QWidget):
         root.setSpacing(10)
 
         left = QtWidgets.QVBoxLayout()
-        left_title = QtWidgets.QLabel('Peers (LAN / P2P)')
+        left_title = QtWidgets.QLabel('Peers (LAN / P2P / WORLD)')
         left_title.setStyleSheet('font-size:22px; font-weight:700;')
         self.peer_list = QtWidgets.QListWidget()
         self.peer_list.setMinimumWidth(360)
         self.btn_add = QtWidgets.QPushButton('Add Peer ID')
         self.btn_me = QtWidgets.QPushButton('My Peer IDs')
         self.btn_lan = QtWidgets.QPushButton('LAN Status')
+        self.btn_world_toggle = QtWidgets.QPushButton('World Chat: ON')
+        self.btn_world_room = QtWidgets.QPushButton('World Room')
         self.btn_add.clicked.connect(self._add_peer_dialog)
         self.btn_me.clicked.connect(self._show_my_peer_ids)
         self.btn_lan.clicked.connect(self._show_lan_status)
+        self.btn_world_toggle.clicked.connect(self._toggle_world_chat)
+        self.btn_world_room.clicked.connect(self._change_world_room)
 
         left.addWidget(left_title)
         left.addWidget(self.peer_list, 1)
         left.addWidget(self.btn_add)
         left.addWidget(self.btn_me)
         left.addWidget(self.btn_lan)
+        left.addWidget(self.btn_world_toggle)
+        left.addWidget(self.btn_world_room)
 
         right = QtWidgets.QVBoxLayout()
         self.chat = QtWidgets.QPlainTextEdit()
@@ -16160,6 +16330,8 @@ class SocialChatWindow(QtWidgets.QWidget):
         root.addLayout(right, 1)
 
     def _peer_row_text(self, p):
+        if str(p.get('source')) == 'WORLD':
+            return f"{p['name']}  [global relay]  (WORLD)"
         return f"{p['name']}  [{p['host']}:{p['port']}]  ({p['source']})"
 
     def _upsert_peer(self, name, host, port, source='LAN', node_id='', persist=False):
@@ -16170,6 +16342,7 @@ class SocialChatWindow(QtWidgets.QWidget):
             'port': int(port),
             'source': source,
             'node_id': str(node_id or ''),
+            '_world': bool(str(source) == 'WORLD'),
         }
         if key in self.peer_items:
             self.peer_data[key].update(data)
@@ -16206,6 +16379,18 @@ class SocialChatWindow(QtWidgets.QWidget):
     def _append_msg(self, sender, text):
         hhmm = time.strftime('%H:%M:%S')
         self._append_line(f'[{hhmm}] {sender}: {text}')
+        self._push_recent_message(sender, text)
+
+    def _push_recent_message(self, who, text):
+        who_txt = str(who or '').strip() or 'Unknown'
+        body = str(text or '').strip()
+        if not body:
+            return
+        arr = safe_json_read(SOCIAL_MESSAGES_FILE, [])
+        if not isinstance(arr, list):
+            arr = []
+        arr.insert(0, {'ts': int(time.time()), 'from': who_txt[:48], 'text': body[:320]})
+        safe_json_write(SOCIAL_MESSAGES_FILE, arr[:80])
 
     def _current_peer(self):
         item = self.peer_list.currentItem()
@@ -16213,6 +16398,75 @@ class SocialChatWindow(QtWidgets.QWidget):
             return None
         key = item.data(QtCore.Qt.UserRole)
         return self.peer_data.get(key)
+
+    def _world_peer_payload(self):
+        return {
+            'name': f'WORLD #{self.engine.world_topic}',
+            'host': self.engine.world_relay,
+            'port': 0,
+            'source': 'WORLD',
+            'node_id': f'world:{self.engine.world_topic}',
+            '_world': True,
+        }
+
+    def _refresh_world_peer(self):
+        stale = []
+        for key, peer in self.peer_data.items():
+            if str(peer.get('source')) == 'WORLD' or bool(peer.get('_world')):
+                stale.append(key)
+        for key in stale:
+            self._remove_peer(key)
+        if self.engine.world_enabled:
+            p = self._world_peer_payload()
+            self._upsert_peer(p['name'], p['host'], p['port'], p['source'], p['node_id'], persist=False)
+            world_key = f"{p['host']}:{int(p['port'])}"
+            if world_key in self.peer_data:
+                self.peer_data[world_key]['_world'] = True
+        self._update_world_toggle_button()
+
+    def _update_world_toggle_button(self):
+        if self.engine.world_enabled:
+            self.btn_world_toggle.setText('World Chat: ON')
+        else:
+            self.btn_world_toggle.setText('World Chat: OFF')
+
+    def _load_world_settings(self):
+        cfg = safe_json_read(WORLD_CHAT_FILE, {})
+        room = str(cfg.get('room', '')).strip()
+        enabled = bool(cfg.get('enabled', True))
+        if room:
+            self.engine.set_world_topic(room)
+        self.engine.set_world_enabled(enabled)
+        self._update_world_toggle_button()
+
+    def _save_world_settings(self):
+        safe_json_write(
+            WORLD_CHAT_FILE,
+            {
+                'room': self.engine.world_topic,
+                'enabled': bool(self.engine.world_enabled),
+                'relay': self.engine.world_relay,
+            },
+        )
+
+    def _toggle_world_chat(self):
+        self.engine.set_world_enabled(not self.engine.world_enabled)
+        self._refresh_world_peer()
+        self._save_world_settings()
+
+    def _change_world_room(self):
+        txt, ok = QtWidgets.QInputDialog.getText(
+            self,
+            'World Chat Room',
+            'Room/topic name (letters, numbers, -, _, .)',
+            text=self.engine.world_topic,
+        )
+        if not ok:
+            return
+        self.engine.set_world_topic(txt)
+        self._refresh_world_peer()
+        self._save_world_settings()
+        self._append_system(f'World room changed to: {self.engine.world_topic}')
 
     def _host_priority(self, host):
         h = str(host or '')
@@ -16230,6 +16484,8 @@ class SocialChatWindow(QtWidgets.QWidget):
         weighted = []
         for key, p in self.peer_data.items():
             host = str(p.get('host') or '')
+            if str(p.get('source') or '') == 'WORLD':
+                continue
             try:
                 port = int(p.get('port') or 0)
             except Exception:
@@ -16263,10 +16519,21 @@ class SocialChatWindow(QtWidgets.QWidget):
     def _send_current(self):
         peer = self._current_peer()
         if not peer:
-            QtWidgets.QMessageBox.information(self, 'Peer required', 'Select a LAN/P2P peer first.')
+            QtWidgets.QMessageBox.information(self, 'Peer required', 'Select a peer first.')
             return
         text = self.msg.text().strip()
         if not text:
+            return
+        if str(peer.get('source')) == 'WORLD':
+            try:
+                self.engine.send_world_chat(text)
+                hhmm = time.strftime('%H:%M:%S')
+                self._append_line(f'[{hhmm}] You -> WORLD: {text}')
+                self._push_recent_message('You -> WORLD', text)
+                self.status.setText(f'World sent to room {self.engine.world_topic}')
+                self.msg.clear()
+            except Exception as exc:
+                self.status.setText(f'World send failed: {exc}')
             return
         last_err = None
         used = None
@@ -16328,6 +16595,7 @@ class SocialChatWindow(QtWidgets.QWidget):
             lines += ['', 'VirtualBox NAT detected (10.0.2.x only).', 'Use Bridged or Host-Only Adapter for VM-to-VM LAN chat.']
         if pub:
             lines += ['', f'Public IP (approx): {pub}:{self.engine.chat_port}']
+        lines += ['', f'World room: {self.engine.world_topic}', f'World relay: {self.engine.world_relay}']
         lines += ['', 'Tip: for Internet P2P use Tailscale/ZeroTier or router port-forward TCP 38600.']
         QtWidgets.QMessageBox.information(self, 'My Peer IDs', '\n'.join(lines))
 
@@ -16385,12 +16653,34 @@ class SocialChatWindow(QtWidgets.QWidget):
                 if port and port > 0:
                     self._upsert_peer(name, host, int(port), 'LAN')
                 self._append_msg(name, text)
+                continue
+            if kind == 'world_chat':
+                _kind, sender, text = evt
+                hhmm = time.strftime('%H:%M:%S')
+                self._append_line(f'[{hhmm}] {sender} [WORLD]: {text}')
+                self._push_recent_message(f'{sender} [WORLD]', text)
+                continue
+            if kind == 'world_status':
+                _kind, enabled, room = evt
+                self._update_world_toggle_button()
+                if bool(enabled):
+                    self.status.setText(f'World chat connected ({room})')
+                else:
+                    self.status.setText('World chat disconnected')
+                self._refresh_world_peer()
+                continue
+            if kind == 'world_room':
+                _kind, room = evt
+                self.status.setText(f'World room: {room}')
+                self._refresh_world_peer()
+                continue
 
     def closeEvent(self, e):
         try:
             self.timer.stop()
         except Exception:
             pass
+        self._save_world_settings()
         self.engine.stop()
         super().closeEvent(e)
 
