@@ -26,11 +26,26 @@ run_as_root(){
         "$@"
         return $?
     fi
-    if check_cmd sudo; then
-        sudo "$@"
-        return $?
+    if [ "${XUI_NONINTERACTIVE:-0}" = "1" ] || [ ! -t 0 ]; then
+        if check_cmd pkexec; then
+            pkexec "$@"
+            return $?
+        fi
+        if check_cmd sudo; then
+            sudo -n "$@"
+            return $?
+        fi
+    else
+        if check_cmd sudo; then
+            sudo "$@"
+            return $?
+        fi
+        if check_cmd pkexec; then
+            pkexec "$@"
+            return $?
+        fi
     fi
-    warn "sudo not found and current user is not root; cannot run: $*"
+    warn "root privileges unavailable; cannot run: $*"
     return 1
 }
 
@@ -425,8 +440,14 @@ BASH
 set -euo pipefail
 as_root(){
   if [ "$(id -u)" -eq 0 ]; then "$@"; return $?; fi
-  if command -v sudo >/dev/null 2>&1; then sudo "$@"; return $?; fi
-  echo "sudo required: $*" >&2
+  if [ "${XUI_NONINTERACTIVE:-0}" = "1" ] || [ ! -t 0 ]; then
+    if command -v pkexec >/dev/null 2>&1; then pkexec "$@"; return $?; fi
+    if command -v sudo >/dev/null 2>&1; then sudo -n "$@"; return $?; fi
+  else
+    if command -v sudo >/dev/null 2>&1; then sudo "$@"; return $?; fi
+    if command -v pkexec >/dev/null 2>&1; then pkexec "$@"; return $?; fi
+  fi
+  echo "root privileges unavailable: $*" >&2
   return 1
 }
 wait_apt(){
@@ -474,8 +495,14 @@ BASH
 set -euo pipefail
 as_root(){
   if [ "$(id -u)" -eq 0 ]; then "$@"; return $?; fi
-  if command -v sudo >/dev/null 2>&1; then sudo "$@"; return $?; fi
-  echo "sudo required: $*" >&2
+  if [ "${XUI_NONINTERACTIVE:-0}" = "1" ] || [ ! -t 0 ]; then
+    if command -v pkexec >/dev/null 2>&1; then pkexec "$@"; return $?; fi
+    if command -v sudo >/dev/null 2>&1; then sudo -n "$@"; return $?; fi
+  else
+    if command -v sudo >/dev/null 2>&1; then sudo "$@"; return $?; fi
+    if command -v pkexec >/dev/null 2>&1; then pkexec "$@"; return $?; fi
+  fi
+  echo "root privileges unavailable: $*" >&2
   return 1
 }
 wait_apt(){
@@ -631,8 +658,14 @@ BASH
 set -euo pipefail
 as_root(){
   if [ "$(id -u)" -eq 0 ]; then "$@"; return $?; fi
-  if command -v sudo >/dev/null 2>&1; then sudo "$@"; return $?; fi
-  echo "sudo required: $*" >&2
+  if [ "${XUI_NONINTERACTIVE:-0}" = "1" ] || [ ! -t 0 ]; then
+    if command -v pkexec >/dev/null 2>&1; then pkexec "$@"; return $?; fi
+    if command -v sudo >/dev/null 2>&1; then sudo -n "$@"; return $?; fi
+  else
+    if command -v sudo >/dev/null 2>&1; then sudo "$@"; return $?; fi
+    if command -v pkexec >/dev/null 2>&1; then pkexec "$@"; return $?; fi
+  fi
+  echo "root privileges unavailable: $*" >&2
   return 1
 }
 ARCH=$(uname -m)
@@ -1071,6 +1104,7 @@ PROFILE_FILE = DATA_HOME / 'profile.json'
 PEERS_FILE = DATA_HOME / 'social_peers.json'
 WORLD_CHAT_FILE = DATA_HOME / 'world_chat.json'
 SOCIAL_MESSAGES_FILE = DATA_HOME / 'social_messages_recent.json'
+FRIEND_REQUESTS_FILE = DATA_HOME / 'friend_requests.json'
 
 sys.path.insert(0, str(XUI_HOME / 'bin'))
 try:
@@ -1133,6 +1167,8 @@ def ensure_data():
         ], indent=2))
     if not PROFILE_FILE.exists():
         PROFILE_FILE.write_text(json.dumps({'gamertag': 'Player1', 'signed_in': False}, indent=2))
+    if not FRIEND_REQUESTS_FILE.exists():
+        FRIEND_REQUESTS_FILE.write_text('[]')
 
 
 def pick_existing_sound(candidates):
@@ -1316,6 +1352,11 @@ class InlineSocialEngine:
         for t in self.threads:
             t.join(timeout=0.2)
 
+    def _send_packet(self, host, port, payload):
+        body = (json.dumps(payload, ensure_ascii=False) + '\n').encode('utf-8', errors='ignore')
+        with socket.create_connection((str(host), int(port)), timeout=4.0) as s:
+            s.sendall(body)
+
     def send_chat(self, host, port, text):
         payload = {
             'type': 'chat',
@@ -1325,9 +1366,29 @@ class InlineSocialEngine:
             'ts': time.time(),
             'reply_port': int(self.chat_port or 0),
         }
-        body = (json.dumps(payload, ensure_ascii=False) + '\n').encode('utf-8', errors='ignore')
-        with socket.create_connection((str(host), int(port)), timeout=4.0) as s:
-            s.sendall(body)
+        self._send_packet(host, port, payload)
+
+    def send_private_message(self, host, port, text):
+        payload = {
+            'type': 'private_message',
+            'node_id': self.node_id,
+            'from': self.nickname,
+            'text': str(text),
+            'ts': time.time(),
+            'reply_port': int(self.chat_port or 0),
+        }
+        self._send_packet(host, port, payload)
+
+    def send_friend_request(self, host, port, note=''):
+        payload = {
+            'type': 'friend_request',
+            'node_id': self.node_id,
+            'from': self.nickname,
+            'note': str(note or 'XUI friend request'),
+            'ts': time.time(),
+            'reply_port': int(self.chat_port or 0),
+        }
+        self._send_packet(host, port, payload)
 
     def _world_url(self, suffix=''):
         topic = urllib.parse.quote(self.world_topic, safe='')
@@ -1541,10 +1602,12 @@ class InlineSocialEngine:
                     msg = json.loads(line)
                 except Exception:
                     continue
-                if msg.get('type') != 'chat':
+                mtype = str(msg.get('type') or '')
+                if mtype not in ('chat', 'private_message', 'friend_request'):
                     continue
                 sender = str(msg.get('from') or host)
                 text = str(msg.get('text') or '').strip()
+                note = str(msg.get('note') or '').strip()
                 sender_node = str(msg.get('node_id') or '')
                 try:
                     reply_port = int(msg.get('reply_port') or 0)
@@ -1552,6 +1615,12 @@ class InlineSocialEngine:
                     reply_port = 0
                 if reply_port > 0:
                     self._upsert_peer(sender, host, reply_port, 'LAN', sender_node)
+                if mtype == 'friend_request':
+                    self.events.put(('friend_request', sender, host, int(reply_port or 0), note))
+                    continue
+                if text and mtype == 'private_message':
+                    self.events.put(('private_message', sender, text))
+                    continue
                 if text:
                     self.events.put(('chat', sender, text))
         srv.close()
@@ -1631,10 +1700,14 @@ class SocialOverlay(QtWidgets.QDialog):
         self.engine = InlineSocialEngine(self.nickname)
         self.peer_items = {}
         self.peer_data = {}
+        self.friends = []
+        self.friend_requests = []
         self.setModal(True)
         self.setWindowFlags(QtCore.Qt.Dialog | QtCore.Qt.FramelessWindowHint)
         self.setAttribute(QtCore.Qt.WA_TranslucentBackground, True)
         self._build()
+        self._load_friends()
+        self._load_friend_requests()
         self._load_manual_peers()
         self._load_world_settings()
         self.engine.start()
@@ -1693,11 +1766,17 @@ class SocialOverlay(QtWidgets.QDialog):
         self.peers = QtWidgets.QListWidget()
         self.peers.setMinimumWidth(360)
         self.btn_add = QtWidgets.QPushButton('Add Peer ID')
+        self.btn_friend_request = QtWidgets.QPushButton('Send Friend Request')
+        self.btn_friend_requests = QtWidgets.QPushButton('Friend Requests')
+        self.btn_friends = QtWidgets.QPushButton('Friends List')
         self.btn_ids = QtWidgets.QPushButton('My Peer IDs')
         self.btn_lan = QtWidgets.QPushButton('LAN Status')
         self.btn_world_toggle = QtWidgets.QPushButton('World Chat: ON')
         self.btn_world_room = QtWidgets.QPushButton('World Room')
         self.btn_add.clicked.connect(self._add_peer)
+        self.btn_friend_request.clicked.connect(self._send_friend_request)
+        self.btn_friend_requests.clicked.connect(self._open_friend_requests)
+        self.btn_friends.clicked.connect(self._show_friends)
         self.btn_ids.clicked.connect(self._show_peer_ids)
         self.btn_lan.clicked.connect(self._show_lan_status)
         self.btn_world_toggle.clicked.connect(self._toggle_world_chat)
@@ -1705,6 +1784,9 @@ class SocialOverlay(QtWidgets.QDialog):
         left.addWidget(left_lbl)
         left.addWidget(self.peers, 1)
         left.addWidget(self.btn_add)
+        left.addWidget(self.btn_friend_request)
+        left.addWidget(self.btn_friend_requests)
+        left.addWidget(self.btn_friends)
         left.addWidget(self.btn_ids)
         left.addWidget(self.btn_lan)
         left.addWidget(self.btn_world_toggle)
@@ -1776,6 +1858,212 @@ class SocialOverlay(QtWidgets.QDialog):
             arr = []
         arr.insert(0, {'ts': int(time.time()), 'from': who_txt[:48], 'text': body[:320]})
         safe_json_write(SOCIAL_MESSAGES_FILE, arr[:80])
+
+    def _friend_endpoint_key(self, host, port):
+        h = str(host or '').strip().lower()
+        try:
+            p = int(port or 0)
+        except Exception:
+            p = 0
+        return f'{h}:{p}'
+
+    def _load_friends(self):
+        arr = safe_json_read(FRIENDS_FILE, [])
+        if not isinstance(arr, list):
+            arr = []
+        out = []
+        for raw in arr:
+            if not isinstance(raw, dict):
+                continue
+            name = str(raw.get('name') or '').strip()
+            host = str(raw.get('host') or '').strip()
+            try:
+                port = int(raw.get('port') or 0)
+            except Exception:
+                port = 0
+            out.append({
+                'name': name or host or 'Friend',
+                'host': host,
+                'port': int(port),
+                'online': bool(raw.get('online', False)),
+                'accepted': bool(raw.get('accepted', True)),
+                'last_seen': int(raw.get('last_seen', int(time.time()))),
+            })
+        self.friends = out
+
+    def _save_friends(self):
+        safe_json_write(FRIENDS_FILE, self.friends)
+
+    def _friend_matches_peer(self, friend, peer):
+        fh = str(friend.get('host') or '').strip().lower()
+        ph = str(peer.get('host') or '').strip().lower()
+        fp = int(friend.get('port') or 0)
+        pp = int(peer.get('port') or 0)
+        if fh and ph and fh == ph and fp > 0 and pp > 0 and fp == pp:
+            return True
+        fn = str(friend.get('name') or '').strip().lower()
+        pn = str(peer.get('name') or '').strip().lower()
+        return bool(fn and pn and fn == pn)
+
+    def _is_friend(self, peer):
+        for f in self.friends:
+            if self._friend_matches_peer(f, peer):
+                return True
+        return False
+
+    def _mark_friend_online(self, peer, online=True):
+        changed = False
+        now = int(time.time())
+        for f in self.friends:
+            if self._friend_matches_peer(f, peer):
+                if f.get('online') != bool(online):
+                    f['online'] = bool(online)
+                    changed = True
+                f['last_seen'] = now
+                changed = True
+        if changed:
+            self._save_friends()
+
+    def _upsert_friend(self, name, host, port):
+        host = str(host or '').strip()
+        try:
+            port = int(port or 0)
+        except Exception:
+            port = 0
+        key = self._friend_endpoint_key(host, port)
+        now = int(time.time())
+        for f in self.friends:
+            if self._friend_endpoint_key(f.get('host'), f.get('port')) == key:
+                f['name'] = str(name or f.get('name') or host or 'Friend')
+                f['online'] = True
+                f['accepted'] = True
+                f['last_seen'] = now
+                self._save_friends()
+                return
+        self.friends.append({
+            'name': str(name or host or 'Friend'),
+            'host': host,
+            'port': int(port),
+            'online': True,
+            'accepted': True,
+            'last_seen': now,
+        })
+        self._save_friends()
+
+    def _load_friend_requests(self):
+        arr = safe_json_read(FRIEND_REQUESTS_FILE, [])
+        if not isinstance(arr, list):
+            arr = []
+        out = []
+        for raw in arr:
+            if not isinstance(raw, dict):
+                continue
+            out.append({
+                'name': str(raw.get('name') or 'Unknown').strip() or 'Unknown',
+                'host': str(raw.get('host') or '').strip(),
+                'port': int(raw.get('port') or 0),
+                'note': str(raw.get('note') or '').strip(),
+                'ts': int(raw.get('ts') or int(time.time())),
+            })
+        self.friend_requests = out
+
+    def _save_friend_requests(self):
+        safe_json_write(FRIEND_REQUESTS_FILE, self.friend_requests)
+
+    def _queue_friend_request(self, name, host, port, note=''):
+        key = self._friend_endpoint_key(host, port)
+        for req in self.friend_requests:
+            if self._friend_endpoint_key(req.get('host'), req.get('port')) == key:
+                req['name'] = str(name or req.get('name') or 'Unknown')
+                req['note'] = str(note or req.get('note') or '')
+                req['ts'] = int(time.time())
+                self._save_friend_requests()
+                return
+        self.friend_requests.insert(0, {
+            'name': str(name or 'Unknown'),
+            'host': str(host or ''),
+            'port': int(port or 0),
+            'note': str(note or ''),
+            'ts': int(time.time()),
+        })
+        self.friend_requests = self.friend_requests[:120]
+        self._save_friend_requests()
+
+    def _show_friends(self):
+        if not self.friends:
+            QtWidgets.QMessageBox.information(self, 'Friends', 'No friends yet.')
+            return
+        lines = []
+        for i, f in enumerate(self.friends, 1):
+            name = str(f.get('name') or 'Friend')
+            host = str(f.get('host') or '-')
+            port = int(f.get('port') or 0)
+            online = 'Online' if bool(f.get('online')) else 'Offline'
+            endpoint = f'{host}:{port}' if host and port > 0 else host
+            lines.append(f'{i}. {name} - {online} - {endpoint}')
+        QtWidgets.QMessageBox.information(self, 'Friends', '\n'.join(lines))
+
+    def _send_friend_request(self):
+        peer = self._selected_peer()
+        if not peer or str(peer.get('source')) == 'WORLD':
+            QtWidgets.QMessageBox.information(self, 'Friend Request', 'Select a LAN/P2P peer first.')
+            return
+        candidates = self._send_candidates(peer)
+        err = None
+        sent = None
+        for host, port, _key in candidates:
+            try:
+                self.engine.send_friend_request(host, port, f'Add {self.nickname} as friend')
+                sent = (host, int(port))
+                break
+            except Exception as exc:
+                err = exc
+        if sent:
+            self.status.setText(f'Friend request sent to {sent[0]}:{sent[1]}')
+            self._append_system(f"Friend request sent to {peer.get('name', 'peer')}")
+            return
+        self.status.setText(f'Friend request failed: {err or "unreachable peer"}')
+
+    def _open_friend_requests(self):
+        if not self.friend_requests:
+            QtWidgets.QMessageBox.information(self, 'Friend Requests', 'No pending requests.')
+            return
+        lines = []
+        for i, req in enumerate(self.friend_requests[:40], 1):
+            note = str(req.get('note') or '').strip()
+            suffix = f' | {note}' if note else ''
+            lines.append(
+                f"{i}. {req.get('name','Unknown')} [{req.get('host','-')}:{int(req.get('port') or 0)}]{suffix}"
+            )
+        idx, ok = QtWidgets.QInputDialog.getInt(
+            self,
+            'Friend Requests',
+            'Select request number to accept/reject:\n\n' + '\n'.join(lines),
+            1,
+            1,
+            len(self.friend_requests),
+            1,
+        )
+        if not ok:
+            return
+        req = self.friend_requests[int(idx) - 1]
+        ans = QtWidgets.QMessageBox.question(
+            self,
+            'Friend Request',
+            f"Accept friend request from {req.get('name','Unknown')}?",
+            QtWidgets.QMessageBox.Yes | QtWidgets.QMessageBox.No | QtWidgets.QMessageBox.Cancel,
+            QtWidgets.QMessageBox.Yes,
+        )
+        if ans == QtWidgets.QMessageBox.Cancel:
+            return
+        if ans == QtWidgets.QMessageBox.Yes:
+            self._upsert_friend(req.get('name'), req.get('host'), req.get('port'))
+            self._append_system(f"Friend added: {req.get('name', 'Unknown')}")
+            self.status.setText(f"Friend added: {req.get('name', 'Unknown')}")
+        else:
+            self._append_system(f"Friend request rejected: {req.get('name', 'Unknown')}")
+        self.friend_requests.pop(int(idx) - 1)
+        self._save_friend_requests()
 
     def _peer_row(self, peer):
         if str(peer.get('source')) == 'WORLD':
@@ -2005,12 +2293,16 @@ class SocialOverlay(QtWidgets.QDialog):
             except Exception as e:
                 self.status.setText(f'World send failed: {e}')
             return
+        is_friend = self._is_friend(peer)
         last_err = None
         used = None
         candidates = self._send_candidates(peer)
         for host, port, key in candidates:
             try:
-                self.engine.send_chat(host, port, txt)
+                if is_friend:
+                    self.engine.send_private_message(host, port, txt)
+                else:
+                    self.engine.send_chat(host, port, txt)
                 used = (host, int(port), key)
                 break
             except Exception as e:
@@ -2018,11 +2310,17 @@ class SocialOverlay(QtWidgets.QDialog):
                 continue
         if used:
             host, port, key = used
-            self._append_chat(f"You -> {peer['name']}", txt)
-            if host == str(peer.get('host')) and int(port) == int(peer.get('port') or 0):
-                self.status.setText(f"Sent to {host}:{port}")
+            if is_friend:
+                self._append_line(f"[{time.strftime('%H:%M:%S')}] You -> {peer['name']} [PM]: {txt}")
+                self._push_recent_message(f"You -> {peer['name']} [PM]", txt)
             else:
-                self.status.setText(f"Sent via fallback {host}:{port}")
+                self._append_chat(f"You -> {peer['name']}", txt)
+            if host == str(peer.get('host')) and int(port) == int(peer.get('port') or 0):
+                mode = 'PM' if is_friend else 'Chat'
+                self.status.setText(f"{mode} sent to {host}:{port}")
+            else:
+                mode = 'PM' if is_friend else 'Chat'
+                self.status.setText(f"{mode} sent via fallback {host}:{port}")
                 item = self.peer_items.get(key)
                 if item is not None:
                     self.peers.setCurrentItem(item)
@@ -2043,14 +2341,25 @@ class SocialOverlay(QtWidgets.QDialog):
             elif kind == 'peer_up':
                 _kind, _key, data = evt
                 self._upsert_peer(data, persist=False)
+                self._mark_friend_online(data, True)
             elif kind == 'peer_down':
                 _kind, key = evt
                 peer = self.peer_data.get(key)
                 if peer and peer.get('source') == 'LAN':
+                    self._mark_friend_online(peer, False)
                     self._remove_peer(key)
             elif kind == 'chat':
                 _kind, sender, text = evt
                 self._append_chat(sender, text)
+            elif kind == 'private_message':
+                _kind, sender, text = evt
+                self._append_line(f"[{time.strftime('%H:%M:%S')}] {sender} [PM]: {text}")
+                self._push_recent_message(f'{sender} [PM]', text)
+            elif kind == 'friend_request':
+                _kind, sender, host, port, note = evt
+                self._queue_friend_request(sender, host, port, note)
+                self._append_system(f"Friend request from {sender} [{host}:{port}]")
+                self.status.setText(f"Pending friend requests: {len(self.friend_requests)}")
             elif kind == 'world_chat':
                 _kind, sender, text = evt
                 self._append_line(f"[{time.strftime('%H:%M:%S')}] {sender} [WORLD]: {text}")
@@ -3139,6 +3448,113 @@ class UpdateProgressDialog(QtWidgets.QDialog):
         self._phase = 1
         self.bar.setValue(100)
         self.detail.setText('Update installed successfully. Restarting dashboard...')
+
+
+class InstallTaskProgressDialog(QtWidgets.QDialog):
+    def __init__(self, app_title='App', parent=None):
+        super().__init__(parent)
+        self._phase = 0
+        self.setWindowTitle('Install in Progress')
+        self.setWindowFlags(QtCore.Qt.Dialog | QtCore.Qt.FramelessWindowHint)
+        self.setModal(True)
+        self.resize(760, 360)
+        self.setStyleSheet('''
+            QDialog {
+                background:#e7eaee;
+                border:2px solid rgba(242,247,250,0.9);
+            }
+            QLabel#title {
+                color:#f6f8fb;
+                background:#151a1f;
+                font-size:34px;
+                font-weight:800;
+                padding:8px 14px;
+            }
+            QLabel#app {
+                color:#293645;
+                font-size:30px;
+                font-weight:800;
+            }
+            QLabel#body {
+                color:#27313a;
+                font-size:25px;
+                font-weight:700;
+            }
+            QLabel#detail {
+                color:#34414e;
+                font-size:17px;
+                font-weight:700;
+            }
+            QProgressBar {
+                border:1px solid #c9d3db;
+                border-radius:2px;
+                background:#dfe4e8;
+                height:24px;
+                text-align:center;
+                color:#1e252c;
+                font-size:14px;
+                font-weight:800;
+            }
+            QProgressBar::chunk {
+                background:qlineargradient(x1:0,y1:0,x2:1,y2:0, stop:0 #37b935, stop:1 #5dd43f);
+            }
+        ''')
+        v = QtWidgets.QVBoxLayout(self)
+        v.setContentsMargins(0, 0, 0, 0)
+        v.setSpacing(0)
+        self.lbl_title = QtWidgets.QLabel('Install in Progress')
+        self.lbl_title.setObjectName('title')
+        v.addWidget(self.lbl_title)
+        body = QtWidgets.QWidget()
+        body_l = QtWidgets.QVBoxLayout(body)
+        body_l.setContentsMargins(28, 24, 28, 20)
+        body_l.setSpacing(16)
+        self.lbl_app = QtWidgets.QLabel(str(app_title or 'App'))
+        self.lbl_app.setObjectName('app')
+        self.lbl_app.setAlignment(QtCore.Qt.AlignLeft | QtCore.Qt.AlignVCenter)
+        body_l.addWidget(self.lbl_app)
+        self.lbl = QtWidgets.QLabel('Installing app. Do not turn off or unplug your console.')
+        self.lbl.setObjectName('body')
+        self.lbl.setWordWrap(True)
+        body_l.addWidget(self.lbl)
+        self.bar = QtWidgets.QProgressBar()
+        self.bar.setRange(0, 100)
+        self.bar.setValue(7)
+        self.bar.setFormat('%p%')
+        body_l.addWidget(self.bar)
+        self.detail = QtWidgets.QLabel('Preparing installer...')
+        self.detail.setObjectName('detail')
+        body_l.addWidget(self.detail)
+        body_l.addStretch(1)
+        v.addWidget(body, 1)
+        self._tick = QtCore.QTimer(self)
+        self._tick.timeout.connect(self._pulse)
+        self._tick.start(130)
+
+    def _pulse(self):
+        cur = self.bar.value()
+        target = 93 if self._phase < 1 else 98
+        nxt = cur + 1
+        if nxt > target:
+            nxt = target
+        self.bar.setValue(nxt)
+
+    def set_detail(self, text):
+        t = str(text or '').strip()
+        if t:
+            self.detail.setText(t[:220])
+        if self.bar.value() < 93:
+            self.bar.setValue(min(93, self.bar.value() + 1))
+
+    def finish_ok(self, text='Install completed successfully.'):
+        self._phase = 1
+        self.bar.setValue(100)
+        self.detail.setText(str(text or 'Install completed successfully.'))
+
+    def finish_error(self, text='Install failed.'):
+        self._phase = 1
+        self.bar.setValue(min(100, max(self.bar.value(), 97)))
+        self.detail.setText(str(text or 'Install failed.'))
 
 
 class XboxGuideMenu(QtWidgets.QDialog):
@@ -4752,6 +5168,13 @@ class Dashboard(QtWidgets.QMainWindow):
         self._mandatory_update_proc = None
         self._mandatory_update_progress = None
         self._mandatory_update_output = ''
+        self._install_task_proc = None
+        self._install_task_progress = None
+        self._install_task_output = ''
+        self._install_task_success_msg = ''
+        self._install_task_fail_msg = ''
+        self._install_task_launch_cmd = ''
+        self._install_task_label = 'App'
         self._guide_open_last_at = 0.0
         self._games_inline = None
         self._qgamepads = {}
@@ -5559,6 +5982,107 @@ exit 0
             return
         QtCore.QProcess.startDetached('/bin/bash', ['-lc', hold])
 
+    def _close_install_task_progress(self):
+        dlg = self._install_task_progress
+        self._install_task_progress = None
+        if dlg is None:
+            return
+        try:
+            dlg.hide()
+        except Exception:
+            pass
+        try:
+            dlg.deleteLater()
+        except Exception:
+            pass
+
+    def _on_install_task_output(self):
+        proc = self._install_task_proc
+        if proc is None:
+            return
+        try:
+            chunk = bytes(proc.readAllStandardOutput()).decode('utf-8', errors='ignore')
+        except Exception:
+            chunk = ''
+        if not chunk:
+            return
+        self._install_task_output = (self._install_task_output + chunk)[-26000:]
+        dlg = self._install_task_progress
+        if dlg is None:
+            return
+        lines = [ln.strip() for ln in self._install_task_output.splitlines() if ln.strip()]
+        if lines:
+            dlg.set_detail(lines[-1][:180])
+
+    def _on_install_task_error(self, err):
+        self._on_install_task_output()
+        proc = self._install_task_proc
+        self._install_task_proc = None
+        if proc is not None:
+            proc.deleteLater()
+        dlg = self._install_task_progress
+        if dlg is not None and hasattr(dlg, 'finish_error'):
+            dlg.finish_error('Installer process error.')
+        self._close_install_task_progress()
+        self._msg('Install Failed', f'Installer process error: {err}')
+
+    def _on_install_task_finished(self, code, status):
+        self._on_install_task_output()
+        proc = self._install_task_proc
+        self._install_task_proc = None
+        if proc is not None:
+            proc.deleteLater()
+        ok = (status == QtCore.QProcess.NormalExit and int(code) == 0)
+        if ok:
+            dlg = self._install_task_progress
+            if dlg is not None and hasattr(dlg, 'finish_ok'):
+                dlg.finish_ok('Install completed successfully.')
+            QtCore.QTimer.singleShot(260, self._close_install_task_progress)
+            success_txt = str(self._install_task_success_msg or f'{self._install_task_label} installed.')
+            launch_cmd = str(self._install_task_launch_cmd or '').strip()
+            if launch_cmd:
+                self._run('/bin/sh', ['-c', launch_cmd])
+            self._msg('Install', success_txt)
+            return
+        dlg = self._install_task_progress
+        if dlg is not None and hasattr(dlg, 'finish_error'):
+            dlg.finish_error('Install failed.')
+        self._close_install_task_progress()
+        lines = [ln.strip() for ln in self._install_task_output.splitlines() if ln.strip()]
+        tail = '\n'.join(lines[-10:]).strip()
+        fail_txt = str(self._install_task_fail_msg or f'{self._install_task_label} install failed.')
+        if tail:
+            fail_txt = fail_txt + '\n\n' + tail
+        self._msg('Install Failed', fail_txt)
+
+    def _run_install_task(self, title, shell_cmd, success_msg='', fail_msg='', launch_cmd=''):
+        if self._install_task_proc is not None and self._install_task_proc.state() != QtCore.QProcess.NotRunning:
+            self._msg('Install', 'Another installation is already running.')
+            return
+        self._play_sfx('open')
+        self._install_task_output = ''
+        self._install_task_success_msg = str(success_msg or '')
+        self._install_task_fail_msg = str(fail_msg or '')
+        self._install_task_launch_cmd = str(launch_cmd or '')
+        self._install_task_label = str(title or 'App')
+        dlg = InstallTaskProgressDialog(self._install_task_label, self)
+        dlg.show()
+        self._install_task_progress = dlg
+        proc = QtCore.QProcess(self)
+        env = QtCore.QProcessEnvironment.systemEnvironment()
+        env.insert('XUI_NONINTERACTIVE', '1')
+        env.insert('XUI_FORCE_ELEVATED', '1')
+        env.insert('DEBIAN_FRONTEND', 'noninteractive')
+        proc.setProcessEnvironment(env)
+        proc.setProgram('/bin/sh')
+        proc.setArguments(['-lc', str(shell_cmd)])
+        proc.setProcessChannelMode(QtCore.QProcess.MergedChannels)
+        proc.readyReadStandardOutput.connect(self._on_install_task_output)
+        proc.finished.connect(self._on_install_task_finished)
+        proc.errorOccurred.connect(self._on_install_task_error)
+        self._install_task_proc = proc
+        proc.start()
+
     def _open_url(self, url):
         if QtWebEngineWidgets is not None:
             try:
@@ -5638,7 +6162,13 @@ exit 0
         )
         if ask:
             if Path(install_script).exists():
-                self._run_terminal(f'"{install_script}"')
+                self._run_install_task(
+                    label,
+                    f'"{install_script}"',
+                    success_msg=f'{label} install completed.',
+                    fail_msg=f'{label} install failed.',
+                    launch_cmd=f'"{launch_script}"',
+                )
             else:
                 self._msg(label, f'Installer not found: {install_script}')
 
@@ -5650,7 +6180,12 @@ exit 0
             return
         install_script = spec['install']
         if Path(install_script).exists():
-            self._run_terminal(f'"{install_script}"')
+            self._run_install_task(
+                spec['label'],
+                f'"{install_script}"',
+                success_msg=f'{spec["label"]} install completed.',
+                fail_msg=f'{spec["label"]} install failed.',
+            )
         else:
             self._msg(spec['label'], f'Installer not found: {install_script}')
 
@@ -6144,8 +6679,13 @@ exit 0
                     'URL: https://www.mediafire.com/file/a4q4l09vdfqzzws/Five_Nights_At_Epsteins_Linux.tar/file\n\n'
                     'Deseas continuar?'
                 ):
-                    self._run_terminal(f'"{install_fnae}" && "{run_fnae}"')
-                    self._msg('FNAE', 'Instalador iniciado. Log: ~/.xui/logs/fnae_install.log')
+                    self._run_install_task(
+                        'FNAE',
+                        f'"{install_fnae}"',
+                        success_msg='FNAE installed successfully.',
+                        fail_msg='FNAE install failed. Check ~/.xui/logs/fnae_install.log',
+                        launch_cmd=f'"{run_fnae}"',
+                    )
         elif action == 'Uninstall FNAE':
             if self._ask_yes_no('FNAE', 'Uninstall Five Nights At Epstein\'s from local XUI apps folder?'):
                 subprocess.getoutput('/bin/sh -c "rm -rf $HOME/.xui/apps/fnae $HOME/.xui/data/fnae_paths.json"')
@@ -6253,7 +6793,12 @@ exit 0
             out = subprocess.getoutput(f'/bin/sh -c "{xui}/bin/xui_compat_status.sh"')
             self._msg('Compat X86', out or 'No compatibility data.')
         elif action == 'Install Box64':
-            self._run_terminal(f'"{xui}/bin/xui_install_box64.sh"')
+            self._run_install_task(
+                'Box64',
+                f'"{xui}/bin/xui_install_box64.sh"',
+                success_msg='Box64 install step completed.',
+                fail_msg='Box64 install failed.',
+            )
         elif action == 'Install Steam':
             self._install_platform('steam')
         elif action == 'Install RetroArch':
@@ -6339,7 +6884,12 @@ exit 0
         elif action == 'Scan Media Games':
             self._run_terminal(f'"{xui}/bin/xui_scan_media_games.sh"')
         elif action == 'Install Wine Runtime':
-            self._run_terminal(f'"{xui}/bin/xui_install_wine.sh"')
+            self._run_install_task(
+                'Wine Runtime',
+                f'"{xui}/bin/xui_install_wine.sh"',
+                success_msg='Wine runtime install step completed.',
+                fail_msg='Wine runtime install failed.',
+            )
         elif action == 'Open Notes':
             self._run('/bin/sh', ['-c', f'{xui}/bin/xui_note.sh'])
         elif action == 'Terminal':
@@ -7831,8 +8381,14 @@ BASH
 set -euo pipefail
 as_root(){
   if [ "$(id -u)" -eq 0 ]; then "$@"; return $?; fi
-  if command -v sudo >/dev/null 2>&1; then sudo "$@"; return $?; fi
-  echo "sudo required for: $*" >&2
+  if [ "${XUI_NONINTERACTIVE:-0}" = "1" ] || [ ! -t 0 ]; then
+    if command -v pkexec >/dev/null 2>&1; then pkexec "$@"; return $?; fi
+    if command -v sudo >/dev/null 2>&1; then sudo -n "$@"; return $?; fi
+  else
+    if command -v sudo >/dev/null 2>&1; then sudo "$@"; return $?; fi
+    if command -v pkexec >/dev/null 2>&1; then pkexec "$@"; return $?; fi
+  fi
+  echo "root privileges unavailable for: $*" >&2
   return 1
 }
 
@@ -9237,69 +9793,47 @@ def _curated_items():
             'id': 'hub_legal_flathub_games',
             'name': 'Flathub Games Hub',
             'price': 0,
-            'category': 'Apps',
+            'category': 'Games',
             'desc': 'Discover legal open-source games and apps on Flathub.',
             'launch': str(XUI_BIN / 'xui_browser.sh') + ' --hub https://flathub.org/apps/collection/popular/1',
         },
         {
-            'id': 'acc_avatar_pack',
-            'name': 'Avatar Pack Premium',
-            'price': 35,
-            'category': 'Accessories',
-            'desc': 'Xbox style avatar accessory bundle.',
+            'id': 'hub_legal_moddb_games',
+            'name': 'ModDB Games Hub',
+            'price': 0,
+            'category': 'Games',
+            'source': 'ModDB',
+            'desc': 'Discover PC and indie games from ModDB.',
+            'launch': str(XUI_BIN / 'xui_browser.sh') + ' --hub https://www.moddb.com/games',
         },
         {
-            'id': 'acc_theme_live_legacy',
-            'name': 'Theme Live Legacy',
-            'price': 15,
-            'category': 'Themes',
-            'desc': 'Classic Xbox Live green theme tweaks.',
+            'id': 'real_openra_moddb',
+            'name': 'OpenRA (ModDB)',
+            'price': 0,
+            'category': 'Games',
+            'source': 'ModDB',
+            'desc': 'Real-time strategy game page on ModDB.',
+            'launch': str(XUI_BIN / 'xui_browser.sh') + ' --hub https://www.moddb.com/games/openra',
+        },
+        {
+            'id': 'real_holocure_itch',
+            'name': 'HoloCure (Itch.io)',
+            'price': 0,
+            'category': 'Games',
+            'source': 'Itch.io',
+            'desc': 'Real game page on Itch.io.',
+            'launch': str(XUI_BIN / 'xui_browser.sh') + ' --hub https://kay-yu.itch.io/holocure',
+        },
+        {
+            'id': 'real_fnaf_gamejolt',
+            'name': 'FNAF Fan Games (Game Jolt)',
+            'price': 0,
+            'category': 'Games',
+            'source': 'Game Jolt',
+            'desc': 'Real Game Jolt catalog filtered for FNAF fan games.',
+            'launch': str(XUI_BIN / 'xui_browser.sh') + ' --hub https://gamejolt.com/games?tags=fnaf',
         },
     ]
-
-
-def _filler_items(current_ids, target_count=520):
-    categories = ['Games', 'MiniGames', 'Accessories', 'Apps', 'Browser', 'Themes']
-    prefixes = {
-        'Games': ['Arcade', 'Galaxy', 'Battle', 'Turbo', 'Retro', 'Dungeon', 'Quest', 'Rally'],
-        'MiniGames': ['Puzzle', 'Match', 'Brick', 'Rhythm', 'Dash', 'Ninja', 'Jump', 'Pop'],
-        'Accessories': ['Avatar', 'Gamerpic', 'Skin', 'Badge', 'Title', 'Emote', 'Voice', 'HUD'],
-        'Apps': ['Utility', 'Toolkit', 'Manager', 'Studio', 'Service', 'Monitor', 'Companion', 'Hub'],
-        'Browser': ['Tab', 'Favorite', 'Feed', 'Portal', 'Web Card', 'Live Tile', 'Channel', 'Bookmark'],
-        'Themes': ['Neon', 'Carbon', 'Aero', 'Live', 'Emerald', 'Metro', 'Classic', 'Pulse'],
-    }
-    suffixes = ['Pack', 'Edition', 'Suite', 'Bundle', 'Pro', 'Lite', 'Plus', 'Ultra']
-    out = []
-    idx = 1
-    while len(current_ids) + len(out) < target_count:
-        cat = categories[(idx - 1) % len(categories)]
-        pref = prefixes[cat][(idx * 3) % len(prefixes[cat])]
-        suf = suffixes[(idx * 5) % len(suffixes)]
-        rid = f"auto_{cat.lower()}_{idx:04d}"
-        if rid in current_ids:
-            idx += 1
-            continue
-        base_price = {
-            'Games': 30,
-            'MiniGames': 18,
-            'Accessories': 8,
-            'Apps': 12,
-            'Browser': 9,
-            'Themes': 6,
-        }[cat]
-        price = float(base_price + (idx % 17))
-        out.append({
-            'id': rid,
-            'name': f'{pref} {suf} {idx:03d}',
-            'price': price,
-            'category': cat,
-            'source': 'XUI',
-            'desc': f'{cat} item auto-generated for XUI store catalog.',
-            'launch': str(XUI_BIN / 'xui_browser.sh') + f' --hub https://www.xbox.com/en-US/search?q={rid}',
-        })
-        idx += 1
-    return out
-
 
 def _rotation_key():
     return date.today().isoformat()
@@ -9324,7 +9858,7 @@ def _daily_rotated_items(all_items, keep_ids=None, active_count=DAILY_ACTIVE_COU
         cat = str(item.get('category', 'Apps')).strip().lower()
         if iid and iid in keep_ids:
             keep.append(item)
-        elif src in ('flathub', 'itch.io', 'game jolt') and cat in ('games', 'minigames'):
+        elif src in ('flathub', 'itch.io', 'game jolt', 'moddb') and cat in ('games', 'minigames'):
             external_priority.append(item)
         else:
             pool.append(item)
@@ -9383,6 +9917,8 @@ def ensure_catalog_minimum(min_count=620):
         if item is None:
             continue
         iid = item['id']
+        if iid.startswith('auto_') or iid.startswith('itch_page_') or iid.startswith('gamejolt_page_'):
+            continue
         if iid in seen:
             continue
         seen.add(iid)
@@ -9399,20 +9935,15 @@ def ensure_catalog_minimum(min_count=620):
         item = _norm_item(raw)
         if item is None:
             continue
+        if item['id'].startswith('itch_page_') or item['id'].startswith('gamejolt_page_'):
+            continue
         if item['id'] in seen:
             continue
         seen.add(item['id'])
         items.append(item)
-    if len(items) < min_count:
-        for raw in _filler_items(seen, min_count):
-            item = _norm_item(raw)
-            if item is None or item['id'] in seen:
-                continue
-            seen.add(item['id'])
-            items.append(item)
     active_items, day_key = _daily_rotated_items(items, ALWAYS_VISIBLE_IDS, DAILY_ACTIVE_COUNT)
     out = {
-        'catalog_version': 'xui-620',
+        'catalog_version': 'xui-real-sources',
         'rotation_day': day_key,
         'rotation_active_count': len(active_items),
         'rotation_total_count': len(items),
@@ -9740,6 +10271,89 @@ class VirtualKeyboardDialog(QtWidgets.QDialog):
         return self.line.text().strip()
 
 
+class StoreInstallProgressDialog(QtWidgets.QDialog):
+    def __init__(self, app_title='App', parent=None):
+        super().__init__(parent)
+        self._phase = 0
+        self.setWindowTitle('Install in Progress')
+        self.setWindowFlags(QtCore.Qt.Dialog | QtCore.Qt.FramelessWindowHint)
+        self.setModal(True)
+        self.resize(760, 360)
+        self.setStyleSheet('''
+            QDialog { background:#e7eaee; border:2px solid rgba(242,247,250,0.9); }
+            QLabel#title { color:#f6f8fb; background:#151a1f; font-size:33px; font-weight:800; padding:8px 14px; }
+            QLabel#app { color:#293645; font-size:30px; font-weight:800; }
+            QLabel#body { color:#27313a; font-size:24px; font-weight:700; }
+            QLabel#detail { color:#34414e; font-size:17px; font-weight:700; }
+            QProgressBar {
+                border:1px solid #c9d3db;
+                border-radius:2px;
+                background:#dfe4e8;
+                height:24px;
+                text-align:center;
+                color:#1e252c;
+                font-size:14px;
+                font-weight:800;
+            }
+            QProgressBar::chunk {
+                background:qlineargradient(x1:0,y1:0,x2:1,y2:0, stop:0 #37b935, stop:1 #5dd43f);
+            }
+        ''')
+        root = QtWidgets.QVBoxLayout(self)
+        root.setContentsMargins(0, 0, 0, 0)
+        root.setSpacing(0)
+        self.lbl_title = QtWidgets.QLabel('Install in Progress')
+        self.lbl_title.setObjectName('title')
+        root.addWidget(self.lbl_title)
+        body = QtWidgets.QWidget()
+        lay = QtWidgets.QVBoxLayout(body)
+        lay.setContentsMargins(28, 24, 28, 20)
+        lay.setSpacing(16)
+        self.lbl_app = QtWidgets.QLabel(str(app_title or 'App'))
+        self.lbl_app.setObjectName('app')
+        lay.addWidget(self.lbl_app)
+        self.lbl = QtWidgets.QLabel('Installing app. Do not turn off or unplug your console.')
+        self.lbl.setObjectName('body')
+        self.lbl.setWordWrap(True)
+        lay.addWidget(self.lbl)
+        self.bar = QtWidgets.QProgressBar()
+        self.bar.setRange(0, 100)
+        self.bar.setValue(7)
+        self.bar.setFormat('%p%')
+        lay.addWidget(self.bar)
+        self.detail = QtWidgets.QLabel('Preparing installer...')
+        self.detail.setObjectName('detail')
+        lay.addWidget(self.detail)
+        lay.addStretch(1)
+        root.addWidget(body, 1)
+        self._tick = QtCore.QTimer(self)
+        self._tick.timeout.connect(self._pulse)
+        self._tick.start(130)
+
+    def _pulse(self):
+        cur = self.bar.value()
+        target = 93 if self._phase < 1 else 98
+        nxt = min(target, cur + 1)
+        self.bar.setValue(nxt)
+
+    def set_detail(self, text):
+        t = str(text or '').strip()
+        if t:
+            self.detail.setText(t[:220])
+        if self.bar.value() < 93:
+            self.bar.setValue(min(93, self.bar.value() + 1))
+
+    def finish_ok(self, text='Install completed successfully.'):
+        self._phase = 1
+        self.bar.setValue(100)
+        self.detail.setText(str(text or 'Install completed successfully.'))
+
+    def finish_error(self, text='Install failed.'):
+        self._phase = 1
+        self.bar.setValue(min(100, max(self.bar.value(), 97)))
+        self.detail.setText(str(text or 'Install failed.'))
+
+
 class StoreWindow(QtWidgets.QMainWindow):
     FILTER_MAP = {
         'All': None,
@@ -9767,6 +10381,14 @@ class StoreWindow(QtWidgets.QMainWindow):
         self._gamepad_timer = None
         self._pad_prev = {}
         self._search_kbd_opening = False
+        self._busy_prev = {}
+        self._install_proc = None
+        self._install_progress = None
+        self._install_output = ''
+        self._install_label = 'App'
+        self._install_success_msg = ''
+        self._install_fail_msg = ''
+        self._install_launch_cmd = ''
         self.reflow_timer = QtCore.QTimer(self)
         self.reflow_timer.setSingleShot(True)
         self.reflow_timer.timeout.connect(self._rebuild_tile_grid)
@@ -10064,10 +10686,16 @@ class StoreWindow(QtWidgets.QMainWindow):
         self._update_cat_styles()
 
     def _set_busy(self, busy=True):
-        state = not bool(busy)
-        for b in (self.buy_btn, self.install_btn, self.launch_btn):
-            b.setEnabled(state and b.isEnabled())
-        self.search.setEnabled(state)
+        busy = bool(busy)
+        controls = [self.buy_btn, self.install_btn, self.launch_btn, self.search]
+        if busy:
+            self._busy_prev = {id(w): bool(w.isEnabled()) for w in controls}
+            for w in controls:
+                w.setEnabled(False)
+            return
+        for w in controls:
+            w.setEnabled(bool(self._busy_prev.get(id(w), True)))
+        self._busy_prev = {}
 
     def sync_sources(self):
         if self.sync_proc and self.sync_proc.state() != QtCore.QProcess.NotRunning:
@@ -10124,6 +10752,110 @@ class StoreWindow(QtWidgets.QMainWindow):
 
     def _run_detached(self, cmd):
         return QtCore.QProcess.startDetached('/bin/sh', ['-c', cmd])
+
+    def _close_install_progress(self):
+        dlg = self._install_progress
+        self._install_progress = None
+        if dlg is None:
+            return
+        try:
+            dlg.hide()
+        except Exception:
+            pass
+        try:
+            dlg.deleteLater()
+        except Exception:
+            pass
+
+    def _on_install_output(self):
+        proc = self._install_proc
+        if proc is None:
+            return
+        try:
+            chunk = bytes(proc.readAllStandardOutput()).decode('utf-8', errors='ignore')
+        except Exception:
+            chunk = ''
+        if not chunk:
+            return
+        self._install_output = (self._install_output + chunk)[-26000:]
+        dlg = self._install_progress
+        if dlg is None:
+            return
+        lines = [ln.strip() for ln in self._install_output.splitlines() if ln.strip()]
+        if lines:
+            dlg.set_detail(lines[-1][:180])
+
+    def _on_install_error(self, err):
+        self._on_install_output()
+        proc = self._install_proc
+        self._install_proc = None
+        if proc is not None:
+            proc.deleteLater()
+        dlg = self._install_progress
+        if dlg is not None and hasattr(dlg, 'finish_error'):
+            dlg.finish_error('Installer process error.')
+        self._close_install_progress()
+        self._set_busy(False)
+        self.reload(f'Install failed: process error {err}')
+
+    def _on_install_finished(self, code, status):
+        self._on_install_output()
+        proc = self._install_proc
+        self._install_proc = None
+        if proc is not None:
+            proc.deleteLater()
+        ok = (status == QtCore.QProcess.NormalExit and int(code) == 0)
+        if ok:
+            dlg = self._install_progress
+            if dlg is not None and hasattr(dlg, 'finish_ok'):
+                dlg.finish_ok('Install completed successfully.')
+            QtCore.QTimer.singleShot(260, self._close_install_progress)
+            launch_cmd = str(self._install_launch_cmd or '').strip()
+            if launch_cmd:
+                self._run_detached(launch_cmd)
+            self._set_busy(False)
+            self.reload(str(self._install_success_msg or f'Install completed: {self._install_label}'))
+            return
+        dlg = self._install_progress
+        if dlg is not None and hasattr(dlg, 'finish_error'):
+            dlg.finish_error('Install failed.')
+        self._close_install_progress()
+        lines = [ln.strip() for ln in self._install_output.splitlines() if ln.strip()]
+        tail = '\n'.join(lines[-10:]).strip()
+        fail_txt = str(self._install_fail_msg or f'Install failed: {self._install_label}')
+        self._set_busy(False)
+        if tail:
+            self.reload(f'{fail_txt} | {tail}')
+        else:
+            self.reload(fail_txt)
+
+    def _run_install_task(self, title, shell_cmd, success_msg='', fail_msg='', launch_cmd=''):
+        if self._install_proc is not None and self._install_proc.state() != QtCore.QProcess.NotRunning:
+            self.reload('Another install is already running.')
+            return
+        self._install_output = ''
+        self._install_label = str(title or 'App')
+        self._install_success_msg = str(success_msg or '')
+        self._install_fail_msg = str(fail_msg or '')
+        self._install_launch_cmd = str(launch_cmd or '')
+        self._set_busy(True)
+        dlg = StoreInstallProgressDialog(self._install_label, self)
+        dlg.show()
+        self._install_progress = dlg
+        proc = QtCore.QProcess(self)
+        env = QtCore.QProcessEnvironment.systemEnvironment()
+        env.insert('XUI_NONINTERACTIVE', '1')
+        env.insert('XUI_FORCE_ELEVATED', '1')
+        env.insert('DEBIAN_FRONTEND', 'noninteractive')
+        proc.setProcessEnvironment(env)
+        proc.setProgram('/bin/sh')
+        proc.setArguments(['-lc', str(shell_cmd)])
+        proc.setProcessChannelMode(QtCore.QProcess.MergedChannels)
+        proc.readyReadStandardOutput.connect(self._on_install_output)
+        proc.finished.connect(self._on_install_finished)
+        proc.errorOccurred.connect(self._on_install_error)
+        self._install_proc = proc
+        proc.start()
 
     def _inventory_ids(self):
         inv = self.inventory.get('items', [])
@@ -10369,15 +11101,20 @@ class StoreWindow(QtWidgets.QMainWindow):
             return
         if iid == 'game_fnae_fangame':
             run_fnae = str(XUI_BIN / 'xui_run_fnae.sh')
-            install_cmd = f'"{cmd}" && "{run_fnae}"'
-            self._run_terminal(install_cmd)
-            self.reload(
-                'FNAE installer started (MediaFire). '
-                'If download fails, check ~/.xui/logs/fnae_install.log.'
+            self._run_install_task(
+                item.get('name', 'FNAE'),
+                str(cmd),
+                success_msg='FNAE installed. Launching game...',
+                fail_msg='FNAE install failed. Check ~/.xui/logs/fnae_install.log.',
+                launch_cmd=run_fnae,
             )
             return
-        self._run_terminal(cmd)
-        self.reload(f'Installer started: {item.get("name", "item")}')
+        self._run_install_task(
+            item.get('name', 'App'),
+            cmd,
+            success_msg=f'Install completed: {item.get("name", "item")}',
+            fail_msg=f'Install failed: {item.get("name", "item")}',
+        )
 
     def launch_selected(self):
         item = self._selected_item()
@@ -10786,27 +11523,28 @@ def flathub_items(limit=260):
     return items
 
 def curated_web_sources():
-    # Curated playable catalog cards from Itch.io / Game Jolt pages.
-    # Purchase unlocks launcher tile; launch opens game page in XUI browser.
+    # Real games and official hubs from Itch.io / Game Jolt / ModDB.
     games = [
-        ('itch_a_short_hike', 'A Short Hike (Itch)', 'https://itch.io/games/tag-short/tag-adventure', 18, 'https://img.itch.zone/aW1nLzE2MzQyMDQucG5n/315x250%23c/DIp%2B2m.png'),
-        ('itch_celeste_classic', 'Celeste Classic (Itch)', 'https://itch.io/games/tag-platformer', 12, 'https://img.itch.zone/aW1nLzIyMzg4NDUucG5n/315x250%23c/Kpq6cF.png'),
-        ('itch_deltarune_ch1', 'DELTARUNE Chapter 1 (Itch)', 'https://itch.io/games/free/tag-rpg', 24, 'https://img.itch.zone/aW1nLzE5OTI1MTMucG5n/315x250%23c/uX9zCi.png'),
-        ('itch_rhythm_doctor', 'Rhythm Doctor (Itch)', 'https://itch.io/games/tag-rhythm', 22, 'https://img.itch.zone/aW1nLzMyMjk3MjYucG5n/315x250%23c/0zLw8F.png'),
-        ('itch_fps_collection', 'FPS Picks (Itch)', 'https://itch.io/games/tag-fps', 10, 'https://img.itch.zone/aW1nLzQwNzYzOTQucG5n/315x250%23c/RWWE95.png'),
-        ('itch_horror_collection', 'Horror Picks (Itch)', 'https://itch.io/games/tag-horror', 14, 'https://img.itch.zone/aW1nLzQxNjg3NDQucG5n/315x250%23c/4oPwjf.png'),
-        ('itch_racing_collection', 'Racing Picks (Itch)', 'https://itch.io/games/tag-racing', 9, 'https://img.itch.zone/aW1nLzMxNDY2MDEucG5n/315x250%23c/rL3I6r.png'),
-        ('itch_strategy_collection', 'Strategy Picks (Itch)', 'https://itch.io/games/tag-strategy', 11, 'https://img.itch.zone/aW1nLzI0NTkwNzYucG5n/315x250%23c/tjPF6Q.png'),
-        ('gj_horror_games', 'Game Jolt Horror', 'https://gamejolt.com/games?tags=horror', 13, 'https://m.gjcdn.net/assets/favicons/favicon-196x196.png'),
-        ('gj_platformer_games', 'Game Jolt Platformers', 'https://gamejolt.com/games?tags=platformer', 12, 'https://m.gjcdn.net/assets/favicons/favicon-196x196.png'),
-        ('gj_rpg_games', 'Game Jolt RPG', 'https://gamejolt.com/games?tags=rpg', 15, 'https://m.gjcdn.net/assets/favicons/favicon-196x196.png'),
-        ('gj_action_games', 'Game Jolt Action', 'https://gamejolt.com/games?tags=action', 16, 'https://m.gjcdn.net/assets/favicons/favicon-196x196.png'),
-        ('gj_fnaf_games', 'Game Jolt FNAF Fan Games', 'https://gamejolt.com/games?tags=fnaf', 20, 'https://m.gjcdn.net/assets/favicons/favicon-196x196.png'),
-        ('gj_multiplayer_games', 'Game Jolt Multiplayer', 'https://gamejolt.com/games?tags=multiplayer', 17, 'https://m.gjcdn.net/assets/favicons/favicon-196x196.png'),
+        ('itch_holocure', 'HoloCure (Itch.io)', 'https://kay-yu.itch.io/holocure', 0, 'https://itch.io/favicon.ico'),
+        ('itch_deltarune', 'DELTARUNE (Itch.io)', 'https://tobyfox.itch.io/deltarune', 0, 'https://itch.io/favicon.ico'),
+        ('itch_oneshot_fangame', 'OneShot Fangames (Itch.io)', 'https://itch.io/games/tag-oneshot', 0, 'https://itch.io/favicon.ico'),
+        ('itch_horror_spotlight', 'Itch.io Horror Spotlight', 'https://itch.io/games/tag-horror', 0, 'https://itch.io/favicon.ico'),
+        ('gj_fnaf_fangames', 'FNAF Fan Games (Game Jolt)', 'https://gamejolt.com/games?tags=fnaf', 0, 'https://m.gjcdn.net/assets/favicons/favicon-196x196.png'),
+        ('gj_horror_spotlight', 'Game Jolt Horror Spotlight', 'https://gamejolt.com/games?tags=horror', 0, 'https://m.gjcdn.net/assets/favicons/favicon-196x196.png'),
+        ('gj_platformer_spotlight', 'Game Jolt Platformer Spotlight', 'https://gamejolt.com/games?tags=platformer', 0, 'https://m.gjcdn.net/assets/favicons/favicon-196x196.png'),
+        ('moddb_openra', 'OpenRA (ModDB)', 'https://www.moddb.com/games/openra', 0, 'https://www.moddb.com/favicon.ico'),
+        ('moddb_xonotic', 'Xonotic (ModDB)', 'https://www.moddb.com/games/xonotic', 0, 'https://www.moddb.com/favicon.ico'),
+        ('moddb_0ad', '0 A.D. (ModDB)', 'https://www.moddb.com/games/0-ad', 0, 'https://www.moddb.com/favicon.ico'),
+        ('moddb_wesnoth', 'Battle for Wesnoth (ModDB)', 'https://www.moddb.com/games/the-battle-for-wesnoth', 0, 'https://www.moddb.com/favicon.ico'),
     ]
     out = []
     for rid, name, url, price, cover in games:
-        src = 'Itch.io' if rid.startswith('itch_') else 'Game Jolt'
+        if rid.startswith('itch_'):
+            src = 'Itch.io'
+        elif rid.startswith('gj_'):
+            src = 'Game Jolt'
+        else:
+            src = 'ModDB'
         cover_local = cache_cover(cover, rid)
         out.append({
             'id': rid,
@@ -10814,25 +11552,32 @@ def curated_web_sources():
             'price': float(max(0, price)),
             'category': 'Games',
             'source': src,
-            'desc': f'{src} catalog game card. Buy to unlock quick launch from Store.',
+            'desc': f'Real game/source card from {src}.',
             'cover': cover,
             'cover_local': cover_local,
             'launch': str(BIN / 'xui_browser.sh') + f' --hub {url}',
         })
-    # Keep access hubs too, but as Games so they appear under Games filters.
+    # Source hubs for discovery.
     hubs = [
-        ('itch_hub_free', 'Itch.io Free Games Hub', 'https://img.itch.zone/aW1hZ2UvMjA4Nzg2MS8xMjI5NjUwOS5wbmc=/original/%2ByxL7h.png', 'https://itch.io/games/free', 'Browse free games on Itch.io.'),
-        ('itch_hub_popular', 'Itch.io Popular Hub', 'https://img.itch.zone/aW1nLzExODQ1MjM2LnBuZw==/original/QndcCe.png', 'https://itch.io/games/popular', 'Browse popular games on Itch.io.'),
+        ('itch_hub_free', 'Itch.io Free Games Hub', 'https://itch.io/favicon.ico', 'https://itch.io/games/free', 'Browse free games on Itch.io.'),
+        ('itch_hub_popular', 'Itch.io Popular Hub', 'https://itch.io/favicon.ico', 'https://itch.io/games/popular', 'Browse popular games on Itch.io.'),
         ('gamejolt_hub_games', 'Game Jolt Games Hub', 'https://m.gjcdn.net/assets/favicons/favicon-196x196.png', 'https://gamejolt.com/games', 'Browse Game Jolt games.'),
+        ('moddb_hub_games', 'ModDB Games Hub', 'https://www.moddb.com/favicon.ico', 'https://www.moddb.com/games', 'Browse ModDB games.'),
     ]
     for rid, name, cover, url, desc in hubs:
         cover_local = cache_cover(cover, rid)
+        if 'itch' in rid:
+            src = 'Itch.io'
+        elif 'moddb' in rid:
+            src = 'ModDB'
+        else:
+            src = 'Game Jolt'
         out.append({
             'id': rid,
             'name': name,
             'price': 0.0,
             'category': 'Games',
-            'source': 'Itch.io' if 'itch' in rid else 'Game Jolt',
+            'source': src,
             'desc': desc,
             'cover': cover,
             'cover_local': cover_local,
@@ -10843,36 +11588,6 @@ def curated_web_sources():
 items = []
 items.extend(flathub_items(limit=260))
 items.extend(curated_web_sources())
-
-# Add synthetic pages for Itch/Game Jolt listings so they are always visible in Games grid.
-for i in range(1, 101):
-    url = f'https://itch.io/games/new-and-popular?page={i}'
-    rid = f'itch_page_{i:03d}'
-    items.append({
-        'id': rid,
-        'name': f'Itch Games Page {i}',
-        'price': float(6 + (i % 14)),
-        'category': 'Games',
-        'source': 'Itch.io',
-        'desc': 'Curated Itch.io page for buying and launching games from the XUI store.',
-        'cover': '',
-        'cover_local': '',
-        'launch': str(BIN / 'xui_browser.sh') + f' --hub {url}',
-    })
-for i in range(1, 81):
-    url = f'https://gamejolt.com/games?sort=hot&page={i}'
-    rid = f'gamejolt_page_{i:03d}'
-    items.append({
-        'id': rid,
-        'name': f'Game Jolt Page {i}',
-        'price': float(7 + (i % 16)),
-        'category': 'Games',
-        'source': 'Game Jolt',
-        'desc': 'Curated Game Jolt page for buying and launching games from the XUI store.',
-        'cover': '',
-        'cover_local': '',
-        'launch': str(BIN / 'xui_browser.sh') + f' --hub {url}',
-    })
 
 # Deduplicate IDs, keep first.
 seen = set()
@@ -11081,22 +11796,33 @@ set -euo pipefail
 
 as_root(){
   if [ "$(id -u)" -eq 0 ]; then "$@"; return $?; fi
-  if command -v sudo >/dev/null 2>&1; then
-    # In mandatory-update/background flows there is no TTY; never block waiting for password.
-    if [ "${XUI_NONINTERACTIVE:-0}" = "1" ] || [ ! -t 0 ]; then
-      sudo -n "$@" && return 0
-      echo "non-interactive sudo unavailable; skipping: $*" >&2
-      return 1
+  if [ "${XUI_NONINTERACTIVE:-0}" = "1" ] || [ ! -t 0 ]; then
+    if command -v pkexec >/dev/null 2>&1; then
+      pkexec "$@" && return 0
     fi
+    if command -v sudo >/dev/null 2>&1; then
+      sudo -n "$@" && return 0
+    fi
+    echo "non-interactive root unavailable; skipping: $*" >&2
+    return 1
+  fi
+  if command -v sudo >/dev/null 2>&1; then
     sudo "$@"
     return $?
   fi
-  echo "sudo required: $*" >&2
+  if command -v pkexec >/dev/null 2>&1; then
+    pkexec "$@"
+    return $?
+  fi
+  echo "root privileges unavailable: $*" >&2
   return 1
 }
 
 can_noninteractive_root(){
   [ "$(id -u)" -eq 0 ] && return 0
+  if command -v pkexec >/dev/null 2>&1; then
+    return 0
+  fi
   command -v sudo >/dev/null 2>&1 || return 1
   sudo -n -v >/dev/null 2>&1
 }
@@ -16023,8 +16749,14 @@ BASH
 set -euo pipefail
 as_root(){
   if [ "$(id -u)" -eq 0 ]; then "$@"; return $?; fi
-  if command -v sudo >/dev/null 2>&1; then sudo "$@"; return $?; fi
-  echo "sudo required: $*" >&2
+  if [ "${XUI_NONINTERACTIVE:-0}" = "1" ] || [ ! -t 0 ]; then
+    if command -v pkexec >/dev/null 2>&1; then pkexec "$@"; return $?; fi
+    if command -v sudo >/dev/null 2>&1; then sudo -n "$@"; return $?; fi
+  else
+    if command -v sudo >/dev/null 2>&1; then sudo "$@"; return $?; fi
+    if command -v pkexec >/dev/null 2>&1; then pkexec "$@"; return $?; fi
+  fi
+  echo "root privileges unavailable: $*" >&2
   return 1
 }
 wait_apt(){
@@ -16122,8 +16854,14 @@ BASH
 set -euo pipefail
 as_root(){
   if [ "$(id -u)" -eq 0 ]; then "$@"; return $?; fi
-  if command -v sudo >/dev/null 2>&1; then sudo "$@"; return $?; fi
-  echo "sudo required: $*" >&2
+  if [ "${XUI_NONINTERACTIVE:-0}" = "1" ] || [ ! -t 0 ]; then
+    if command -v pkexec >/dev/null 2>&1; then pkexec "$@"; return $?; fi
+    if command -v sudo >/dev/null 2>&1; then sudo -n "$@"; return $?; fi
+  else
+    if command -v sudo >/dev/null 2>&1; then sudo "$@"; return $?; fi
+    if command -v pkexec >/dev/null 2>&1; then pkexec "$@"; return $?; fi
+  fi
+  echo "root privileges unavailable: $*" >&2
   return 1
 }
 wait_apt(){
@@ -16221,8 +16959,14 @@ BASH
 set -euo pipefail
 as_root(){
   if [ "$(id -u)" -eq 0 ]; then "$@"; return $?; fi
-  if command -v sudo >/dev/null 2>&1; then sudo "$@"; return $?; fi
-  echo "sudo required: $*" >&2
+  if [ "${XUI_NONINTERACTIVE:-0}" = "1" ] || [ ! -t 0 ]; then
+    if command -v pkexec >/dev/null 2>&1; then pkexec "$@"; return $?; fi
+    if command -v sudo >/dev/null 2>&1; then sudo -n "$@"; return $?; fi
+  else
+    if command -v sudo >/dev/null 2>&1; then sudo "$@"; return $?; fi
+    if command -v pkexec >/dev/null 2>&1; then pkexec "$@"; return $?; fi
+  fi
+  echo "root privileges unavailable: $*" >&2
   return 1
 }
 wait_apt(){
