@@ -2634,13 +2634,13 @@ class TopTabs(QtWidgets.QWidget):
 
     def set_current(self, idx):
         self.current = max(0, min(idx, len(self.labels)-1))
-        active_px = max(22, int((56 if not self._compact else 36) * self._scale))
-        idle_px = max(18, int((48 if not self._compact else 30) * self._scale))
+        active_px = max(20, int((42 if not self._compact else 30) * self._scale))
+        idle_px = max(16, int((34 if not self._compact else 24) * self._scale))
         for i, lbl in enumerate(self.labels):
             if i == self.current:
                 lbl.setStyleSheet(f'color:#f3f7f7; font-size:{active_px}px; font-weight:700;')
             else:
-                lbl.setStyleSheet(f'color:rgba(243,247,247,0.78); font-size:{idle_px}px; font-weight:600;')
+                lbl.setStyleSheet(f'color:rgba(230,236,240,0.64); font-size:{idle_px}px; font-weight:600;')
 
 
 def tile_icon(action, text=''):
@@ -2688,22 +2688,22 @@ class GreenTile(QtWidgets.QFrame):
         self.setFocusPolicy(QtCore.Qt.StrongFocus)
         v = QtWidgets.QVBoxLayout(self)
         self._layout = v
-        v.setContentsMargins(16, 12, 16, 12)
+        v.setContentsMargins(14, 10, 14, 10)
         top = QtWidgets.QHBoxLayout()
         self._top_layout = top
         top.setContentsMargins(0, 0, 0, 0)
         self.icon = QtWidgets.QLabel()
         self.icon.setObjectName('tile_icon')
-        self.icon.setFixedSize(44, 44)
+        self.icon.setFixedSize(36, 36)
         self.icon.setAlignment(QtCore.Qt.AlignCenter)
         icon = tile_icon(action, text)
-        self.icon.setPixmap(icon.pixmap(26, 26))
+        self.icon.setPixmap(icon.pixmap(22, 22))
         top.addWidget(self.icon, 0, alignment=QtCore.Qt.AlignLeft | QtCore.Qt.AlignTop)
         top.addStretch(1)
         v.addLayout(top)
         v.addStretch(1)
         self.lbl = QtWidgets.QLabel(text)
-        self.lbl.setStyleSheet('color:#efffee; font-size:30px; font-weight:700;')
+        self.lbl.setStyleSheet('color:#f4fff3; font-size:24px; font-weight:700;')
         v.addWidget(self.lbl, alignment=QtCore.Qt.AlignLeft | QtCore.Qt.AlignBottom)
         self.apply_scale(1.0, False)
         self.set_selected(False)
@@ -2719,29 +2719,30 @@ class GreenTile(QtWidgets.QFrame):
         pad_x = max(7, int((13 if self.dense else 16) * s * compact_factor))
         pad_y = max(5, int((8 if self.dense else 12) * s * compact_factor))
         self._layout.setContentsMargins(pad_x, pad_y, pad_x, pad_y)
-        icon_sz = max(22, int(44 * s * compact_factor * self.icon_scale))
-        pix_sz = max(14, int(26 * s * compact_factor * self.icon_scale))
+        icon_sz = max(18, int(36 * s * compact_factor * self.icon_scale))
+        pix_sz = max(13, int(22 * s * compact_factor * self.icon_scale))
         self.icon.setFixedSize(icon_sz, icon_sz)
         icon = tile_icon(self.action, self.text)
         self.icon.setPixmap(icon.pixmap(pix_sz, pix_sz))
-        font_px = max(13, int(30 * s * compact_factor * self.text_scale))
-        self.lbl.setStyleSheet(f'color:#efffee; font-size:{font_px}px; font-weight:700;')
+        font_px = max(11, int(22 * s * compact_factor * self.text_scale))
+        self.lbl.setStyleSheet(f'color:#f4fff3; font-size:{font_px}px; font-weight:700;')
 
     def set_selected(self, on):
-        border = '#c6ffff' if on else 'rgba(255,255,255,0.08)'
-        width = '4px' if on else '1px'
+        border = 'rgba(248,255,248,0.96)' if on else 'rgba(255,255,255,0.22)'
+        width = '3px' if on else '1px'
+        bg_a = '#39d65a' if on else '#31c94f'
+        bg_b = '#2aa745' if on else '#259c3e'
         self.setStyleSheet(f'''
             QFrame#green_tile {{
-                background:qlineargradient(x1:0,y1:0,x2:1,y2:1, stop:0 #34d85a, stop:1 #20b540);
+                background:qlineargradient(x1:0,y1:0,x2:0,y2:1, stop:0 {bg_a}, stop:1 {bg_b});
                 border:{width} solid {border};
-                border-radius:4px;
+                border-radius:0px;
             }}
             QLabel#tile_icon {{
-                background:rgba(0,0,0,0.18);
-                border:1px solid rgba(255,255,255,0.22);
-                border-radius:8px;
+                background:transparent;
+                border:none;
             }}
-            QLabel{{color:#efffee;}}
+            QLabel{{color:#f4fff3;}}
         ''')
 
     def mousePressEvent(self, e):
@@ -2761,13 +2762,13 @@ class HeroPanel(QtWidgets.QFrame):
         self.setObjectName('hero_panel')
         v = QtWidgets.QVBoxLayout(self)
         self._layout = v
-        v.setContentsMargins(22, 18, 22, 16)
+        v.setContentsMargins(20, 16, 20, 14)
         self.top_label = QtWidgets.QLabel(self.title)
-        self.top_label.setStyleSheet('color:#ecf3f5; font-size:38px; font-weight:700;')
+        self.top_label.setStyleSheet('color:#f2f6f9; font-size:34px; font-weight:700;')
         v.addWidget(self.top_label, 0, alignment=QtCore.Qt.AlignLeft | QtCore.Qt.AlignTop)
         v.addStretch(1)
         self.sub_label = QtWidgets.QLabel(self.subtitle)
-        self.sub_label.setStyleSheet('color:rgba(235,242,244,0.78); font-size:24px; font-weight:600;')
+        self.sub_label.setStyleSheet('color:rgba(226,234,241,0.78); font-size:22px; font-weight:600;')
         v.addWidget(self.sub_label, 0, alignment=QtCore.Qt.AlignLeft | QtCore.Qt.AlignBottom)
         self.apply_scale(1.0, False)
         self.set_selected(False)
@@ -2782,19 +2783,19 @@ class HeroPanel(QtWidgets.QFrame):
         my = max(8, int(18 * s * compact_factor))
         mb = max(8, int(16 * s * compact_factor))
         self._layout.setContentsMargins(mx, my, mx, mb)
-        title_fs = max(20, int(38 * s * compact_factor))
-        sub_fs = max(14, int(24 * s * compact_factor))
-        self.top_label.setStyleSheet(f'color:#ecf3f5; font-size:{title_fs}px; font-weight:700;')
-        self.sub_label.setStyleSheet(f'color:rgba(235,242,244,0.78); font-size:{sub_fs}px; font-weight:600;')
+        title_fs = max(18, int(34 * s * compact_factor))
+        sub_fs = max(13, int(22 * s * compact_factor))
+        self.top_label.setStyleSheet(f'color:#f2f6f9; font-size:{title_fs}px; font-weight:700;')
+        self.sub_label.setStyleSheet(f'color:rgba(226,234,241,0.78); font-size:{sub_fs}px; font-weight:600;')
 
     def set_selected(self, on):
-        border = '#c6ffff' if on else 'rgba(255,255,255,0.08)'
-        width = '4px' if on else '1px'
+        border = 'rgba(240,248,255,0.92)' if on else 'rgba(255,255,255,0.2)'
+        width = '3px' if on else '1px'
         self.setStyleSheet(f'''
             QFrame#hero_panel {{
-                background:qlineargradient(x1:0,y1:0,x2:1,y2:1, stop:0 #121518, stop:1 #1f262c);
+                background:qlineargradient(x1:0,y1:0,x2:1,y2:1, stop:0 #0b1016, stop:1 #1a222c);
                 border:{width} solid {border};
-                border-radius:4px;
+                border-radius:0px;
             }}
         ''')
 
@@ -2943,9 +2944,9 @@ class GamesShowcasePanel(QtWidgets.QFrame):
                 'QPushButton#games_blade_btn {'
                 'text-align:left; padding:6px 8px;'
                 f'font-size:{blade_fs}px; font-weight:700;'
-                'color:#ecf4ef; background:qlineargradient(x1:0,y1:0,x2:1,y2:0, stop:0 #57b541, stop:1 #3b8f31);'
-                'border:1px solid rgba(255,255,255,0.24); border-radius:2px; }'
-                'QPushButton#games_blade_btn:hover { background:#65c44d; }'
+                'color:#f3fff2; background:qlineargradient(x1:0,y1:0,x2:0,y2:1, stop:0 #35cb51, stop:1 #279f3f);'
+                'border:1px solid rgba(250,255,250,0.3); border-radius:0px; }'
+                'QPushButton#games_blade_btn:hover { background:#3ed35a; }'
             )
 
         feat_name_fs = max(14, int(31 * s * compact_factor))
@@ -2962,34 +2963,34 @@ class GamesShowcasePanel(QtWidgets.QFrame):
             c.setStyleSheet(
                 'QFrame#games_mini_card {'
                 'background:qlineargradient(x1:0,y1:0,x2:1,y2:1, stop:0 #707b84, stop:1 #4f5962);'
-                'border:1px solid rgba(223,232,239,0.5); border-radius:2px; }'
+                'border:1px solid rgba(223,232,239,0.5); border-radius:0px; }'
                 f'QLabel#games_mini_cat {{ color:rgba(229,236,241,0.82); font-size:{mini_cat_fs}px; font-weight:700; }}'
                 f'QLabel#games_mini_name {{ color:#f3f7f9; font-size:{mini_name_fs}px; font-weight:700; }}'
             )
 
     def set_selected(self, on):
-        border = '#d4f2ff' if on else 'rgba(255,255,255,0.08)'
-        width = '4px' if on else '1px'
+        border = 'rgba(240,248,255,0.92)' if on else 'rgba(255,255,255,0.2)'
+        width = '3px' if on else '1px'
         self.setStyleSheet(
             f'''
             QFrame#games_showcase_panel {{
-                background:qlineargradient(x1:0,y1:0,x2:1,y2:1, stop:0 #121518, stop:1 #1f262c);
+                background:qlineargradient(x1:0,y1:0,x2:1,y2:1, stop:0 #0b1016, stop:1 #1a222c);
                 border:{width} solid {border};
-                border-radius:4px;
+                border-radius:0px;
             }}
             QFrame#games_blades {{
-                background:rgba(18,24,30,0.92);
-                border:1px solid rgba(194,213,231,0.3);
+                background:transparent;
+                border:0px solid transparent;
             }}
             QFrame#games_featured {{
                 background:qlineargradient(x1:0,y1:0,x2:1,y2:1, stop:0 #4f5962, stop:1 #3b444d);
                 border:1px solid rgba(223,232,239,0.5);
-                border-radius:2px;
+                border-radius:0px;
             }}
             QFrame#games_recommend {{
                 background:qlineargradient(x1:0,y1:0,x2:1,y2:0, stop:0 #d8dde3, stop:1 #c8ced5);
                 border:1px solid rgba(117,126,136,0.5);
-                border-radius:2px;
+                border-radius:0px;
             }}
             QLabel#games_recommend_tag {{
                 color:#3f4a56;
@@ -3813,82 +3814,82 @@ class XboxGuideMenu(QtWidgets.QDialog):
         self.gamertag = str(gamertag or 'Player1')
         self._selection = None
         self._open_anim = None
-        self._page_anim = None
-        self._page_animating = False
-        self._page_idx = 0
-        self._pages = [
-            ('Games & Apps', ['Xbox Home', 'Friends', 'Party', 'Messages', 'Beacons & Activity', 'Chat', 'Open Tray']),
-            ('Media', ['Video Marketplace', 'YouTube', 'Netflix', 'Twitch', 'Movie Trailers', 'Music Marketplace', 'System Music']),
-            ('Settings', ['Manage Storage', 'System Settings', 'Account Security', 'Network Setup', 'Family', 'Theme Toggle', 'Sign Out']),
-        ]
         self.setWindowTitle('Xbox Guide')
         self.setWindowFlags(QtCore.Qt.Dialog | QtCore.Qt.FramelessWindowHint)
         self.setAttribute(QtCore.Qt.WA_TranslucentBackground, True)
         self.setModal(True)
-        self.resize(900, 520)
+        self.resize(1060, 560)
         self.setStyleSheet('''
+            QDialog {
+                background:rgba(10, 16, 24, 0.56);
+            }
             QFrame#xguide_panel {
-                background:qlineargradient(x1:0,y1:0,x2:1,y2:1, stop:0 #f4f6f8, stop:1 #e2e7ed);
-                border:2px solid rgba(234,241,247,0.92);
-                border-radius:4px;
+                background:qlineargradient(x1:0,y1:0,x2:1,y2:1, stop:0 #38414d, stop:1 #222a35);
+                border:1px solid rgba(226,238,248,0.30);
+                border-radius:2px;
             }
             QLabel#xguide_title {
-                color:#26313b;
-                font-size:30px;
+                color:#f2f7fb;
+                font-size:46px;
                 font-weight:800;
             }
             QLabel#xguide_meta {
-                color:rgba(35,45,55,0.88);
-                font-size:22px;
+                color:rgba(233,243,251,0.92);
+                font-size:34px;
                 font-weight:600;
             }
             QListWidget#xguide_list {
-                background:#f9fbfd;
-                color:#252c34;
+                background:#d8dce1;
+                color:#1b2b42;
                 border:1px solid rgba(0,0,0,0.26);
-                font-size:38px;
+                font-size:52px;
                 outline:none;
             }
             QListWidget#xguide_list::item {
-                padding:7px 12px;
+                padding:8px 16px;
                 border:1px solid transparent;
             }
             QListWidget#xguide_list::item:selected {
-                color:#f3fff2;
-                background:qlineargradient(x1:0,y1:0,x2:1,y2:0, stop:0 #5fbe47, stop:1 #3f9f33);
+                color:#eefeed;
+                background:qlineargradient(x1:0,y1:0,x2:1,y2:0, stop:0 #59b53f, stop:1 #429b33);
                 border:1px solid rgba(255,255,255,0.25);
             }
-            QLabel#xguide_blade_left {
-                background:qlineargradient(x1:0,y1:0,x2:0,y2:1, stop:0 #6a9abb, stop:1 #89b4d2);
-                color:#f4fbff;
-                font-size:36px;
-                font-weight:800;
-                padding:8px 6px;
-                border:1px solid rgba(255,255,255,0.32);
+            QFrame#xguide_actions {
+                background:rgba(47,58,72,0.88);
+                border:1px solid rgba(206,220,236,0.24);
             }
-            QLabel#xguide_blade_right {
-                background:qlineargradient(x1:0,y1:0,x2:0,y2:1, stop:0 #7da9c7, stop:1 #a2c3da);
-                color:#f4fbff;
-                font-size:36px;
+            QPushButton#xguide_action_btn {
+                text-align:left;
+                color:#f3f8fc;
+                background:#222f41;
+                border:1px solid rgba(202,218,236,0.28);
+                padding:8px 12px;
+                font-size:34px;
                 font-weight:800;
-                padding:8px 6px;
-                border:1px solid rgba(255,255,255,0.32);
+                min-height:62px;
+            }
+            QPushButton#xguide_action_btn:hover,
+            QPushButton#xguide_action_btn:focus {
+                background:#2f4260;
+                border:1px solid rgba(228,239,252,0.48);
             }
             QLabel#xguide_hint {
-                color:#1e2b36;
-                font-size:18px;
+                color:#eaf1f7;
+                font-size:29px;
                 font-weight:700;
             }
         ''')
         outer = QtWidgets.QVBoxLayout(self)
-        outer.setContentsMargins(0, 0, 0, 0)
+        outer.setContentsMargins(18, 18, 18, 18)
         panel = QtWidgets.QFrame()
         panel.setObjectName('xguide_panel')
-        outer.addWidget(panel)
+        panel.setMinimumSize(920, 500)
+        panel.setMaximumSize(1360, 820)
+        outer.addWidget(panel, 0, QtCore.Qt.AlignCenter)
 
         root = QtWidgets.QVBoxLayout(panel)
-        root.setContentsMargins(12, 10, 12, 10)
-        root.setSpacing(8)
+        root.setContentsMargins(14, 12, 14, 12)
+        root.setSpacing(10)
 
         top = QtWidgets.QHBoxLayout()
         title = QtWidgets.QLabel('Xbox Guide')
@@ -3901,38 +3902,40 @@ class XboxGuideMenu(QtWidgets.QDialog):
         root.addLayout(top)
 
         body = QtWidgets.QHBoxLayout()
-        body.setSpacing(0)
-        self.blade_left = QtWidgets.QLabel('Games & Apps')
-        self.blade_left.setObjectName('xguide_blade_left')
-        self.blade_left.setAlignment(QtCore.Qt.AlignCenter)
-        body.addWidget(self.blade_left, 1)
-        self.page_host = QtWidgets.QWidget()
-        self.page_host.setMinimumWidth(420)
-        body.addWidget(self.page_host, 8)
-        self.blade_right = QtWidgets.QLabel('Media')
-        self.blade_right.setObjectName('xguide_blade_right')
-        self.blade_right.setAlignment(QtCore.Qt.AlignCenter)
-        body.addWidget(self.blade_right, 1)
+        body.setSpacing(10)
+        self.listw = QtWidgets.QListWidget()
+        self.listw.setObjectName('xguide_list')
+        self.listw.addItems([
+            'Reciente',
+            'Mensajes recientes',
+            'Social global',
+            'Beacons',
+            'Mis juegos',
+            'Descargas activas',
+            'Canjear codigo',
+        ])
+        self.listw.setCurrentRow(0)
+        self.listw.itemActivated.connect(self._accept_current)
+        self.listw.itemDoubleClicked.connect(self._accept_current)
+        body.addWidget(self.listw, 7)
+
+        actions = QtWidgets.QFrame()
+        actions.setObjectName('xguide_actions')
+        actions_l = QtWidgets.QVBoxLayout(actions)
+        actions_l.setContentsMargins(8, 8, 8, 8)
+        actions_l.setSpacing(6)
+        for txt in ('Configuracion', 'Inicio de Xbox', 'Cerrar app actual', 'Cerrar sesion'):
+            b = QtWidgets.QPushButton(txt)
+            b.setObjectName('xguide_action_btn')
+            b.clicked.connect(lambda _=False, action=txt: self._accept_action(action))
+            actions_l.addWidget(b)
+        actions_l.addStretch(1)
+        body.addWidget(actions, 3)
         root.addLayout(body, 1)
 
-        hint = QtWidgets.QLabel('<font color="#49b93e">A Select</font>   <font color="#cf2d2d">B Back</font>   <font color="#2b7fd8">X Sign Out</font>   <font color="#ddb126">Y Xbox Home</font>')
+        hint = QtWidgets.QLabel('<font color="#49b93e">A Select</font>   <font color="#cf2d2d">B Back</font>   <font color="#2b7fd8">X Sign Out</font>   <font color="#ddb126">Y Inicio de Xbox</font>')
         hint.setObjectName('xguide_hint')
         root.addWidget(hint)
-
-        self.page_lists = []
-        for _title, items in self._pages:
-            lw = QtWidgets.QListWidget(self.page_host)
-            lw.setObjectName('xguide_list')
-            lw.addItems(list(items))
-            lw.setCurrentRow(0)
-            lw.itemActivated.connect(self._accept_current)
-            lw.itemDoubleClicked.connect(self._accept_current)
-            lw.hide()
-            self.page_lists.append(lw)
-        if self.page_lists:
-            self.page_lists[0].show()
-            self.page_lists[0].setFocus(QtCore.Qt.OtherFocusReason)
-        self._update_blades()
 
         self._clock = QtCore.QTimer(self)
         self._clock.timeout.connect(self._refresh_meta)
@@ -3943,39 +3946,8 @@ class XboxGuideMenu(QtWidgets.QDialog):
         now = QtCore.QDateTime.currentDateTime().toString('HH:mm')
         self.meta.setText(f'{self.gamertag}    {now}')
 
-    def _current_list(self):
-        if not self.page_lists:
-            return None
-        return self.page_lists[self._page_idx]
-
-    def _update_blades(self):
-        if not self._pages:
-            return
-        left = self._pages[self._page_idx][0]
-        right = self._pages[(self._page_idx + 1) % len(self._pages)][0]
-        self.blade_left.setText(str(left))
-        self.blade_right.setText(str(right))
-
-    def _relayout_lists(self):
-        rect = self.page_host.rect()
-        if rect.width() <= 0 or rect.height() <= 0:
-            return
-        for i, lw in enumerate(self.page_lists):
-            if i == self._page_idx and not self._page_animating:
-                lw.setGeometry(rect)
-                lw.show()
-            elif not self._page_animating:
-                lw.hide()
-
-    def resizeEvent(self, e):
-        super().resizeEvent(e)
-        self._relayout_lists()
-
     def _accept_current(self, *_):
-        lw = self._current_list()
-        if lw is None:
-            return
-        it = lw.currentItem()
+        it = self.listw.currentItem()
         if it is None:
             return
         self._selection = it.text()
@@ -3988,76 +3960,19 @@ class XboxGuideMenu(QtWidgets.QDialog):
     def selected(self):
         if self._selection:
             return self._selection
-        lw = self._current_list()
-        if lw is None:
-            return None
-        it = lw.currentItem()
+        it = self.listw.currentItem()
         return it.text() if it else None
-
-    def _switch_page(self, delta):
-        if self._page_animating or not self.page_lists:
-            return
-        total = len(self.page_lists)
-        target = (self._page_idx + int(delta)) % total
-        if target == self._page_idx:
-            return
-        host_rect = self.page_host.rect()
-        if host_rect.width() <= 8 or host_rect.height() <= 8:
-            self._page_idx = target
-            self._update_blades()
-            self._relayout_lists()
-            lw = self._current_list()
-            if lw is not None:
-                lw.setFocus(QtCore.Qt.OtherFocusReason)
-            return
-        self._page_animating = True
-        cur = self.page_lists[self._page_idx]
-        nxt = self.page_lists[target]
-        step = host_rect.width() if int(delta) > 0 else -host_rect.width()
-        cur.setGeometry(host_rect)
-        nxt.setGeometry(host_rect.translated(step, 0))
-        nxt.show()
-        nxt.raise_()
-        cur.raise_()
-        a_out = QtCore.QPropertyAnimation(cur, b'pos', self)
-        a_out.setDuration(180)
-        a_out.setStartValue(cur.pos())
-        a_out.setEndValue(QtCore.QPoint(cur.pos().x() - step, cur.pos().y()))
-        a_out.setEasingCurve(QtCore.QEasingCurve.OutCubic)
-        a_in = QtCore.QPropertyAnimation(nxt, b'pos', self)
-        a_in.setDuration(180)
-        a_in.setStartValue(nxt.pos())
-        a_in.setEndValue(host_rect.topLeft())
-        a_in.setEasingCurve(QtCore.QEasingCurve.OutCubic)
-        grp = QtCore.QParallelAnimationGroup(self)
-        grp.addAnimation(a_out)
-        grp.addAnimation(a_in)
-
-        def _done():
-            self._page_idx = target
-            self._update_blades()
-            cur.hide()
-            nxt.setGeometry(host_rect)
-            self._page_animating = False
-            lw = self._current_list()
-            if lw is not None:
-                lw.setFocus(QtCore.Qt.OtherFocusReason)
-
-        grp.finished.connect(_done)
-        self._page_anim = grp
-        grp.start(QtCore.QAbstractAnimation.DeleteWhenStopped)
 
     def showEvent(self, e):
         super().showEvent(e)
         parent = self.parentWidget()
         if parent is not None:
-            w = min(max(760, int(parent.width() * 0.56)), max(760, parent.width() - 120))
-            h = min(max(420, int(parent.height() * 0.56)), max(420, parent.height() - 120))
+            w = min(max(980, int(parent.width() * 0.86)), max(980, parent.width() - 40))
+            h = min(max(520, int(parent.height() * 0.72)), max(520, parent.height() - 40))
             self.resize(w, h)
-            x = parent.x() + max(20, int(parent.width() * 0.18))
-            y = parent.y() + max(20, int(parent.height() * 0.12))
+            x = parent.x() + max(10, (parent.width() - self.width()) // 2)
+            y = parent.y() + max(10, (parent.height() - self.height()) // 2)
             self.move(max(0, x), max(0, y))
-        self._relayout_lists()
         self._refresh_meta()
         self._animate_open()
 
@@ -4086,18 +4001,12 @@ class XboxGuideMenu(QtWidgets.QDialog):
 
     def keyPressEvent(self, e):
         if e.key() in (QtCore.Qt.Key_Y, QtCore.Qt.Key_Tab):
-            self._selection = 'Xbox Home'
+            self._selection = 'Inicio de Xbox'
             self.accept()
             return
         if e.key() in (QtCore.Qt.Key_X, QtCore.Qt.Key_Space):
-            self._selection = 'Sign Out'
+            self._selection = 'Cerrar sesion'
             self.accept()
-            return
-        if e.key() in (QtCore.Qt.Key_Left, QtCore.Qt.Key_PageUp, QtCore.Qt.Key_Backtab):
-            self._switch_page(-1)
-            return
-        if e.key() in (QtCore.Qt.Key_Right, QtCore.Qt.Key_PageDown):
-            self._switch_page(1)
             return
         if e.key() in (QtCore.Qt.Key_Escape, QtCore.Qt.Key_Back):
             self.reject()
@@ -5382,17 +5291,16 @@ class Dashboard(QtWidgets.QMainWindow):
                 'left': [
                     ('Bing Search', 'Bing Search', (320, 170)),
                     ('Voice Search', 'Voice Search', (320, 170)),
-                    ('Bing Categories', 'Categories', (320, 205)),
+                    ('Bing Categories', 'Categories', (320, 170)),
+                    ('Bing Music', 'Bing Music', (320, 205)),
                 ],
                 'right': [
                     ('Bing Games', 'Bing Games', (270, 130)),
                     ('Bing Apps', 'Bing Apps', (270, 130)),
                     ('Bing TV', 'Bing TV', (270, 130)),
                     ('Bing Movies', 'Bing Movies', (270, 130)),
-                    ('Bing Music', 'Bing Music', (270, 130)),
                     ('Kinect Hub', 'Kinect Hub', (270, 130)),
                     ('Beacons', 'Beacons', (270, 130)),
-                    ('Cloud Storage', 'Cloud Storage', (270, 130)),
                 ],
             },
             'home': {
@@ -5432,7 +5340,6 @@ class Dashboard(QtWidgets.QMainWindow):
                     ('Beacons', 'Beacons', (270, 130)),
                     ('Gamer Card', 'Gamer Card', (270, 130)),
                     ('Social Apps', 'Social Apps', (270, 130)),
-                    ('Sign In', 'Sign In', (270, 130)),
                 ],
             },
             'games': {
@@ -5444,7 +5351,8 @@ class Dashboard(QtWidgets.QMainWindow):
                 'left': [
                     ('Casino', 'Casino', (320, 170)),
                     ('Runner', 'Runner', (320, 170)),
-                    ('Missions', 'Missions', (320, 205)),
+                    ('Missions', 'Missions', (320, 170)),
+                    ('FNAE', 'FNAE', (320, 205)),
                 ],
                 'right': [
                     ('Game Marketplace', 'Game Marketplace', (270, 130)),
@@ -5452,10 +5360,7 @@ class Dashboard(QtWidgets.QMainWindow):
                     ('Demos', 'Demos', (270, 130)),
                     ('Steam', 'Steam', (270, 130)),
                     ('RetroArch', 'RetroArch', (270, 130)),
-                    ('FNAE', 'FNAE', (270, 130)),
-                    ('Gem Match', 'Gem Match', (270, 130)),
                     ('Store', 'Store', (270, 130)),
-                    ('Games Integrations', 'Integrations', (270, 130)),
                 ],
             },
             'tv & movies': {
@@ -5466,17 +5371,16 @@ class Dashboard(QtWidgets.QMainWindow):
                 'left': [
                     ('Media Player', 'Media Player', (320, 170)),
                     ('Boot Video', 'Boot Video', (320, 170)),
+                    ('Live TV', 'Live TV', (320, 170)),
                     ('System Info', 'System Info', (320, 205)),
                 ],
                 'right': [
                     ('Video Marketplace', 'Video Market', (270, 130)),
                     ('Movie Trailers', 'Movie Trailers', (270, 130)),
                     ('Twitch', 'Twitch', (270, 130)),
-                    ('Live TV', 'Live TV', (270, 130)),
                     ('Skype', 'Skype', (270, 130)),
                     ('Netflix', 'Netflix', (270, 130)),
                     ('YouTube', 'YouTube', (270, 130)),
-                    ('Kodi', 'Kodi', (270, 130)),
                 ],
             },
             'music': {
@@ -5514,7 +5418,6 @@ class Dashboard(QtWidgets.QMainWindow):
                     ('Avatar Editor', 'Avatar Editor', (270, 130)),
                     ('Controller Center', 'Controller', (270, 130)),
                     ('Web Browser', 'Web Browser', (270, 130)),
-                    ('App Launcher', 'App Launcher', (270, 130)),
                     ('Service Manager', 'Services', (270, 130)),
                     ('Developer Tools', 'Developer', (270, 130)),
                 ],
@@ -5527,14 +5430,11 @@ class Dashboard(QtWidgets.QMainWindow):
                 'left': [
                     ('System Settings', 'System Settings', (320, 170)),
                     ('Storage', 'Storage', (320, 170)),
-                    ('Network Setup', 'Network Setup', (320, 205)),
-                    ('System Info', 'System', (320, 170)),
-                    ('Power Profile', 'Preferences', (320, 170)),
-                    ('Battery Saver', 'Profile', (320, 205)),
+                    ('Network Setup', 'Network Setup', (320, 170)),
+                    ('Power Profile', 'Preferences', (320, 205)),
                 ],
                 'right': [
                     ('Account Security', 'Account', (270, 130)),
-                    ('Family', 'Family', (270, 130)),
                     ('Theme Toggle', 'Account', (270, 130)),
                     ('WiFi Toggle', 'WiFi', (270, 130)),
                     ('Battery Info', 'Battery', (270, 130)),
@@ -5670,11 +5570,12 @@ class Dashboard(QtWidgets.QMainWindow):
 
         self.setStyleSheet('''
             QMainWindow {
-                background:qlineargradient(x1:0.5,y1:0.0,x2:0.5,y2:1.0, stop:0 #2f343b, stop:0.45 #5f656e, stop:0.78 #c5ccd4, stop:1 #edf1f5);
+                background:qlineargradient(x1:0.0,y1:0.0,x2:0.0,y2:1.0, stop:0 #545b64, stop:0.55 #666d76, stop:1 #aeb5be);
             }
             QFrame#stage {
-                background: rgba(255,255,255,0.06);
-                border-radius: 2px;
+                background: rgba(255,255,255,0.05);
+                border: 1px solid rgba(255,255,255,0.08);
+                border-radius: 0px;
             }
         ''')
         self.setCursor(QtGui.QCursor(QtCore.Qt.BlankCursor))
@@ -17753,86 +17654,89 @@ class Guide(QtWidgets.QDialog):
         self.gamertag = str(gamertag or 'Player1')
         self.action = ''
         self._open_anim = None
-        self._page_anim = None
-        self._page_animating = False
-        self._page_idx = 0
-        self._pages = [
-            ('Games & Apps', ['Xbox Home', 'Friends', 'Party', 'Messages', 'Beacons & Activity', 'Chat', 'Open Tray']),
-            ('Media', ['Video Marketplace', 'YouTube', 'Netflix', 'Twitch', 'Movie Trailers', 'Music Marketplace', 'System Music']),
-            ('Settings', ['Manage Storage', 'System Settings', 'Account Security', 'Network Setup', 'Family', 'Theme Toggle', 'Sign Out']),
-        ]
         self.setWindowTitle('Xbox Guide')
         self.setWindowFlags(
             QtCore.Qt.Dialog
             | QtCore.Qt.FramelessWindowHint
             | QtCore.Qt.WindowStaysOnTopHint
+            | QtCore.Qt.Tool
         )
+        if hasattr(QtCore.Qt, 'X11BypassWindowManagerHint'):
+            self.setWindowFlags(self.windowFlags() | QtCore.Qt.X11BypassWindowManagerHint)
         self.setAttribute(QtCore.Qt.WA_TranslucentBackground, True)
         self.setModal(True)
-        self.resize(900, 520)
+        self.resize(1060, 560)
         self.setStyleSheet('''
+            QDialog {
+                background:rgba(10, 16, 24, 0.56);
+            }
             QFrame#xguide_panel {
-                background:qlineargradient(x1:0,y1:0,x2:1,y2:1, stop:0 #f4f6f8, stop:1 #e2e7ed);
-                border:2px solid rgba(234,241,247,0.92);
-                border-radius:4px;
+                background:qlineargradient(x1:0,y1:0,x2:1,y2:1, stop:0 #38414d, stop:1 #222a35);
+                border:1px solid rgba(226,238,248,0.30);
+                border-radius:2px;
             }
             QLabel#xguide_title {
-                color:#26313b;
-                font-size:30px;
+                color:#f2f7fb;
+                font-size:46px;
                 font-weight:800;
             }
             QLabel#xguide_meta {
-                color:rgba(35,45,55,0.88);
-                font-size:22px;
+                color:rgba(233,243,251,0.92);
+                font-size:34px;
                 font-weight:600;
             }
             QListWidget#xguide_list {
-                background:#f9fbfd;
-                color:#252c34;
+                background:#d8dce1;
+                color:#1b2b42;
                 border:1px solid rgba(0,0,0,0.26);
-                font-size:38px;
+                font-size:52px;
                 outline:none;
             }
             QListWidget#xguide_list::item {
-                padding:7px 12px;
+                padding:8px 16px;
                 border:1px solid transparent;
             }
             QListWidget#xguide_list::item:selected {
-                color:#f3fff2;
-                background:qlineargradient(x1:0,y1:0,x2:1,y2:0, stop:0 #5fbe47, stop:1 #3f9f33);
+                color:#eefeed;
+                background:qlineargradient(x1:0,y1:0,x2:1,y2:0, stop:0 #59b53f, stop:1 #429b33);
                 border:1px solid rgba(255,255,255,0.25);
             }
-            QLabel#xguide_blade_left {
-                background:qlineargradient(x1:0,y1:0,x2:0,y2:1, stop:0 #6a9abb, stop:1 #89b4d2);
-                color:#f4fbff;
-                font-size:36px;
-                font-weight:800;
-                padding:8px 6px;
-                border:1px solid rgba(255,255,255,0.32);
+            QFrame#xguide_actions {
+                background:rgba(47,58,72,0.88);
+                border:1px solid rgba(206,220,236,0.24);
             }
-            QLabel#xguide_blade_right {
-                background:qlineargradient(x1:0,y1:0,x2:0,y2:1, stop:0 #7da9c7, stop:1 #a2c3da);
-                color:#f4fbff;
-                font-size:36px;
+            QPushButton#xguide_action_btn {
+                text-align:left;
+                color:#f3f8fc;
+                background:#222f41;
+                border:1px solid rgba(202,218,236,0.28);
+                padding:8px 12px;
+                font-size:34px;
                 font-weight:800;
-                padding:8px 6px;
-                border:1px solid rgba(255,255,255,0.32);
+                min-height:62px;
+            }
+            QPushButton#xguide_action_btn:hover,
+            QPushButton#xguide_action_btn:focus {
+                background:#2f4260;
+                border:1px solid rgba(228,239,252,0.48);
             }
             QLabel#xguide_hint {
-                color:#1e2b36;
-                font-size:18px;
+                color:#eaf1f7;
+                font-size:29px;
                 font-weight:700;
             }
         ''')
         outer = QtWidgets.QVBoxLayout(self)
-        outer.setContentsMargins(0, 0, 0, 0)
+        outer.setContentsMargins(18, 18, 18, 18)
         panel = QtWidgets.QFrame()
         panel.setObjectName('xguide_panel')
-        outer.addWidget(panel)
+        panel.setMinimumSize(920, 500)
+        panel.setMaximumSize(1360, 820)
+        outer.addWidget(panel, 0, QtCore.Qt.AlignCenter)
 
         root = QtWidgets.QVBoxLayout(panel)
-        root.setContentsMargins(12, 10, 12, 10)
-        root.setSpacing(8)
+        root.setContentsMargins(14, 12, 14, 12)
+        root.setSpacing(10)
 
         top = QtWidgets.QHBoxLayout()
         title = QtWidgets.QLabel('Xbox Guide')
@@ -17845,38 +17749,40 @@ class Guide(QtWidgets.QDialog):
         root.addLayout(top)
 
         body = QtWidgets.QHBoxLayout()
-        body.setSpacing(0)
-        self.blade_left = QtWidgets.QLabel('Games & Apps')
-        self.blade_left.setObjectName('xguide_blade_left')
-        self.blade_left.setAlignment(QtCore.Qt.AlignCenter)
-        body.addWidget(self.blade_left, 1)
-        self.page_host = QtWidgets.QWidget()
-        self.page_host.setMinimumWidth(420)
-        body.addWidget(self.page_host, 8)
-        self.blade_right = QtWidgets.QLabel('Media')
-        self.blade_right.setObjectName('xguide_blade_right')
-        self.blade_right.setAlignment(QtCore.Qt.AlignCenter)
-        body.addWidget(self.blade_right, 1)
+        body.setSpacing(10)
+        self.listw = QtWidgets.QListWidget()
+        self.listw.setObjectName('xguide_list')
+        self.listw.addItems([
+            'Reciente',
+            'Mensajes recientes',
+            'Social global',
+            'Beacons',
+            'Mis juegos',
+            'Descargas activas',
+            'Canjear codigo',
+        ])
+        self.listw.setCurrentRow(0)
+        self.listw.itemActivated.connect(self._accept_current)
+        self.listw.itemDoubleClicked.connect(self._accept_current)
+        body.addWidget(self.listw, 7)
+
+        actions = QtWidgets.QFrame()
+        actions.setObjectName('xguide_actions')
+        actions_l = QtWidgets.QVBoxLayout(actions)
+        actions_l.setContentsMargins(8, 8, 8, 8)
+        actions_l.setSpacing(6)
+        for txt in ('Configuracion', 'Inicio de Xbox', 'Cerrar app actual', 'Cerrar sesion'):
+            b = QtWidgets.QPushButton(txt)
+            b.setObjectName('xguide_action_btn')
+            b.clicked.connect(lambda _=False, action=txt: self._accept_action(action))
+            actions_l.addWidget(b)
+        actions_l.addStretch(1)
+        body.addWidget(actions, 3)
         root.addLayout(body, 1)
 
-        hint = QtWidgets.QLabel('<font color="#49b93e">A Select</font>   <font color="#cf2d2d">B Back</font>   <font color="#2b7fd8">X Sign Out</font>   <font color="#ddb126">Y Xbox Home</font>')
+        hint = QtWidgets.QLabel('<font color="#49b93e">A Select</font>   <font color="#cf2d2d">B Back</font>   <font color="#2b7fd8">X Sign Out</font>   <font color="#ddb126">Y Inicio de Xbox</font>')
         hint.setObjectName('xguide_hint')
         root.addWidget(hint)
-
-        self.page_lists = []
-        for _title, items in self._pages:
-            lw = QtWidgets.QListWidget(self.page_host)
-            lw.setObjectName('xguide_list')
-            lw.addItems(list(items))
-            lw.setCurrentRow(0)
-            lw.itemActivated.connect(self._accept_current)
-            lw.itemDoubleClicked.connect(self._accept_current)
-            lw.hide()
-            self.page_lists.append(lw)
-        if self.page_lists:
-            self.page_lists[0].show()
-            self.page_lists[0].setFocus(QtCore.Qt.OtherFocusReason)
-        self._update_blades()
 
         self._clock = QtCore.QTimer(self)
         self._clock.timeout.connect(self._refresh_meta)
@@ -17888,39 +17794,8 @@ class Guide(QtWidgets.QDialog):
         pid_meta = f' PID:{self.paused_pid}' if self.paused_pid else ''
         self.meta.setText(f'{self.gamertag}    {now}{pid_meta}')
 
-    def _current_list(self):
-        if not self.page_lists:
-            return None
-        return self.page_lists[self._page_idx]
-
-    def _update_blades(self):
-        if not self._pages:
-            return
-        left = self._pages[self._page_idx][0]
-        right = self._pages[(self._page_idx + 1) % len(self._pages)][0]
-        self.blade_left.setText(str(left))
-        self.blade_right.setText(str(right))
-
-    def _relayout_lists(self):
-        rect = self.page_host.rect()
-        if rect.width() <= 0 or rect.height() <= 0:
-            return
-        for i, lw in enumerate(self.page_lists):
-            if i == self._page_idx and not self._page_animating:
-                lw.setGeometry(rect)
-                lw.show()
-            elif not self._page_animating:
-                lw.hide()
-
-    def resizeEvent(self, e):
-        super().resizeEvent(e)
-        self._relayout_lists()
-
     def _accept_current(self, *_):
-        lw = self._current_list()
-        if lw is None:
-            return
-        it = lw.currentItem()
+        it = self.listw.currentItem()
         if it is None:
             return
         self.action = it.text()
@@ -17930,73 +17805,15 @@ class Guide(QtWidgets.QDialog):
         self.action = str(action or '')
         self.accept()
 
-    def _switch_page(self, delta):
-        if self._page_animating or not self.page_lists:
-            return
-        total = len(self.page_lists)
-        target = (self._page_idx + int(delta)) % total
-        if target == self._page_idx:
-            return
-        host_rect = self.page_host.rect()
-        if host_rect.width() <= 8 or host_rect.height() <= 8:
-            self._page_idx = target
-            self._update_blades()
-            self._relayout_lists()
-            lw = self._current_list()
-            if lw is not None:
-                lw.setFocus(QtCore.Qt.OtherFocusReason)
-            return
-        self._page_animating = True
-        cur = self.page_lists[self._page_idx]
-        nxt = self.page_lists[target]
-        step = host_rect.width() if int(delta) > 0 else -host_rect.width()
-        cur.setGeometry(host_rect)
-        nxt.setGeometry(host_rect.translated(step, 0))
-        nxt.show()
-        nxt.raise_()
-        cur.raise_()
-        a_out = QtCore.QPropertyAnimation(cur, b'pos', self)
-        a_out.setDuration(180)
-        a_out.setStartValue(cur.pos())
-        a_out.setEndValue(QtCore.QPoint(cur.pos().x() - step, cur.pos().y()))
-        a_out.setEasingCurve(QtCore.QEasingCurve.OutCubic)
-        a_in = QtCore.QPropertyAnimation(nxt, b'pos', self)
-        a_in.setDuration(180)
-        a_in.setStartValue(nxt.pos())
-        a_in.setEndValue(host_rect.topLeft())
-        a_in.setEasingCurve(QtCore.QEasingCurve.OutCubic)
-        grp = QtCore.QParallelAnimationGroup(self)
-        grp.addAnimation(a_out)
-        grp.addAnimation(a_in)
-
-        def _done():
-            self._page_idx = target
-            self._update_blades()
-            cur.hide()
-            nxt.setGeometry(host_rect)
-            self._page_animating = False
-            lw = self._current_list()
-            if lw is not None:
-                lw.setFocus(QtCore.Qt.OtherFocusReason)
-
-        grp.finished.connect(_done)
-        self._page_anim = grp
-        grp.start(QtCore.QAbstractAnimation.DeleteWhenStopped)
-
     def showEvent(self, e):
         super().showEvent(e)
         scr = QtWidgets.QApplication.screenAt(QtGui.QCursor.pos()) if hasattr(QtWidgets.QApplication, 'screenAt') else None
         if scr is None:
             scr = QtWidgets.QApplication.primaryScreen()
         if scr is not None:
-            g = scr.availableGeometry()
-            w = min(max(760, int(g.width() * 0.56)), max(760, g.width() - 120))
-            h = min(max(420, int(g.height() * 0.56)), max(420, g.height() - 120))
-            self.resize(w, h)
-            x = g.x() + max(20, int(g.width() * 0.18))
-            y = g.y() + max(20, int(g.height() * 0.12))
-            self.move(max(g.x(), x), max(g.y(), y))
-        self._relayout_lists()
+            g = scr.geometry()
+            self.setGeometry(g)
+            self.showFullScreen()
         self._refresh_meta()
         self._animate_open()
 
@@ -18030,18 +17847,12 @@ class Guide(QtWidgets.QDialog):
 
     def keyPressEvent(self, e):
         if e.key() in (QtCore.Qt.Key_Y, QtCore.Qt.Key_Tab):
-            self.action = 'Xbox Home'
+            self.action = 'Inicio de Xbox'
             self.accept()
             return
         if e.key() in (QtCore.Qt.Key_X, QtCore.Qt.Key_Space):
-            self.action = 'Sign Out'
+            self.action = 'Cerrar sesion'
             self.accept()
-            return
-        if e.key() in (QtCore.Qt.Key_Left, QtCore.Qt.Key_PageUp, QtCore.Qt.Key_Backtab):
-            self._switch_page(-1)
-            return
-        if e.key() in (QtCore.Qt.Key_Right, QtCore.Qt.Key_PageDown):
-            self._switch_page(1)
             return
         if e.key() in (QtCore.Qt.Key_Escape, QtCore.Qt.Key_Back):
             self.action = ''
