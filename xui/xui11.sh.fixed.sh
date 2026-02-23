@@ -3593,6 +3593,7 @@ class VirtualKeyboardDialog(QtWidgets.QDialog):
     def __init__(self, initial='', parent=None, sfx_cb=None):
         super().__init__(parent)
         self._play_sfx = sfx_cb
+        self._nav_default_cols = 10
         self.setWindowTitle('Virtual Keyboard')
         self.setWindowFlags(QtCore.Qt.Dialog | QtCore.Qt.FramelessWindowHint)
         self.setModal(True)
@@ -3609,6 +3610,8 @@ class VirtualKeyboardDialog(QtWidgets.QDialog):
         v.setContentsMargins(12, 10, 12, 10)
         v.setSpacing(8)
         self.edit = QtWidgets.QLineEdit(str(initial or ''))
+        self.edit.setFocusPolicy(QtCore.Qt.ClickFocus)
+        self.edit.installEventFilter(self)
         v.addWidget(self.edit)
         self.keys = QtWidgets.QListWidget()
         self.keys.setViewMode(QtWidgets.QListView.IconMode)
@@ -3618,9 +3621,11 @@ class VirtualKeyboardDialog(QtWidgets.QDialog):
         self.keys.setSpacing(4)
         self.keys.setGridSize(QtCore.QSize(84, 54))
         self.keys.itemActivated.connect(self._activate_current)
+        self.keys.installEventFilter(self)
         for token in list("1234567890QWERTYUIOPASDFGHJKLZXCVBNM") + ['-', '_', '@', '.', '/', ':', 'SPACE', 'BACK', 'CLEAR', 'DONE']:
             self.keys.addItem(QtWidgets.QListWidgetItem(token))
         self.keys.setCurrentRow(0)
+        self.keys.setFocus(QtCore.Qt.OtherFocusReason)
         v.addWidget(self.keys, 1)
         v.addWidget(QtWidgets.QLabel('A/ENTER = Select | B/ESC = Back | X = Backspace | Y = Space'))
 
@@ -3645,17 +3650,78 @@ class VirtualKeyboardDialog(QtWidgets.QDialog):
             return
         if key == 'SPACE':
             self.edit.setText(self.edit.text() + ' ')
+            self.keys.setFocus(QtCore.Qt.OtherFocusReason)
             return
         if key == 'BACK':
             self.edit.setText(self.edit.text()[:-1])
+            self.keys.setFocus(QtCore.Qt.OtherFocusReason)
             return
         if key == 'CLEAR':
             self.edit.setText('')
+            self.keys.setFocus(QtCore.Qt.OtherFocusReason)
             return
         self.edit.setText(self.edit.text() + key)
+        self.keys.setFocus(QtCore.Qt.OtherFocusReason)
+
+    def _nav_cols(self):
+        try:
+            grid_w = int(self.keys.gridSize().width())
+            view_w = int(self.keys.viewport().width())
+            cols = max(1, view_w // max(1, grid_w))
+            return cols
+        except Exception:
+            return self._nav_default_cols
+
+    def _move_selection(self, dr=0, dc=0):
+        total = int(self.keys.count())
+        if total <= 0:
+            return
+        cols = max(1, int(self._nav_cols() or self._nav_default_cols))
+        idx = int(self.keys.currentRow())
+        if idx < 0:
+            idx = 0
+        row = idx // cols
+        col = idx % cols
+        row += int(dr)
+        col += int(dc)
+        max_row = (total - 1) // cols
+        row = max(0, min(max_row, row))
+        col = max(0, col)
+        row_start = row * cols
+        row_end = min(total - 1, row_start + cols - 1)
+        new_idx = min(row_end, row_start + col)
+        self.keys.setCurrentRow(new_idx)
+        it = self.keys.currentItem()
+        if it is not None:
+            self.keys.scrollToItem(it, QtWidgets.QAbstractItemView.PositionAtCenter)
+
+    def eventFilter(self, obj, event):
+        if event.type() == QtCore.QEvent.KeyPress:
+            if event.key() in (
+                QtCore.Qt.Key_Left, QtCore.Qt.Key_Right,
+                QtCore.Qt.Key_Up, QtCore.Qt.Key_Down,
+                QtCore.Qt.Key_Return, QtCore.Qt.Key_Enter,
+                QtCore.Qt.Key_Escape, QtCore.Qt.Key_Back,
+                QtCore.Qt.Key_Space, QtCore.Qt.Key_Backspace,
+            ):
+                self.keyPressEvent(event)
+                return True
+        return super().eventFilter(obj, event)
 
     def keyPressEvent(self, e):
         k = e.key()
+        if k in (QtCore.Qt.Key_Left,):
+            self._move_selection(0, -1)
+            return
+        if k in (QtCore.Qt.Key_Right,):
+            self._move_selection(0, 1)
+            return
+        if k in (QtCore.Qt.Key_Up,):
+            self._move_selection(-1, 0)
+            return
+        if k in (QtCore.Qt.Key_Down,):
+            self._move_selection(1, 0)
+            return
         if k in (QtCore.Qt.Key_Escape, QtCore.Qt.Key_Back):
             self.reject()
             return
@@ -3665,10 +3731,12 @@ class VirtualKeyboardDialog(QtWidgets.QDialog):
         if k == QtCore.Qt.Key_Space:
             self._sfx()
             self.edit.setText(self.edit.text() + ' ')
+            self.keys.setFocus(QtCore.Qt.OtherFocusReason)
             return
         if k == QtCore.Qt.Key_Backspace:
             self._sfx()
             self.edit.setText(self.edit.text()[:-1])
+            self.keys.setFocus(QtCore.Qt.OtherFocusReason)
             return
         super().keyPressEvent(e)
 
@@ -9508,9 +9576,12 @@ class VirtualKeyboardDialog(QtWidgets.QDialog):
         self.setModal(True)
         self.resize(860, 340)
         self.text = str(initial or '')
+        self._kb_rows = []
+        self._kb_focus_row = 0
+        self._kb_focus_col = 0
         self._build()
         self.line.setText(self.text)
-        self.line.setFocus()
+        QtCore.QTimer.singleShot(0, lambda: self._focus_button(0, 0))
 
     def _build(self):
         root = QtWidgets.QVBoxLayout(self)
@@ -9520,6 +9591,8 @@ class VirtualKeyboardDialog(QtWidgets.QDialog):
         self.line = QtWidgets.QLineEdit()
         self.line.setPlaceholderText('Type text...')
         self.line.returnPressed.connect(self.accept)
+        self.line.setFocusPolicy(QtCore.Qt.ClickFocus)
+        self.line.installEventFilter(self)
         root.addWidget(self.line, 0)
 
         grid_wrap = QtWidgets.QFrame()
@@ -9537,12 +9610,17 @@ class VirtualKeyboardDialog(QtWidgets.QDialog):
         r = 0
         for chars in rows:
             c = 0
+            row_buttons = []
             for ch in chars:
                 b = QtWidgets.QPushButton(ch)
                 b.setMinimumHeight(38)
                 b.clicked.connect(lambda _=False, ch=ch: self.line.insert(ch))
+                b.installEventFilter(self)
                 grid.addWidget(b, r, c, 1, 1)
+                row_buttons.append(b)
                 c += 1
+            if row_buttons:
+                self._kb_rows.append(row_buttons)
             r += 1
         root.addWidget(grid_wrap, 1)
 
@@ -9558,12 +9636,15 @@ class VirtualKeyboardDialog(QtWidgets.QDialog):
         btn_clear.clicked.connect(self.line.clear)
         btn_ok.clicked.connect(self.accept)
         btn_cancel.clicked.connect(self.reject)
+        for b in (btn_space, btn_back, btn_clear, btn_ok, btn_cancel):
+            b.installEventFilter(self)
         actions.addWidget(btn_space, 0)
         actions.addWidget(btn_back, 0)
         actions.addWidget(btn_clear, 0)
         actions.addStretch(1)
         actions.addWidget(btn_ok, 0)
         actions.addWidget(btn_cancel, 0)
+        self._kb_rows.append([btn_space, btn_back, btn_clear, btn_ok, btn_cancel])
         root.addLayout(actions, 0)
 
         self.setStyleSheet('''
@@ -9579,6 +9660,81 @@ class VirtualKeyboardDialog(QtWidgets.QDialog):
             QPushButton:focus { border:2px solid #ffffff; }
             QPushButton:hover { background:#48952a; }
         ''')
+
+    def _focus_button(self, row, col):
+        if not self._kb_rows:
+            return
+        row = max(0, min(len(self._kb_rows) - 1, int(row)))
+        buttons = self._kb_rows[row]
+        if not buttons:
+            return
+        col = max(0, min(len(buttons) - 1, int(col)))
+        self._kb_focus_row = row
+        self._kb_focus_col = col
+        btn = buttons[col]
+        btn.setFocus(QtCore.Qt.OtherFocusReason)
+
+    def _move_focus(self, dr=0, dc=0):
+        if not self._kb_rows:
+            return
+        row = self._kb_focus_row + int(dr)
+        row = max(0, min(len(self._kb_rows) - 1, row))
+        cur_col = self._kb_focus_col + int(dc)
+        self._focus_button(row, cur_col)
+
+    def _click_focused(self):
+        if not self._kb_rows:
+            return
+        row = max(0, min(len(self._kb_rows) - 1, self._kb_focus_row))
+        buttons = self._kb_rows[row]
+        if not buttons:
+            return
+        col = max(0, min(len(buttons) - 1, self._kb_focus_col))
+        btn = buttons[col]
+        btn.click()
+        btn.setFocus(QtCore.Qt.OtherFocusReason)
+
+    def eventFilter(self, obj, event):
+        if event.type() == QtCore.QEvent.KeyPress:
+            if event.key() in (
+                QtCore.Qt.Key_Left, QtCore.Qt.Key_Right,
+                QtCore.Qt.Key_Up, QtCore.Qt.Key_Down,
+                QtCore.Qt.Key_Return, QtCore.Qt.Key_Enter,
+                QtCore.Qt.Key_Escape, QtCore.Qt.Key_Back,
+                QtCore.Qt.Key_Space, QtCore.Qt.Key_Backspace,
+                QtCore.Qt.Key_A, QtCore.Qt.Key_B,
+            ):
+                self.keyPressEvent(event)
+                return True
+        return super().eventFilter(obj, event)
+
+    def keyPressEvent(self, e):
+        k = e.key()
+        if k in (QtCore.Qt.Key_Left,):
+            self._move_focus(0, -1)
+            return
+        if k in (QtCore.Qt.Key_Right,):
+            self._move_focus(0, 1)
+            return
+        if k in (QtCore.Qt.Key_Up,):
+            self._move_focus(-1, 0)
+            return
+        if k in (QtCore.Qt.Key_Down,):
+            self._move_focus(1, 0)
+            return
+        if k in (QtCore.Qt.Key_Return, QtCore.Qt.Key_Enter, QtCore.Qt.Key_A):
+            self._click_focused()
+            return
+        if k in (QtCore.Qt.Key_Escape, QtCore.Qt.Key_Back, QtCore.Qt.Key_B):
+            self.reject()
+            return
+        if k == QtCore.Qt.Key_Space:
+            self.line.insert(' ')
+            return
+        if k == QtCore.Qt.Key_Backspace:
+            self.line.backspace()
+            return
+        super().keyPressEvent(e)
 
     def get_text(self):
         return self.line.text().strip()
@@ -13478,6 +13634,7 @@ def normalize_url(text):
 class VirtualKeyboardDialog(QtWidgets.QDialog):
     def __init__(self, initial='', parent=None):
         super().__init__(parent)
+        self._nav_default_cols = 10
         self.setWindowTitle('Virtual Keyboard')
         self.setWindowFlags(QtCore.Qt.Dialog | QtCore.Qt.FramelessWindowHint)
         self.setModal(True)
@@ -13494,6 +13651,8 @@ class VirtualKeyboardDialog(QtWidgets.QDialog):
         v.setContentsMargins(12, 10, 12, 10)
         v.setSpacing(8)
         self.edit = QtWidgets.QLineEdit(str(initial or ''))
+        self.edit.setFocusPolicy(QtCore.Qt.ClickFocus)
+        self.edit.installEventFilter(self)
         v.addWidget(self.edit)
         self.keys = QtWidgets.QListWidget()
         self.keys.setViewMode(QtWidgets.QListView.IconMode)
@@ -13503,9 +13662,11 @@ class VirtualKeyboardDialog(QtWidgets.QDialog):
         self.keys.setSpacing(4)
         self.keys.setGridSize(QtCore.QSize(84, 54))
         self.keys.itemActivated.connect(self._activate_current)
+        self.keys.installEventFilter(self)
         for token in list("1234567890QWERTYUIOPASDFGHJKLZXCVBNM") + ['-', '_', '@', '.', '/', ':', 'SPACE', 'BACK', 'CLEAR', 'DONE']:
             self.keys.addItem(QtWidgets.QListWidgetItem(token))
         self.keys.setCurrentRow(0)
+        self.keys.setFocus(QtCore.Qt.OtherFocusReason)
         v.addWidget(self.keys, 1)
         v.addWidget(QtWidgets.QLabel('A/ENTER = Select | B/ESC = Back | X = Backspace | Y = Space'))
 
@@ -13522,17 +13683,78 @@ class VirtualKeyboardDialog(QtWidgets.QDialog):
             return
         if key == 'SPACE':
             self.edit.setText(self.edit.text() + ' ')
+            self.keys.setFocus(QtCore.Qt.OtherFocusReason)
             return
         if key == 'BACK':
             self.edit.setText(self.edit.text()[:-1])
+            self.keys.setFocus(QtCore.Qt.OtherFocusReason)
             return
         if key == 'CLEAR':
             self.edit.setText('')
+            self.keys.setFocus(QtCore.Qt.OtherFocusReason)
             return
         self.edit.setText(self.edit.text() + key)
+        self.keys.setFocus(QtCore.Qt.OtherFocusReason)
+
+    def _nav_cols(self):
+        try:
+            grid_w = int(self.keys.gridSize().width())
+            view_w = int(self.keys.viewport().width())
+            cols = max(1, view_w // max(1, grid_w))
+            return cols
+        except Exception:
+            return self._nav_default_cols
+
+    def _move_selection(self, dr=0, dc=0):
+        total = int(self.keys.count())
+        if total <= 0:
+            return
+        cols = max(1, int(self._nav_cols() or self._nav_default_cols))
+        idx = int(self.keys.currentRow())
+        if idx < 0:
+            idx = 0
+        row = idx // cols
+        col = idx % cols
+        row += int(dr)
+        col += int(dc)
+        max_row = (total - 1) // cols
+        row = max(0, min(max_row, row))
+        col = max(0, col)
+        row_start = row * cols
+        row_end = min(total - 1, row_start + cols - 1)
+        new_idx = min(row_end, row_start + col)
+        self.keys.setCurrentRow(new_idx)
+        it = self.keys.currentItem()
+        if it is not None:
+            self.keys.scrollToItem(it, QtWidgets.QAbstractItemView.PositionAtCenter)
+
+    def eventFilter(self, obj, event):
+        if event.type() == QtCore.QEvent.KeyPress:
+            if event.key() in (
+                QtCore.Qt.Key_Left, QtCore.Qt.Key_Right,
+                QtCore.Qt.Key_Up, QtCore.Qt.Key_Down,
+                QtCore.Qt.Key_Return, QtCore.Qt.Key_Enter,
+                QtCore.Qt.Key_Escape, QtCore.Qt.Key_Back,
+                QtCore.Qt.Key_Space, QtCore.Qt.Key_Backspace,
+            ):
+                self.keyPressEvent(event)
+                return True
+        return super().eventFilter(obj, event)
 
     def keyPressEvent(self, e):
         k = e.key()
+        if k in (QtCore.Qt.Key_Left,):
+            self._move_selection(0, -1)
+            return
+        if k in (QtCore.Qt.Key_Right,):
+            self._move_selection(0, 1)
+            return
+        if k in (QtCore.Qt.Key_Up,):
+            self._move_selection(-1, 0)
+            return
+        if k in (QtCore.Qt.Key_Down,):
+            self._move_selection(1, 0)
+            return
         if k in (QtCore.Qt.Key_Escape, QtCore.Qt.Key_Back):
             self.reject()
             return
@@ -13541,9 +13763,11 @@ class VirtualKeyboardDialog(QtWidgets.QDialog):
             return
         if k == QtCore.Qt.Key_Space:
             self.edit.setText(self.edit.text() + ' ')
+            self.keys.setFocus(QtCore.Qt.OtherFocusReason)
             return
         if k == QtCore.Qt.Key_Backspace:
             self.edit.setText(self.edit.text()[:-1])
+            self.keys.setFocus(QtCore.Qt.OtherFocusReason)
             return
         super().keyPressEvent(e)
 
@@ -14066,9 +14290,16 @@ def main():
     parser.add_argument('url', nargs='?', default='https://www.xbox.com')
     args = parser.parse_args()
     app = QtWidgets.QApplication(sys.argv)
-    w = WebHub(url=args.url, kiosk=(args.mode == 'kiosk'))
-    if args.mode == 'kiosk':
-        w.showFullScreen()
+    fullscreen_mode = args.mode in ('hub', 'kiosk')
+    w = WebHub(url=args.url, kiosk=fullscreen_mode)
+    if fullscreen_mode:
+        try:
+            w.showFullScreen()
+        except Exception:
+            try:
+                w.showMaximized()
+            except Exception:
+                w.show()
     else:
         w.show()
     sys.exit(app.exec_())
@@ -14103,13 +14334,29 @@ if command -v python3 >/dev/null 2>&1 && [ -f "$WEBHUB" ]; then
 fi
 
 if command -v chromium-browser >/dev/null 2>&1; then
-  [ "$MODE" = "kiosk" ] && exec chromium-browser --kiosk "$URL" || exec chromium-browser "$URL"
+  if [ "$MODE" = "normal" ]; then
+    exec chromium-browser "$URL"
+  elif [ "$MODE" = "kiosk" ]; then
+    exec chromium-browser --kiosk "$URL"
+  else
+    exec chromium-browser --start-fullscreen "$URL"
+  fi
 fi
 if command -v chromium >/dev/null 2>&1; then
-  [ "$MODE" = "kiosk" ] && exec chromium --kiosk "$URL" || exec chromium "$URL"
+  if [ "$MODE" = "normal" ]; then
+    exec chromium "$URL"
+  elif [ "$MODE" = "kiosk" ]; then
+    exec chromium --kiosk "$URL"
+  else
+    exec chromium --start-fullscreen "$URL"
+  fi
 fi
 if command -v firefox >/dev/null 2>&1; then
-  [ "$MODE" = "kiosk" ] && exec firefox --kiosk "$URL" || exec firefox "$URL"
+  if [ "$MODE" = "normal" ]; then
+    exec firefox "$URL"
+  else
+    exec firefox --kiosk "$URL"
+  fi
 fi
 if command -v x-www-browser >/dev/null 2>&1; then
   exec x-www-browser "$URL"
