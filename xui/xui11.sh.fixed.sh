@@ -6803,11 +6803,48 @@ class ControllerBridge:
         self.last_suppressed_snapshot = ()
         self.last_guide_open = 0.0
 
+    def _active_window_dashboard(self):
+        if not XDOTOOL:
+            return False
+        try:
+            wid = subprocess.check_output(
+                [XDOTOOL, 'getactivewindow'],
+                text=True,
+                stderr=subprocess.DEVNULL
+            ).strip()
+            if not wid:
+                return False
+            name = subprocess.check_output(
+                [XDOTOOL, 'getwindowname', wid],
+                text=True,
+                stderr=subprocess.DEVNULL
+            ).strip().lower()
+            if any(t in name for t in ('xui', 'dashboard', 'xbox style')):
+                return True
+            pid_txt = subprocess.check_output(
+                [XDOTOOL, 'getwindowpid', wid],
+                text=True,
+                stderr=subprocess.DEVNULL
+            ).strip()
+            if not pid_txt:
+                return False
+            cmdline = ''
+            try:
+                cmdline = open(f'/proc/{int(pid_txt)}/cmdline', 'rb').read().replace(b'\x00', b' ').decode('utf-8', 'ignore').lower()
+            except Exception:
+                cmdline = ''
+            return any(t in cmdline for t in ('pyqt_dashboard_improved.py', 'xui_startup_and_dashboard', 'xui-dashboard.service'))
+        except Exception:
+            return False
+
     def _open_global_guide(self):
         now = time.monotonic()
         if (now - self.last_guide_open) < GUIDE_COOLDOWN_SEC:
             return True
         self.last_guide_open = now
+        if self._active_window_dashboard():
+            if emit_key('F1'):
+                return True
         if not os.path.exists(GUIDE_SCRIPT):
             return False
         try:
@@ -10336,7 +10373,9 @@ XUI_HOME="$HOME/.xui"
 APP_HOME="$XUI_HOME/apps/fnae"
 DATA_FILE="$XUI_HOME/data/fnae_paths.json"
 LINUX_MEDIAFIRE_URL="https://www.mediafire.com/file/a4q4l09vdfqzzws/Five_Nights_At_Epsteins_Linux.tar/file"
+LINUX_MEDIAFIRE_DIRECT_URL="https://www.mediafire.com/download/a4q4l09vdfqzzws/Five_Nights_At_Epsteins_Linux.tar"
 WINDOWS_MEDIAFIRE_URL="https://www.mediafire.com/file/6tj1rd7kmsxv4oe/Five_Nights_At_Epstein%2527s.zip/file"
+WINDOWS_MEDIAFIRE_DIRECT_URL="https://www.mediafire.com/download/6tj1rd7kmsxv4oe/Five_Nights_At_Epstein%27s.zip"
 mkdir -p "$APP_HOME/linux" "$APP_HOME/windows" "$XUI_HOME/data"
 HOST_OS="$(uname -s 2>/dev/null || echo Linux)"
 IS_LINUX=0
@@ -10451,6 +10490,29 @@ download_from_mediafire(){
   mv -f "$tmp_dl" "$out_file"
   rm -f "$tmp_html"
   return 0
+}
+
+download_mediafire_archive(){
+  local out_file="$1"
+  local validator="$2"
+  shift 2
+  local src=""
+  rm -f "$out_file" >/dev/null 2>&1 || true
+  for src in "$@"; do
+    [ -n "$src" ] || continue
+    if fetch_url_to_file "$src" "$out_file" "$src" && [ -s "$out_file" ] && ! is_html_file "$out_file" && "$validator" "$out_file"; then
+      return 0
+    fi
+    rm -f "$out_file" >/dev/null 2>&1 || true
+  done
+  for src in "$@"; do
+    [ -n "$src" ] || continue
+    if download_from_mediafire "$src" "$out_file" && "$validator" "$out_file"; then
+      return 0
+    fi
+    rm -f "$out_file" >/dev/null 2>&1 || true
+  done
+  return 1
 }
 
 validate_tar(){
@@ -10614,7 +10676,10 @@ fi
 mkdir -p "$XUI_HOME/cache/games"
 if [ -z "$TAR_SRC" ]; then
   DL_TAR="$XUI_HOME/cache/games/Five Nights At Epsteins Linux.tar"
-  if download_from_mediafire "$LINUX_MEDIAFIRE_URL" "$DL_TAR" && validate_tar "$DL_TAR"; then
+  if download_mediafire_archive "$DL_TAR" validate_tar \
+    "$LINUX_MEDIAFIRE_DIRECT_URL" \
+    "$LINUX_MEDIAFIRE_URL" \
+    "${LINUX_MEDIAFIRE_URL%/file}/download"; then
     TAR_SRC="$DL_TAR"
     echo "Downloaded FNAE Linux archive from MediaFire."
   else
@@ -10623,7 +10688,10 @@ if [ -z "$TAR_SRC" ]; then
 fi
 if [ "$IS_LINUX" = "0" ] && [ -z "$ZIP_SRC" ]; then
   DL_ZIP="$XUI_HOME/cache/games/Five Nights At Epstein's.zip"
-  if download_from_mediafire "$WINDOWS_MEDIAFIRE_URL" "$DL_ZIP" && validate_zip "$DL_ZIP"; then
+  if download_mediafire_archive "$DL_ZIP" validate_zip \
+    "$WINDOWS_MEDIAFIRE_DIRECT_URL" \
+    "$WINDOWS_MEDIAFIRE_URL" \
+    "${WINDOWS_MEDIAFIRE_URL%/file}/download"; then
     ZIP_SRC="$DL_ZIP"
     echo "Downloaded FNAE Windows archive from MediaFire."
   else
@@ -10730,6 +10798,7 @@ BASH
 #!/usr/bin/env bash
 set -euo pipefail
 XUI_HOME="$HOME/.xui"
+APP_HOME="$XUI_HOME/apps/fnae"
 DATA_FILE="$XUI_HOME/data/fnae_paths.json"
 BIN_DIR="$XUI_HOME/bin"
 PID_FILE="$XUI_HOME/data/active_game.pid"
@@ -10753,6 +10822,36 @@ print(str(data.get(field, '')))
 PY
 }
 
+find_linux_executable(){
+  local root="${1:-$APP_HOME/linux}"
+  [ -d "$root" ] || return 1
+  local exe=""
+  exe="$(find "$root" -maxdepth 8 -type f \( -name '*.x86_64' -o -name '*.x86' -o -name '*.AppImage' \) | head -n1 || true)"
+  if [ -n "$exe" ] && [ -f "$exe" ]; then
+    echo "$exe"
+    return 0
+  fi
+  while IFS= read -r data_dir; do
+    [ -n "$data_dir" ] || continue
+    local base="${data_dir%_Data}"
+    for exe in "$base" "$base.x86_64" "$base.x86"; do
+      if [ -f "$exe" ]; then
+        echo "$exe"
+        return 0
+      fi
+    done
+  done < <(find "$root" -maxdepth 8 -type d -name '*_Data' 2>/dev/null)
+  exe="$(find "$root" -maxdepth 8 -type f \
+    ! -name '*.so' ! -name '*.dll' ! -name '*.pdb' \
+    ! -name 'UnityCrashHandler*' ! -name '*.exe' \
+    -perm -u+x | head -n1 || true)"
+  if [ -n "$exe" ] && [ -f "$exe" ]; then
+    echo "$exe"
+    return 0
+  fi
+  return 1
+}
+
 if [ ! -f "$DATA_FILE" ]; then
   "$BIN_DIR/xui_install_fnae.sh" || true
 fi
@@ -10762,6 +10861,9 @@ WIN_EXE=""
 if [ -f "$DATA_FILE" ]; then
   LINUX_EXE="$(read_json_field linux_exe)"
   WIN_EXE="$(read_json_field windows_exe)"
+fi
+if [ -z "$LINUX_EXE" ] || [ ! -f "$LINUX_EXE" ]; then
+  LINUX_EXE="$(find_linux_executable "$APP_HOME/linux" || true)"
 fi
 
 # On Linux, force a Linux reinstall once if no native executable was detected.
@@ -10774,7 +10876,16 @@ if [ "$IS_LINUX" = "1" ] && { [ -z "$LINUX_EXE" ] || [ ! -f "$LINUX_EXE" ]; }; t
 fi
 
 launch_and_wait(){
-  "$@" &
+  local run_dir="$1"
+  shift
+  if [ -n "$run_dir" ] && [ -d "$run_dir" ]; then
+    (
+      cd "$run_dir" || exit 1
+      "$@"
+    ) &
+  else
+    "$@" &
+  fi
   local pid=$!
   mkdir -p "$(dirname "$PID_FILE")"
   printf '%s\n' "$pid" > "$PID_FILE"
@@ -10788,7 +10899,7 @@ launch_and_wait(){
 
 if [ -n "$LINUX_EXE" ] && [ -f "$LINUX_EXE" ]; then
   chmod +x "$LINUX_EXE" || true
-  launch_and_wait "$LINUX_EXE" "$@"
+  launch_and_wait "$(dirname "$LINUX_EXE")" "$LINUX_EXE" "$@"
   exit $?
 fi
 
@@ -10803,7 +10914,7 @@ if [ "$IS_LINUX" = "1" ] && [ "${ALLOW_WIN_ON_LINUX}" != "1" ]; then
 fi
 
 if [ -n "$WIN_EXE" ] && [ -f "$WIN_EXE" ]; then
-  launch_and_wait "$BIN_DIR/xui_wine_run.sh" "$WIN_EXE" "$@"
+  launch_and_wait "$(dirname "$WIN_EXE")" "$BIN_DIR/xui_wine_run.sh" "$WIN_EXE" "$@"
   exit $?
 fi
 
@@ -13176,7 +13287,11 @@ DATA = Path.home() / '.xui' / 'data'
 PAUSED_FILE = DATA / 'active_paused.pid'
 ACTIVE_FILE = DATA / 'active_game.pid'
 SOCIAL_FILE = DATA / 'social_messages_recent.json'
+RECENT_FILE = DATA / 'recent.json'
+PROFILE_FILE = DATA / 'profile.json'
+REDEEM_FILE = DATA / 'redeemed_codes.json'
 LOCK_FILE = DATA / 'guide_global.lock'
+CLOSE_SCRIPT = str(Path.home() / '.xui' / 'bin' / 'xui_close_active_app.sh')
 
 
 def _json_read(path, default):
@@ -13185,6 +13300,24 @@ def _json_read(path, default):
         return json.loads(Path(path).read_text(encoding='utf-8', errors='ignore'))
     except Exception:
         return default
+
+
+def _json_write(path, value):
+    try:
+        import json
+        Path(path).write_text(json.dumps(value, ensure_ascii=False, indent=2), encoding='utf-8')
+        return True
+    except Exception:
+        return False
+
+
+def _profile_gamertag():
+    prof = _json_read(PROFILE_FILE, {})
+    if isinstance(prof, dict):
+        gt = str(prof.get('gamertag', '')).strip()
+        if gt:
+            return gt
+    return 'Player1'
 
 
 def _cmdline_of(pid):
@@ -13196,7 +13329,7 @@ def _cmdline_of(pid):
 
 def _is_dashboard_pid(pid):
     cl = _cmdline_of(pid)
-    return any(t in cl for t in ('pyqt_dashboard_improved.py', 'xui-dashboard.service', 'xui dashboard'))
+    return any(t in cl for t in ('pyqt_dashboard_improved.py', 'xui-dashboard.service', 'xui_startup_and_dashboard', 'xui dashboard'))
 
 
 def _active_window_pid():
@@ -13252,79 +13385,31 @@ def _resume_paused():
         pass
 
 
-class Guide(QtWidgets.QDialog):
-    def __init__(self, paused_pid=None):
-        super().__init__()
-        self.paused_pid = paused_pid
-        self.action = 'resume'
-        self.setWindowTitle('Xbox Guide')
-        self.setWindowFlags(QtCore.Qt.Dialog | QtCore.Qt.FramelessWindowHint | QtCore.Qt.WindowStaysOnTopHint)
-        self.setModal(True)
-        self.resize(760, 460)
-        self.setStyleSheet('''
-            QDialog { background:#d7dde4; border:2px solid #edf2f7; }
-            QLabel#title { background:#606a75; color:#f6fbff; font-size:42px; font-weight:800; padding:8px 12px; }
-            QLabel#meta { color:#1f2933; font-size:18px; font-weight:700; padding:4px 2px; }
-            QListWidget { background:#ecf1f5; color:#1c232b; font-size:30px; font-weight:700; border:1px solid #8f9cab; }
-            QListWidget::item { padding:7px 10px; }
-            QListWidget::item:selected { background:#57b93c; color:white; }
-            QLabel#hint { color:#2d3742; font-size:16px; font-weight:700; }
-        ''')
-        v = QtWidgets.QVBoxLayout(self)
-        v.setContentsMargins(0, 0, 0, 0)
-        t = QtWidgets.QLabel('Guia Xbox')
-        t.setObjectName('title')
-        v.addWidget(t, 0)
-        meta = QtWidgets.QLabel(f'Paused app PID: {paused_pid or "-"}')
-        meta.setObjectName('meta')
-        meta.setContentsMargins(12, 8, 12, 4)
-        v.addWidget(meta, 0)
-        self.listw = QtWidgets.QListWidget()
-        self.listw.addItems([
-            'Resume Game/App',
-            'Close Current App',
-            'Recent Messages',
-            'Back to Dashboard',
-        ])
-        self.listw.setCurrentRow(0)
-        self.listw.itemActivated.connect(self._accept_current)
-        v.addWidget(self.listw, 1)
-        hint = QtWidgets.QLabel('A/ENTER Select | B/ESC Back')
-        hint.setObjectName('hint')
-        hint.setContentsMargins(12, 6, 12, 10)
-        v.addWidget(hint, 0)
-
-    def _accept_current(self, *_):
-        it = self.listw.currentItem()
-        txt = it.text() if it else ''
-        if txt == 'Resume Game/App':
-            self.action = 'resume'
-        elif txt == 'Close Current App':
-            self.action = 'close'
-        elif txt == 'Recent Messages':
-            self.action = 'messages'
-        elif txt == 'Back to Dashboard':
-            self.action = 'dashboard'
-        else:
-            self.action = 'resume'
-        self.accept()
-
-    def keyPressEvent(self, e):
-        if e.key() in (QtCore.Qt.Key_Escape, QtCore.Qt.Key_Back):
-            self.action = 'resume'
-            self.accept()
-            return
-        if e.key() in (QtCore.Qt.Key_Return, QtCore.Qt.Key_Enter):
-            self._accept_current()
-            return
-        super().keyPressEvent(e)
+def _activate_dashboard():
+    cmd = (
+        '/bin/sh -lc '
+        '"xdotool search --name \'XUI - Xbox 360 Style\' windowactivate 2>/dev/null '
+        '|| xdotool search --name \'XUI\' windowactivate 2>/dev/null '
+        '|| xdotool search --name \'dashboard\' windowactivate 2>/dev/null"'
+    )
+    rc = subprocess.call(cmd, shell=True)
+    return rc == 0
 
 
-def _show_messages(parent=None):
+def _recent_text():
+    arr = _json_read(RECENT_FILE, [])
+    if not isinstance(arr, list) or not arr:
+        return 'No hay actividad reciente todavia.'
+    lines = []
+    for i, item in enumerate(arr[:12], 1):
+        lines.append(f'{i:02d}. {item}')
+    return '\n'.join(lines)
+
+
+def _messages_text():
     arr = _json_read(SOCIAL_FILE, [])
     if not isinstance(arr, list) or not arr:
-        QtWidgets.QMessageBox.information(parent, 'Recent Messages', 'No recent messages.')
-        return
+        return 'No hay mensajes recientes todavia.'
     lines = []
     for i, item in enumerate(arr[:18], 1):
         if isinstance(item, dict):
@@ -13333,12 +13418,296 @@ def _show_messages(parent=None):
             lines.append(f'{i:02d}. {who}: {txt}')
         else:
             lines.append(f'{i:02d}. {item}')
-    QtWidgets.QMessageBox.information(parent, 'Recent Messages', '\n'.join(lines))
+    return '\n'.join(lines)
+
+
+def _downloads_text():
+    cmd = (
+        "/bin/sh -c \"ps -eo comm,args 2>/dev/null | "
+        "egrep -i 'steam|flatpak|apt|dnf|pacman|aria2c|transmission|qbittorrent|wget|curl' "
+        "| grep -v egrep | head -n 12\""
+    )
+    out = subprocess.getoutput(cmd).strip()
+    if out:
+        return f'Procesos de descarga detectados:\n{out}'
+    return 'No se detectan descargas activas.'
+
+
+def _redeem_code(parent):
+    code, ok = QtWidgets.QInputDialog.getText(parent, 'Canjear codigo', 'Introduce tu codigo:')
+    if not ok:
+        return None
+    code = ''.join(ch for ch in str(code).upper() if ch.isalnum() or ch == '-')
+    if not code:
+        return 'Codigo no valido.'
+    redeemed = _json_read(REDEEM_FILE, [])
+    if not isinstance(redeemed, list):
+        redeemed = []
+    if code in redeemed:
+        return f'El codigo {code} ya fue usado en este perfil.'
+    redeemed.append(code)
+    if not _json_write(REDEEM_FILE, redeemed):
+        return 'No se pudo guardar el codigo.'
+    return f'Codigo {code} guardado correctamente.'
+
+
+def _close_session():
+    prof = _json_read(PROFILE_FILE, {})
+    if not isinstance(prof, dict):
+        prof = {}
+    prof['signed_in'] = False
+    _json_write(PROFILE_FILE, prof)
+
+
+class Guide(QtWidgets.QDialog):
+    def __init__(self, gamertag='Player1', paused_pid=None):
+        super().__init__()
+        self.paused_pid = paused_pid
+        self.gamertag = str(gamertag or 'Player1')
+        self.action = ''
+        self._open_anim = None
+        self.setWindowTitle('Guia Xbox')
+        self.setWindowFlags(
+            QtCore.Qt.Dialog
+            | QtCore.Qt.FramelessWindowHint
+            | QtCore.Qt.WindowStaysOnTopHint
+        )
+        self.setAttribute(QtCore.Qt.WA_TranslucentBackground, True)
+        self.setModal(True)
+        self.resize(860, 500)
+        self.setStyleSheet('''
+            QFrame#xguide_panel {
+                background:qlineargradient(x1:0,y1:0,x2:1,y2:1, stop:0 #3a3f46, stop:1 #1e242b);
+                border:2px solid rgba(214,223,235,0.52);
+                border-radius:7px;
+            }
+            QLabel#xguide_title {
+                color:#eef4f8;
+                font-size:28px;
+                font-weight:800;
+            }
+            QLabel#xguide_meta {
+                color:rgba(235,242,248,0.78);
+                font-size:17px;
+                font-weight:600;
+            }
+            QListWidget#xguide_list {
+                background:rgba(236,239,242,0.92);
+                color:#20252b;
+                border:1px solid rgba(0,0,0,0.26);
+                font-size:32px;
+                outline:none;
+            }
+            QListWidget#xguide_list::item {
+                padding:6px 10px;
+                border:1px solid transparent;
+            }
+            QListWidget#xguide_list::item:selected {
+                color:#f3fff2;
+                background:qlineargradient(x1:0,y1:0,x2:1,y2:0, stop:0 #4ea93f, stop:1 #2f8832);
+                border:1px solid rgba(255,255,255,0.25);
+            }
+            QFrame#xguide_blades {
+                background:rgba(65,74,84,0.95);
+                border:1px solid rgba(194,206,222,0.25);
+            }
+            QPushButton#xguide_blade_btn {
+                text-align:left;
+                padding:8px 10px;
+                color:#e9f1f8;
+                font-size:20px;
+                font-weight:700;
+                background:rgba(34,43,54,0.92);
+                border:1px solid rgba(186,205,224,0.24);
+            }
+            QPushButton#xguide_blade_btn:focus,
+            QPushButton#xguide_blade_btn:hover {
+                background:rgba(58,80,106,0.95);
+                border:1px solid rgba(218,233,246,0.52);
+            }
+            QLabel#xguide_hint {
+                color:rgba(238,245,250,0.84);
+                font-size:15px;
+                font-weight:600;
+            }
+        ''')
+        outer = QtWidgets.QVBoxLayout(self)
+        outer.setContentsMargins(0, 0, 0, 0)
+        panel = QtWidgets.QFrame()
+        panel.setObjectName('xguide_panel')
+        outer.addWidget(panel)
+
+        root = QtWidgets.QVBoxLayout(panel)
+        root.setContentsMargins(12, 10, 12, 10)
+        root.setSpacing(8)
+
+        top = QtWidgets.QHBoxLayout()
+        title = QtWidgets.QLabel('Guia Xbox')
+        title.setObjectName('xguide_title')
+        self.meta = QtWidgets.QLabel('')
+        self.meta.setObjectName('xguide_meta')
+        top.addWidget(title)
+        top.addStretch(1)
+        top.addWidget(self.meta)
+        root.addLayout(top)
+
+        body = QtWidgets.QHBoxLayout()
+        body.setSpacing(10)
+        self.listw = QtWidgets.QListWidget()
+        self.listw.setObjectName('xguide_list')
+        self.listw.addItems([
+            'Logros',
+            'Premios',
+            'Reciente',
+            'Mensajes recientes',
+            'Mis juegos',
+            'Descargas activas',
+            'Canjear codigo',
+        ])
+        self.listw.setCurrentRow(0)
+        self.listw.itemActivated.connect(self._accept_current)
+        self.listw.itemDoubleClicked.connect(self._accept_current)
+        body.addWidget(self.listw, 4)
+
+        blades = QtWidgets.QFrame()
+        blades.setObjectName('xguide_blades')
+        blades_l = QtWidgets.QVBoxLayout(blades)
+        blades_l.setContentsMargins(8, 8, 8, 8)
+        blades_l.setSpacing(6)
+        for opt in ('Configuracion', 'Inicio de Xbox', 'Cerrar app actual', 'Cerrar sesion'):
+            b = QtWidgets.QPushButton(opt)
+            b.setObjectName('xguide_blade_btn')
+            b.clicked.connect(lambda _=False, opt=opt: self._accept_action(opt))
+            blades_l.addWidget(b)
+        blades_l.addStretch(1)
+        body.addWidget(blades, 2)
+        root.addLayout(body, 1)
+
+        hint = QtWidgets.QLabel('A/ENTER = Select | B/ESC = Back | Xbox Guide = F1 o HOME')
+        hint.setObjectName('xguide_hint')
+        root.addWidget(hint)
+
+        self._clock = QtCore.QTimer(self)
+        self._clock.timeout.connect(self._refresh_meta)
+        self._clock.start(1000)
+        self._refresh_meta()
+
+    def _refresh_meta(self):
+        now = QtCore.QDateTime.currentDateTime().toString('HH:mm')
+        pid_meta = f' PID:{self.paused_pid}' if self.paused_pid else ''
+        self.meta.setText(f'{self.gamertag}    {now}{pid_meta}')
+
+    def _accept_current(self, *_):
+        it = self.listw.currentItem()
+        if it is None:
+            return
+        self.action = it.text()
+        self.accept()
+
+    def _accept_action(self, action):
+        self.action = str(action or '')
+        self.accept()
+
+    def showEvent(self, e):
+        super().showEvent(e)
+        scr = QtWidgets.QApplication.screenAt(QtGui.QCursor.pos()) if hasattr(QtWidgets.QApplication, 'screenAt') else None
+        if scr is None:
+            scr = QtWidgets.QApplication.primaryScreen()
+        if scr is not None:
+            g = scr.availableGeometry()
+            w = min(max(760, int(g.width() * 0.56)), max(760, g.width() - 120))
+            h = min(max(420, int(g.height() * 0.56)), max(420, g.height() - 120))
+            self.resize(w, h)
+            x = g.x() + max(20, int(g.width() * 0.18))
+            y = g.y() + max(20, int(g.height() * 0.12))
+            self.move(max(g.x(), x), max(g.y(), y))
+        self._refresh_meta()
+        self._animate_open()
+
+    def _animate_open(self):
+        effect = QtWidgets.QGraphicsOpacityEffect(self)
+        self.setGraphicsEffect(effect)
+        effect.setOpacity(0.0)
+        end_rect = self.geometry()
+        start_rect = QtCore.QRect(
+            end_rect.x() - max(24, end_rect.width() // 18),
+            end_rect.y(),
+            end_rect.width(),
+            end_rect.height(),
+        )
+        self.setGeometry(start_rect)
+        self._open_anim = QtCore.QParallelAnimationGroup(self)
+        fade = QtCore.QPropertyAnimation(effect, b'opacity', self)
+        fade.setDuration(190)
+        fade.setStartValue(0.0)
+        fade.setEndValue(1.0)
+        fade.setEasingCurve(QtCore.QEasingCurve.OutCubic)
+        slide = QtCore.QPropertyAnimation(self, b'geometry', self)
+        slide.setDuration(230)
+        slide.setStartValue(start_rect)
+        slide.setEndValue(end_rect)
+        slide.setEasingCurve(QtCore.QEasingCurve.OutCubic)
+        self._open_anim.addAnimation(fade)
+        self._open_anim.addAnimation(slide)
+        self._open_anim.finished.connect(lambda: self.setGraphicsEffect(None))
+        self._open_anim.start(QtCore.QAbstractAnimation.DeleteWhenStopped)
+
+    def keyPressEvent(self, e):
+        if e.key() in (QtCore.Qt.Key_Escape, QtCore.Qt.Key_Back):
+            self.action = ''
+            self.reject()
+            return
+        if e.key() in (QtCore.Qt.Key_Return, QtCore.Qt.Key_Enter):
+            self._accept_current()
+            return
+        super().keyPressEvent(e)
+
+
+def _msg(parent, title, text):
+    QtWidgets.QMessageBox.information(parent, str(title), str(text))
+
+
+def _handle_action(action, parent):
+    name = str(action or '').strip()
+    if not name:
+        _resume_paused()
+        return
+    if name == 'Reciente':
+        _msg(parent, 'Reciente', _recent_text())
+        _resume_paused()
+        return
+    if name == 'Mensajes recientes':
+        _msg(parent, 'Mensajes recientes', _messages_text())
+        _resume_paused()
+        return
+    if name == 'Descargas activas':
+        _msg(parent, 'Descargas activas', _downloads_text())
+        _resume_paused()
+        return
+    if name == 'Canjear codigo':
+        res = _redeem_code(parent)
+        if res:
+            _msg(parent, 'Canjear codigo', res)
+        _resume_paused()
+        return
+    if name == 'Cerrar app actual':
+        subprocess.getoutput(f'/bin/sh -c "{CLOSE_SCRIPT}"')
+        return
+    if name == 'Cerrar sesion':
+        _close_session()
+        _msg(parent, 'Sesion', 'Sesion cerrada.')
+        _activate_dashboard()
+        _resume_paused()
+        return
+    if name in ('Logros', 'Premios', 'Mis juegos', 'Configuracion', 'Inicio de Xbox'):
+        _activate_dashboard()
+        _resume_paused()
+        return
+    _resume_paused()
 
 
 def main():
     DATA.mkdir(parents=True, exist_ok=True)
-    # simple single-instance lock with staleness recovery
     now = int(time.time())
     if LOCK_FILE.exists():
         try:
@@ -13348,31 +13717,21 @@ def main():
         except Exception:
             pass
     LOCK_FILE.write_text(str(now), encoding='utf-8')
+
     app = QtWidgets.QApplication(sys.argv)
     app.setQuitOnLastWindowClosed(True)
     pid = _pick_target_pid()
     if pid:
         _pause_pid(pid)
-    d = Guide(paused_pid=pid)
+
+    d = Guide(gamertag=_profile_gamertag(), paused_pid=pid)
     try:
-        d.showFullScreen()
+        d.show()
     except Exception:
         d.show()
-    d.exec_()
-    act = d.action
-    if act == 'messages':
-        _show_messages(d)
-        _resume_paused()
-    elif act == 'close':
-        subprocess.getoutput('/bin/sh -c "$HOME/.xui/bin/xui_close_active_app.sh"')
-    elif act == 'dashboard':
-        _resume_paused()
-        try:
-            subprocess.Popen(['/bin/sh', '-lc', 'xdotool search --name "XUI" windowactivate 2>/dev/null || true'])
-        except Exception:
-            pass
-    else:
-        _resume_paused()
+    accepted = d.exec_() == QtWidgets.QDialog.Accepted
+    action = d.action if accepted else ''
+    _handle_action(action, d)
     try:
         LOCK_FILE.unlink()
     except Exception:
