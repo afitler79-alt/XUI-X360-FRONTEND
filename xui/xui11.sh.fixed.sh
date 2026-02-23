@@ -10333,6 +10333,11 @@ DATA_FILE="$XUI_HOME/data/fnae_paths.json"
 LINUX_MEDIAFIRE_URL="https://www.mediafire.com/file/a4q4l09vdfqzzws/Five_Nights_At_Epsteins_Linux.tar/file"
 WINDOWS_MEDIAFIRE_URL="https://www.mediafire.com/file/6tj1rd7kmsxv4oe/Five_Nights_At_Epstein%2527s.zip/file"
 mkdir -p "$APP_HOME/linux" "$APP_HOME/windows" "$XUI_HOME/data"
+HOST_OS="$(uname -s 2>/dev/null || echo Linux)"
+IS_LINUX=0
+if [ "$HOST_OS" = "Linux" ]; then
+  IS_LINUX=1
+fi
 
 find_first_existing(){
   for p in "$@"; do
@@ -10471,6 +10476,46 @@ PY
   return 0
 }
 
+find_linux_executable(){
+  local root="$1"
+  [ -d "$root" ] || return 1
+
+  # 1) Common Unity/Linux artifacts.
+  local exe=""
+  exe="$(find "$root" -maxdepth 8 -type f \( -name '*.x86_64' -o -name '*.x86' -o -name '*.AppImage' \) | head -n1 || true)"
+  if [ -n "$exe" ] && [ -f "$exe" ]; then
+    chmod +x "$exe" >/dev/null 2>&1 || true
+    echo "$exe"
+    return 0
+  fi
+
+  # 2) Unity convention: <GameName> executable + <GameName>_Data directory.
+  local data_dir base cand
+  while IFS= read -r data_dir; do
+    [ -n "$data_dir" ] || continue
+    base="${data_dir%_Data}"
+    for cand in "$base" "$base.x86_64" "$base.x86"; do
+      if [ -f "$cand" ]; then
+        chmod +x "$cand" >/dev/null 2>&1 || true
+        echo "$cand"
+        return 0
+      fi
+    done
+  done < <(find "$root" -maxdepth 8 -type d -name '*_Data' 2>/dev/null)
+
+  # 3) Fallback: executable files that look like game launchers.
+  exe="$(find "$root" -maxdepth 8 -type f \
+    ! -name '*.so' ! -name '*.dll' ! -name '*.pdb' \
+    ! -name 'UnityCrashHandler*' ! -name '*.exe' \
+    -perm -u+x | head -n1 || true)"
+  if [ -n "$exe" ] && [ -f "$exe" ]; then
+    chmod +x "$exe" >/dev/null 2>&1 || true
+    echo "$exe"
+    return 0
+  fi
+  return 1
+}
+
 tar_candidates=(
   "$HOME/.xui/cache/games/Five Nights At Epsteins Linux.tar"
   "$HOME/.xui/cache/games/Five_Nights_At_Epsteins_Linux.tar"
@@ -10571,7 +10616,7 @@ if [ -z "$TAR_SRC" ]; then
     rm -f "$DL_TAR" >/dev/null 2>&1 || true
   fi
 fi
-if [ -z "$ZIP_SRC" ]; then
+if [ "$IS_LINUX" = "0" ] && [ -z "$ZIP_SRC" ]; then
   DL_ZIP="$XUI_HOME/cache/games/Five Nights At Epstein's.zip"
   if download_from_mediafire "$WINDOWS_MEDIAFIRE_URL" "$DL_ZIP" && validate_zip "$DL_ZIP"; then
     ZIP_SRC="$DL_ZIP"
@@ -10579,6 +10624,13 @@ if [ -z "$ZIP_SRC" ]; then
   else
     rm -f "$DL_ZIP" >/dev/null 2>&1 || true
   fi
+fi
+
+if [ "$IS_LINUX" = "1" ] && [ -z "$TAR_SRC" ]; then
+  echo "FNAE Linux archive was not found or download failed."
+  echo "Required Linux URL:"
+  echo "  $LINUX_MEDIAFIRE_URL"
+  exit 1
 fi
 
 if [ -z "$TAR_SRC" ] && [ -z "$ZIP_SRC" ]; then
@@ -10602,7 +10654,7 @@ if [ -n "$TAR_SRC" ]; then
   tar -xf "$TAR_SRC" -C "$APP_HOME/linux"
 fi
 
-if [ -n "$ZIP_SRC" ]; then
+if [ "$IS_LINUX" = "0" ] && [ -n "$ZIP_SRC" ]; then
   rm -rf "$APP_HOME/windows"
   mkdir -p "$APP_HOME/windows"
   if command -v unzip >/dev/null 2>&1; then
@@ -10620,13 +10672,14 @@ PY
   fi
 fi
 
-LINUX_EXE="$(find "$APP_HOME/linux" -maxdepth 6 -type f -name '*.x86_64' | head -n1 || true)"
+LINUX_EXE="$(find_linux_executable "$APP_HOME/linux" || true)"
 WIN_EXE="$(find "$APP_HOME/windows" -maxdepth 5 -type f -iname 'Five Nights At Epstein*.exe' | head -n1 || true)"
 if [ -z "$WIN_EXE" ]; then
   WIN_EXE="$(find "$APP_HOME/windows" -maxdepth 5 -type f -iname '*.exe' ! -iname 'UnityCrashHandler*.exe' | head -n1 || true)"
 fi
-if [ -n "$LINUX_EXE" ]; then
-  chmod +x "$LINUX_EXE" || true
+if [ "$IS_LINUX" = "1" ]; then
+  # In Linux installs we do not want Windows fallback to be selected by accident.
+  WIN_EXE=""
 fi
 
 cat > "$DATA_FILE" <<JSON
@@ -10640,7 +10693,7 @@ JSON
 
 echo "FNAE installed."
 echo "Linux executable: ${LINUX_EXE:-not found}"
-echo "Windows executable: ${WIN_EXE:-not found}"
+echo "Windows executable: ${WIN_EXE:-not found/disabled on Linux}"
 BASH
   chmod +x "$BIN_DIR/xui_install_fnae.sh"
 
@@ -10675,6 +10728,10 @@ XUI_HOME="$HOME/.xui"
 DATA_FILE="$XUI_HOME/data/fnae_paths.json"
 BIN_DIR="$XUI_HOME/bin"
 PID_FILE="$XUI_HOME/data/active_game.pid"
+HOST_OS="$(uname -s 2>/dev/null || echo Linux)"
+IS_LINUX=0
+[ "$HOST_OS" = "Linux" ] && IS_LINUX=1
+ALLOW_WIN_ON_LINUX="${XUI_FNAE_ALLOW_WINDOWS_ON_LINUX:-0}"
 
 read_json_field(){
   local field="$1"
@@ -10702,6 +10759,15 @@ if [ -f "$DATA_FILE" ]; then
   WIN_EXE="$(read_json_field windows_exe)"
 fi
 
+# On Linux, force a Linux reinstall once if no native executable was detected.
+if [ "$IS_LINUX" = "1" ] && { [ -z "$LINUX_EXE" ] || [ ! -f "$LINUX_EXE" ]; }; then
+  "$BIN_DIR/xui_install_fnae.sh" || true
+  if [ -f "$DATA_FILE" ]; then
+    LINUX_EXE="$(read_json_field linux_exe)"
+    WIN_EXE="$(read_json_field windows_exe)"
+  fi
+fi
+
 launch_and_wait(){
   "$@" &
   local pid=$!
@@ -10719,6 +10785,16 @@ if [ -n "$LINUX_EXE" ] && [ -f "$LINUX_EXE" ]; then
   chmod +x "$LINUX_EXE" || true
   launch_and_wait "$LINUX_EXE" "$@"
   exit $?
+fi
+
+if [ "$IS_LINUX" = "1" ] && [ "${ALLOW_WIN_ON_LINUX}" != "1" ]; then
+  echo "FNAE Linux build was not detected."
+  echo "Windows fallback is disabled on Linux to avoid crashes."
+  echo "Reinstall Linux build:"
+  echo "  $BIN_DIR/xui_install_fnae.sh"
+  echo "If you still want to force Wine fallback:"
+  echo "  XUI_FNAE_ALLOW_WINDOWS_ON_LINUX=1 $BIN_DIR/xui_run_fnae.sh"
+  exit 1
 fi
 
 if [ -n "$WIN_EXE" ] && [ -f "$WIN_EXE" ]; then
@@ -12213,7 +12289,8 @@ apply_update(){
 
   (
     cd "$SRC"
-    AUTO_CONFIRM=1 XUI_SKIP_LAUNCH_PROMPT=1 bash "$installer" --no-auto-install --skip-apt-wait
+    AUTO_CONFIRM=1 XUI_SKIP_LAUNCH_PROMPT=1 XUI_SYSTEMCTL_TIMEOUT_SEC="${XUI_SYSTEMCTL_TIMEOUT_SEC:-15}" \
+      bash "$installer" --no-auto-install --skip-apt-wait
   )
 
   local installed_commit=""
@@ -15475,6 +15552,19 @@ UNIT
 
 finish_setup(){
   info "Finalizing installation"
+  run_user_systemctl(){
+    local rc
+    if command -v timeout >/dev/null 2>&1; then
+      timeout "${XUI_SYSTEMCTL_TIMEOUT_SEC:-15}" systemctl --user "$@" >/dev/null 2>&1
+      rc=$?
+      if [ "$rc" -eq 124 ]; then
+        warn "systemctl --user $* timed out after ${XUI_SYSTEMCTL_TIMEOUT_SEC:-15}s"
+        return 1
+      fi
+      return "$rc"
+    fi
+    systemctl --user "$@" >/dev/null 2>&1
+  }
   # make sure everything is executable
   chmod -R a+x "$BIN_DIR" || true
   chmod +x "$DASH_DIR/pyqt_dashboard_improved.py" || true
@@ -15499,10 +15589,10 @@ finish_setup(){
     sed -i 's/^X-GNOME-Autostart-enabled=.*/X-GNOME-Autostart-enabled=false/' "$AUTOSTART_DIR/xui-dashboard.desktop" 2>/dev/null || true
   fi
   if command -v systemctl >/dev/null 2>&1; then
-    if systemctl --user daemon-reload >/dev/null 2>&1; then
-      systemctl --user enable --now xui-dashboard.service xui-joy.service || true
-      systemctl --user enable --now xui-battery-monitor.service || true
-      systemctl --user enable --now xui-power-opt.service || true
+    if run_user_systemctl daemon-reload; then
+      run_user_systemctl enable --now xui-dashboard.service xui-joy.service || true
+      run_user_systemctl enable --now xui-battery-monitor.service || true
+      run_user_systemctl enable --now xui-power-opt.service || true
       info "Attempted to enable user services: xui-dashboard, xui-joy, xui-battery-monitor, xui-power-opt"
     else
       warn "systemctl --user daemon-reload failed; using desktop autostart only"
