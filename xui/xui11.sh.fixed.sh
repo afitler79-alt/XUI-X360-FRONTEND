@@ -11081,15 +11081,28 @@ set -euo pipefail
 
 as_root(){
   if [ "$(id -u)" -eq 0 ]; then "$@"; return $?; fi
-  if command -v sudo >/dev/null 2>&1; then sudo "$@"; return $?; fi
+  if command -v sudo >/dev/null 2>&1; then
+    # In mandatory-update/background flows there is no TTY; never block waiting for password.
+    if [ "${XUI_NONINTERACTIVE:-0}" = "1" ] || [ ! -t 0 ]; then
+      sudo -n "$@" && return 0
+      echo "non-interactive sudo unavailable; skipping: $*" >&2
+      return 1
+    fi
+    sudo "$@"
+    return $?
+  fi
   echo "sudo required: $*" >&2
   return 1
 }
 
 wait_apt(){
   local t=0
+  local max_wait="${XUI_APT_WAIT_SECONDS:-180}"
+  if [ "${XUI_NONINTERACTIVE:-0}" = "1" ]; then
+    max_wait="${XUI_APT_WAIT_SECONDS_NONINTERACTIVE:-20}"
+  fi
   while pgrep -x apt >/dev/null 2>&1 || pgrep -x apt-get >/dev/null 2>&1 || pgrep -x dpkg >/dev/null 2>&1 || pgrep -f unattended-upgrade >/dev/null 2>&1; do
-    [ "$t" -ge 180 ] && break
+    [ "$t" -ge "$max_wait" ] && break
     sleep 2
     t=$((t+2))
   done
@@ -13421,12 +13434,21 @@ apply_update(){
 
   (
     cd "$SRC"
-    AUTO_CONFIRM=1 XUI_SKIP_LAUNCH_PROMPT=1 XUI_SYSTEMCTL_TIMEOUT_SEC="${XUI_SYSTEMCTL_TIMEOUT_SEC:-15}" \
-      bash "$installer" --no-auto-install --skip-apt-wait
+    if command -v timeout >/dev/null 2>&1; then
+      AUTO_CONFIRM=1 XUI_SKIP_LAUNCH_PROMPT=1 XUI_NONINTERACTIVE=1 XUI_SYSTEMCTL_TIMEOUT_SEC="${XUI_SYSTEMCTL_TIMEOUT_SEC:-15}" \
+        timeout "${XUI_APPLY_INSTALLER_TIMEOUT_SEC:-900}" bash "$installer" --no-auto-install --skip-apt-wait
+    else
+      AUTO_CONFIRM=1 XUI_SKIP_LAUNCH_PROMPT=1 XUI_NONINTERACTIVE=1 XUI_SYSTEMCTL_TIMEOUT_SEC="${XUI_SYSTEMCTL_TIMEOUT_SEC:-15}" \
+        bash "$installer" --no-auto-install --skip-apt-wait
+    fi
   )
 
   if [ -x "$HOME/.xui/bin/xui_install_fnae_deps.sh" ]; then
-    "$HOME/.xui/bin/xui_install_fnae_deps.sh" || true
+    if command -v timeout >/dev/null 2>&1; then
+      XUI_NONINTERACTIVE=1 timeout "${XUI_FNAE_DEPS_TIMEOUT_SEC:-120}" "$HOME/.xui/bin/xui_install_fnae_deps.sh" || true
+    else
+      XUI_NONINTERACTIVE=1 "$HOME/.xui/bin/xui_install_fnae_deps.sh" || true
+    fi
   fi
 
   local installed_commit=""
@@ -17136,7 +17158,11 @@ finish_setup(){
     fi
   fi
   if [ -x "$BIN_DIR/xui_install_fnae_deps.sh" ]; then
-    "$BIN_DIR/xui_install_fnae_deps.sh" || true
+    if command -v timeout >/dev/null 2>&1; then
+      XUI_NONINTERACTIVE=1 timeout "${XUI_FNAE_DEPS_TIMEOUT_SEC:-120}" "$BIN_DIR/xui_install_fnae_deps.sh" || true
+    else
+      XUI_NONINTERACTIVE=1 "$BIN_DIR/xui_install_fnae_deps.sh" || true
+    fi
   fi
   info "Installation complete."
 }
