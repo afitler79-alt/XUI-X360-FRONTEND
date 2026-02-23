@@ -1862,6 +1862,7 @@ class SocialOverlay(QtWidgets.QDialog):
         self._add_action_item('friend_request', 'Send Friend Request')
         self._add_action_item('friend_requests', 'Friend Requests')
         self._add_action_item('friends', 'Friends List')
+        self._add_action_item('voice_call_hub', 'Voice/Call Hub')
         self._add_action_item('add_peer', 'Add Peer ID')
         self._add_action_item('peer_ids', 'My Peer IDs')
         self._add_action_item('lan_status', 'LAN Status')
@@ -1900,6 +1901,9 @@ class SocialOverlay(QtWidgets.QDialog):
             return
         if key == 'friends':
             self._show_friends()
+            return
+        if key == 'voice_call_hub':
+            self._open_voice_call_hub()
             return
         if key == 'add_peer':
             self._add_peer()
@@ -2350,6 +2354,22 @@ class SocialOverlay(QtWidgets.QDialog):
         out = subprocess.getoutput('ip -brief -4 addr 2>/dev/null || ip -4 addr show 2>/dev/null || true')
         QtWidgets.QMessageBox.information(self, 'LAN Status', out or 'No network data.')
 
+    def _open_voice_call_hub(self):
+        script = XUI_HOME / 'bin' / 'xui_social_chat.py'
+        if not script.exists():
+            self.status.setText(f'Voice/Call hub missing: {script}')
+            return
+        try:
+            subprocess.Popen(
+                ['/bin/sh', '-c', f'"{script}"'],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+            self.status.setText('Opened Voice/Call hub.')
+            self._append_system('Opened global Voice/Call hub.')
+        except Exception as exc:
+            self.status.setText(f'Cannot open Voice/Call hub: {exc}')
+
     def _load_world_settings(self):
         cfg = safe_json_read(WORLD_CHAT_FILE, {})
         room = str(cfg.get('room', '')).strip()
@@ -2526,6 +2546,7 @@ class SocialOverlay(QtWidgets.QDialog):
             self.timer.stop()
         except Exception:
             pass
+        self._stop_call_session(notify=False)
         self._save_world_settings()
         self.engine.stop()
         super().closeEvent(e)
@@ -16788,11 +16809,14 @@ BASH
     # Social LAN/P2P chat (Xbox-like messaging between dashboards)
     cat > "$BIN_DIR/xui_social_chat.py" <<'PY'
 #!/usr/bin/env python3
+import base64
 import json
 import os
 import queue
+import shutil
 import socket
 import subprocess
+import tempfile
 import threading
 import time
 import urllib.parse
@@ -16807,10 +16831,14 @@ PROFILE_FILE = DATA_HOME / 'profile.json'
 PEERS_FILE = DATA_HOME / 'social_peers.json'
 WORLD_CHAT_FILE = DATA_HOME / 'world_chat.json'
 SOCIAL_MESSAGES_FILE = DATA_HOME / 'social_messages_recent.json'
+VOICE_DIR = DATA_HOME / 'social_voice'
 
 DISCOVERY_PORT = int(os.environ.get('XUI_CHAT_DISCOVERY_PORT', '38655'))
 CHAT_PORT_BASE = int(os.environ.get('XUI_CHAT_PORT', '38600'))
 ANNOUNCE_INTERVAL = 2.5
+MAX_TCP_PACKET_BYTES = int(os.environ.get('XUI_SOCIAL_MAX_PACKET_BYTES', str(4 * 1024 * 1024)))
+DEFAULT_CALL_AUDIO_PORT = int(os.environ.get('XUI_CALL_AUDIO_PORT', '39700'))
+DEFAULT_CALL_VIDEO_PORT = int(os.environ.get('XUI_CALL_VIDEO_PORT', '39701'))
 
 
 def safe_json_read(path, default):
@@ -17006,6 +17034,36 @@ class SocialNetworkEngine:
         }
         self._send_packet(host, port, payload)
 
+    def send_voice_message(self, host, port, mime, duration_sec, blob):
+        raw = bytes(blob or b'')
+        if not raw:
+            return
+        payload = {
+            'type': 'voice_message',
+            'node_id': self.node_id,
+            'from': self.nickname,
+            'mime': str(mime or 'audio/ogg'),
+            'duration': float(duration_sec or 0.0),
+            'voice_b64': base64.b64encode(raw).decode('ascii', errors='ignore'),
+            'ts': time.time(),
+            'reply_port': self.chat_port,
+        }
+        self._send_packet(host, port, payload)
+
+    def send_call_invite(self, host, port, mode='voice', audio_port=DEFAULT_CALL_AUDIO_PORT, video_port=DEFAULT_CALL_VIDEO_PORT, note=''):
+        payload = {
+            'type': 'call_invite',
+            'node_id': self.node_id,
+            'from': self.nickname,
+            'mode': str(mode or 'voice'),
+            'audio_port': int(audio_port or DEFAULT_CALL_AUDIO_PORT),
+            'video_port': int(video_port or DEFAULT_CALL_VIDEO_PORT),
+            'note': str(note or ''),
+            'ts': time.time(),
+            'reply_port': self.chat_port,
+        }
+        self._send_packet(host, port, payload)
+
     def _world_url(self, suffix=''):
         topic = urllib.parse.quote(self.world_topic, safe='')
         return f'{self.world_relay}/{topic}{suffix}'
@@ -17196,8 +17254,19 @@ class SocialNetworkEngine:
                 continue
             host = addr[0]
             with conn:
+                chunks = []
+                total = 0
                 try:
-                    payload = conn.recv(65536).decode('utf-8', errors='ignore')
+                    while True:
+                        part = conn.recv(65536)
+                        if not part:
+                            break
+                        chunks.append(part)
+                        total += len(part)
+                        if total > MAX_TCP_PACKET_BYTES:
+                            chunks = []
+                            break
+                    payload = b''.join(chunks).decode('utf-8', errors='ignore') if chunks else ''
                 except Exception:
                     payload = ''
             if not payload.strip():
@@ -17210,10 +17279,10 @@ class SocialNetworkEngine:
                     msg = json.loads(line)
                 except Exception:
                     continue
-                if msg.get('type') != 'chat':
+                mtype = str(msg.get('type') or '')
+                if mtype not in ('chat', 'voice_message', 'call_invite'):
                     continue
                 name = str(msg.get('from') or host)
-                text = str(msg.get('text') or '').strip()
                 sender_node = str(msg.get('node_id') or '')
                 try:
                     reply_port = int(msg.get('reply_port') or 0)
@@ -17221,6 +17290,36 @@ class SocialNetworkEngine:
                     reply_port = 0
                 if reply_port > 0:
                     self._push_peer(name, host, reply_port, 'LAN', sender_node)
+                if mtype == 'call_invite':
+                    mode = str(msg.get('mode') or 'voice').strip().lower()
+                    try:
+                        audio_port = int(msg.get('audio_port') or DEFAULT_CALL_AUDIO_PORT)
+                    except Exception:
+                        audio_port = DEFAULT_CALL_AUDIO_PORT
+                    try:
+                        video_port = int(msg.get('video_port') or DEFAULT_CALL_VIDEO_PORT)
+                    except Exception:
+                        video_port = DEFAULT_CALL_VIDEO_PORT
+                    note = str(msg.get('note') or '').strip()
+                    self.events.put(('call_invite', name, host, int(reply_port or 0), mode, audio_port, video_port, note))
+                    continue
+                if mtype == 'voice_message':
+                    b64 = str(msg.get('voice_b64') or '').strip()
+                    if not b64 or len(b64) > (MAX_TCP_PACKET_BYTES * 2):
+                        continue
+                    mime = str(msg.get('mime') or 'audio/ogg').strip()
+                    try:
+                        duration = float(msg.get('duration') or 0.0)
+                    except Exception:
+                        duration = 0.0
+                    try:
+                        blob = base64.b64decode(b64.encode('ascii', errors='ignore'), validate=False)
+                    except Exception:
+                        blob = b''
+                    if blob:
+                        self.events.put(('voice_message', name, host, int(reply_port or 0), mime, duration, blob))
+                    continue
+                text = str(msg.get('text') or '').strip()
                 if text:
                     self.events.put(('chat', name, host, reply_port, text, float(msg.get('ts') or time.time())))
         srv.close()
@@ -17437,12 +17536,17 @@ class SocialChatWindow(QtWidgets.QWidget):
     def __init__(self):
         super().__init__()
         DATA_HOME.mkdir(parents=True, exist_ok=True)
+        VOICE_DIR.mkdir(parents=True, exist_ok=True)
         self.nickname = load_gamertag()
         self.setWindowTitle(f'XUI Social Chat - {self.nickname}')
         self.resize(1180, 720)
         self.engine = SocialNetworkEngine(self.nickname)
         self.peer_items = {}
         self.peer_data = {}
+        self.voice_inbox = []
+        self.last_call_invite = None
+        self.call_procs = []
+        self.call_active = False
         self._vk_opening = False
         self._vk_last_close = 0.0
         self._action_items = {}
@@ -17587,6 +17691,12 @@ class SocialChatWindow(QtWidgets.QWidget):
         root.addLayout(body, 1)
 
         self._add_action_item('reply', 'Reply / Send Message')
+        self._add_action_item('voice_msg', 'Send Voice Message')
+        self._add_action_item('voice_inbox', 'Voice Inbox')
+        self._add_action_item('call_voice', 'Start Voice Call')
+        self._add_action_item('call_screen', 'Voice Call + Screen')
+        self._add_action_item('call_join', 'Join Last Invite')
+        self._add_action_item('call_stop', 'Stop Current Call')
         self._add_action_item('add_peer', 'Add Peer ID')
         self._add_action_item('peer_ids', 'My Peer IDs')
         self._add_action_item('lan_status', 'LAN Status')
@@ -17613,6 +17723,24 @@ class SocialChatWindow(QtWidgets.QWidget):
         if key == 'reply':
             self.msg.setFocus(QtCore.Qt.OtherFocusReason)
             self._open_chat_keyboard()
+            return
+        if key == 'voice_msg':
+            self._send_voice_message()
+            return
+        if key == 'voice_inbox':
+            self._open_voice_inbox()
+            return
+        if key == 'call_voice':
+            self._start_p2p_call(with_screen=False)
+            return
+        if key == 'call_screen':
+            self._start_p2p_call(with_screen=True)
+            return
+        if key == 'call_join':
+            self._join_last_call_invite()
+            return
+        if key == 'call_stop':
+            self._stop_call_session(notify=True)
             return
         if key == 'add_peer':
             self._add_peer_dialog()
@@ -17939,12 +18067,267 @@ class SocialChatWindow(QtWidgets.QWidget):
         if pub:
             lines += ['', f'Public IP (approx): {pub}:{self.engine.chat_port}']
         lines += ['', f'World room: {self.engine.world_topic}', f'World relay: {self.engine.world_relay}']
+        lines += [f'Call audio UDP port (default): {DEFAULT_CALL_AUDIO_PORT}']
+        lines += [f'Call screen UDP port (default): {DEFAULT_CALL_VIDEO_PORT}']
         lines += ['', 'Tip: for Internet P2P use Tailscale/ZeroTier or router port-forward TCP 38600.']
         QtWidgets.QMessageBox.information(self, 'My Peer IDs', '\n'.join(lines))
 
     def _show_lan_status(self):
         out = subprocess.getoutput('/bin/sh -c "$HOME/.xui/bin/xui_lan_status.sh"')
         QtWidgets.QMessageBox.information(self, 'LAN Status', out or 'No network data.')
+
+    def _record_voice_clip(self, duration_sec):
+        secs = max(1, min(int(duration_sec), 25))
+        tmp_ogg = Path(tempfile.mktemp(prefix='xui_voice_', suffix='.ogg'))
+        tmp_wav = Path(tempfile.mktemp(prefix='xui_voice_', suffix='.wav'))
+        try:
+            if shutil.which('ffmpeg'):
+                candidates = [
+                    ['ffmpeg', '-hide_banner', '-loglevel', 'error', '-y', '-f', 'pulse', '-i', 'default',
+                     '-t', str(secs), '-ac', '1', '-ar', '16000', '-c:a', 'libopus', '-b:a', '32k', str(tmp_ogg)],
+                    ['ffmpeg', '-hide_banner', '-loglevel', 'error', '-y', '-f', 'alsa', '-i', 'default',
+                     '-t', str(secs), '-ac', '1', '-ar', '16000', '-c:a', 'libopus', '-b:a', '32k', str(tmp_ogg)],
+                ]
+                for cmd in candidates:
+                    rc = subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode
+                    if rc == 0 and tmp_ogg.exists() and tmp_ogg.stat().st_size > 1024:
+                        return (tmp_ogg.read_bytes(), 'audio/ogg', float(secs), '')
+            if shutil.which('arecord'):
+                cmd = [
+                    'arecord', '-q', '-d', str(secs), '-f', 'S16_LE', '-r', '16000', '-c', '1', str(tmp_wav)
+                ]
+                rc = subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode
+                if rc == 0 and tmp_wav.exists() and tmp_wav.stat().st_size > 2048:
+                    return (tmp_wav.read_bytes(), 'audio/wav', float(secs), '')
+            return (b'', '', 0.0, 'No recording backend (ffmpeg/arecord).')
+        except Exception as exc:
+            return (b'', '', 0.0, str(exc))
+        finally:
+            try:
+                tmp_ogg.unlink(missing_ok=True)
+            except Exception:
+                pass
+            try:
+                tmp_wav.unlink(missing_ok=True)
+            except Exception:
+                pass
+
+    def _voice_file_suffix(self, mime):
+        m = str(mime or '').lower()
+        if 'wav' in m:
+            return '.wav'
+        if 'ogg' in m or 'opus' in m:
+            return '.ogg'
+        return '.bin'
+
+    def _save_voice_blob(self, sender, mime, duration, blob):
+        ts = int(time.time())
+        safe_sender = ''.join(ch if ch.isalnum() or ch in ('-', '_') else '_' for ch in str(sender or 'peer'))[:28]
+        path = VOICE_DIR / f'voice_{ts}_{safe_sender}{self._voice_file_suffix(mime)}'
+        try:
+            path.write_bytes(bytes(blob or b''))
+        except Exception:
+            return None
+        item = {
+            'sender': str(sender or 'Unknown'),
+            'mime': str(mime or 'audio/ogg'),
+            'duration': float(duration or 0.0),
+            'path': str(path),
+            'ts': ts,
+        }
+        self.voice_inbox.insert(0, item)
+        self.voice_inbox = self.voice_inbox[:80]
+        return item
+
+    def _play_voice_file(self, path):
+        p = str(path or '').strip()
+        if not p or not Path(p).exists():
+            self.status.setText('Voice file not found.')
+            return
+        if shutil.which('mpv'):
+            subprocess.Popen(['mpv', '--really-quiet', '--no-terminal', p], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            return
+        if shutil.which('ffplay'):
+            subprocess.Popen(['ffplay', '-nodisp', '-autoexit', '-loglevel', 'quiet', p], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            return
+        if shutil.which('aplay'):
+            subprocess.Popen(['aplay', p], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            return
+        self.status.setText('No audio player found (mpv/ffplay/aplay).')
+
+    def _open_voice_inbox(self):
+        if not self.voice_inbox:
+            QtWidgets.QMessageBox.information(self, 'Voice Inbox', 'No voice messages yet.')
+            return
+        lines = []
+        for i, msg in enumerate(self.voice_inbox[:30], 1):
+            hh = time.strftime('%H:%M:%S', time.localtime(int(msg.get('ts') or time.time())))
+            who = str(msg.get('sender') or 'Unknown')
+            dur = float(msg.get('duration') or 0.0)
+            lines.append(f'{i}. {who} ({dur:.0f}s) [{hh}]')
+        idx, ok = QtWidgets.QInputDialog.getInt(
+            self,
+            'Voice Inbox',
+            'Select voice message number to play:\n\n' + '\n'.join(lines),
+            1,
+            1,
+            len(lines),
+            1,
+        )
+        if not ok:
+            return
+        sel = self.voice_inbox[int(idx) - 1]
+        self._play_voice_file(sel.get('path'))
+        self.status.setText(f"Playing voice from {sel.get('sender', 'Unknown')}")
+
+    def _send_voice_message(self):
+        peer = self._current_peer()
+        if not peer or str(peer.get('source')) == 'WORLD':
+            QtWidgets.QMessageBox.information(self, 'Voice Message', 'Select a LAN/P2P peer first.')
+            return
+        seconds, ok = QtWidgets.QInputDialog.getInt(
+            self, 'Voice Message', 'Duration seconds:', 6, 2, 20, 1
+        )
+        if not ok:
+            return
+        self.status.setText(f'Recording voice message ({seconds}s)...')
+        QtWidgets.QApplication.processEvents()
+        blob, mime, duration, err = self._record_voice_clip(int(seconds))
+        if not blob:
+            self.status.setText(f'Voice record failed: {err}')
+            return
+        candidates = self._send_candidates(peer)
+        last_err = None
+        used = None
+        for host, port, key in candidates:
+            try:
+                self.engine.send_voice_message(host, port, mime, duration, blob)
+                used = (host, int(port), key)
+                break
+            except Exception as exc:
+                last_err = exc
+        if not used:
+            self.status.setText(f'Voice send failed: {last_err or "unreachable peer"}')
+            return
+        host, port, key = used
+        self._append_line(f"[{time.strftime('%H:%M:%S')}] You -> {peer.get('name','peer')} [VOICE {duration:.0f}s]")
+        self._push_recent_message(f"You -> {peer.get('name', 'peer')} [VOICE]", f'Voice message ({duration:.0f}s)')
+        if host == str(peer.get('host')) and int(port) == int(peer.get('port') or 0):
+            self.status.setText(f'Voice sent to {host}:{port}')
+        else:
+            self.status.setText(f'Voice sent via fallback {host}:{port}')
+            item = self.peer_items.get(key)
+            if item is not None:
+                self.peer_list.setCurrentItem(item)
+
+    def _spawn_call_proc(self, cmd):
+        try:
+            p = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            self.call_procs.append(p)
+            return True
+        except Exception:
+            return False
+
+    def _stop_call_session(self, notify=False):
+        any_proc = False
+        for p in list(self.call_procs):
+            try:
+                p.terminate()
+            except Exception:
+                pass
+            any_proc = True
+        self.call_procs = []
+        self.call_active = False
+        if notify:
+            self.status.setText('Call session stopped.' if any_proc else 'No active call session.')
+
+    def _launch_call_session(self, remote_host, audio_port, video_port, with_screen=False):
+        host = str(remote_host or '').strip()
+        if not host:
+            self.status.setText('Invalid call host.')
+            return False
+        a_port = int(audio_port or DEFAULT_CALL_AUDIO_PORT)
+        v_port = int(video_port or DEFAULT_CALL_VIDEO_PORT)
+        if not shutil.which('ffmpeg') or not shutil.which('ffplay'):
+            self.status.setText('Call requires ffmpeg + ffplay installed.')
+            return False
+        self._stop_call_session(notify=False)
+        ok_recv_audio = self._spawn_call_proc([
+            'ffplay', '-nodisp', '-fflags', 'nobuffer', '-flags', 'low_delay', '-loglevel', 'quiet',
+            f'udp://0.0.0.0:{a_port}?listen=1'
+        ])
+        send_audio_cmd = (
+            f'ffmpeg -hide_banner -loglevel error -f pulse -i default -ac 1 -ar 16000 -c:a libopus -b:a 48k '
+            f'-f mpegts udp://{host}:{a_port}?pkt_size=1316 '
+            f'|| ffmpeg -hide_banner -loglevel error -f alsa -i default -ac 1 -ar 16000 -c:a libopus -b:a 48k '
+            f'-f mpegts udp://{host}:{a_port}?pkt_size=1316'
+        )
+        ok_send_audio = self._spawn_call_proc(['/bin/sh', '-lc', send_audio_cmd])
+        ok = bool(ok_recv_audio and ok_send_audio)
+        if with_screen:
+            ok_recv_video = self._spawn_call_proc([
+                'ffplay', '-fflags', 'nobuffer', '-flags', 'low_delay', '-loglevel', 'quiet',
+                f'udp://0.0.0.0:{v_port}?listen=1'
+            ])
+            disp = os.environ.get('DISPLAY', ':0')
+            send_video_cmd = (
+                f'ffmpeg -hide_banner -loglevel error -f x11grab -framerate 20 -video_size 1280x720 '
+                f'-i {disp}.0 -pix_fmt yuv420p -vcodec libx264 -preset ultrafast -tune zerolatency '
+                f'-f mpegts udp://{host}:{v_port}?pkt_size=1316'
+            )
+            ok_send_video = self._spawn_call_proc(['/bin/sh', '-lc', send_video_cmd])
+            ok = bool(ok and ok_recv_video and ok_send_video)
+        self.call_active = ok
+        return ok
+
+    def _start_p2p_call(self, with_screen=False):
+        peer = self._current_peer()
+        if not peer or str(peer.get('source')) == 'WORLD':
+            QtWidgets.QMessageBox.information(self, 'P2P Call', 'Select a LAN/P2P peer first.')
+            return
+        host = str(peer.get('host') or '').strip()
+        if not host:
+            self.status.setText('Invalid peer host.')
+            return
+        audio_port = DEFAULT_CALL_AUDIO_PORT
+        video_port = DEFAULT_CALL_VIDEO_PORT
+        mode = 'voice_screen' if with_screen else 'voice'
+        started = self._launch_call_session(host, audio_port, video_port, with_screen=with_screen)
+        if not started:
+            self.status.setText('Could not start call session (check ffmpeg/ffplay/mic/display).')
+            return
+        self.status.setText(f'Call started with {peer.get("name", host)} ({mode})')
+        self._append_system(f'Call session started with {peer.get("name", host)} ({mode}).')
+        candidates = self._send_candidates(peer)
+        for c_host, c_port, _key in candidates:
+            try:
+                self.engine.send_call_invite(
+                    c_host, c_port, mode=mode, audio_port=audio_port, video_port=video_port,
+                    note=f'{self.nickname} started a {mode} call'
+                )
+                break
+            except Exception:
+                continue
+
+    def _join_last_call_invite(self):
+        inv = self.last_call_invite
+        if not inv:
+            QtWidgets.QMessageBox.information(self, 'Join Call', 'No incoming call invite yet.')
+            return
+        host = str(inv.get('host') or '').strip()
+        if not host:
+            self.status.setText('Invalid invite host.')
+            return
+        mode = str(inv.get('mode') or 'voice')
+        with_screen = (mode == 'voice_screen')
+        audio_port = int(inv.get('audio_port') or DEFAULT_CALL_AUDIO_PORT)
+        video_port = int(inv.get('video_port') or DEFAULT_CALL_VIDEO_PORT)
+        if self._launch_call_session(host, audio_port, video_port, with_screen=with_screen):
+            who = str(inv.get('sender') or host)
+            self.status.setText(f'Joined call from {who} ({mode})')
+            self._append_system(f'Joined call from {who} ({mode}).')
+        else:
+            self.status.setText('Failed to join call session.')
 
     def _save_manual_peers(self):
         manual = []
@@ -17996,6 +18379,39 @@ class SocialChatWindow(QtWidgets.QWidget):
                 if port and port > 0:
                     self._upsert_peer(name, host, int(port), 'LAN')
                 self._append_msg(name, text)
+                continue
+            if kind == 'voice_message':
+                _kind, sender, host, port, mime, duration, blob = evt
+                if port and port > 0:
+                    self._upsert_peer(sender, host, int(port), 'LAN')
+                item = self._save_voice_blob(sender, mime, duration, blob)
+                if item is not None:
+                    self._append_line(
+                        f'[{time.strftime("%H:%M:%S")}] {sender} [VOICE {float(duration):.0f}s] '
+                        f'(open Voice Inbox to play)'
+                    )
+                    self._push_recent_message(f'{sender} [VOICE]', f'Voice message ({float(duration):.0f}s)')
+                    self.status.setText(f'New voice message from {sender}')
+                continue
+            if kind == 'call_invite':
+                _kind, sender, host, port, mode, audio_port, video_port, note = evt
+                if port and port > 0:
+                    self._upsert_peer(sender, host, int(port), 'LAN')
+                self.last_call_invite = {
+                    'sender': str(sender or host),
+                    'host': str(host or ''),
+                    'mode': str(mode or 'voice'),
+                    'audio_port': int(audio_port or DEFAULT_CALL_AUDIO_PORT),
+                    'video_port': int(video_port or DEFAULT_CALL_VIDEO_PORT),
+                    'note': str(note or ''),
+                    'ts': int(time.time()),
+                }
+                extra = f" | {note}" if str(note or '').strip() else ''
+                self._append_system(
+                    f"Call invite from {sender} [{host}] mode={mode} "
+                    f"(audio:{int(audio_port or DEFAULT_CALL_AUDIO_PORT)} video:{int(video_port or DEFAULT_CALL_VIDEO_PORT)}){extra}"
+                )
+                self.status.setText('Incoming call invite: use "Join Last Invite" action.')
                 continue
             if kind == 'world_chat':
                 _kind, sender, text = evt
