@@ -3864,7 +3864,7 @@ class WebKioskWindow(QtWidgets.QMainWindow):
         elif pressed('rb'):
             self._go_forward()
         elif pressed('a'):
-            self._forward_enter_to_view()
+            self._open_keyboard_if_editable()
         elif pressed('left'):
             self._send_key_to_view(QtCore.Qt.Key_Left)
         elif pressed('right'):
@@ -4198,6 +4198,323 @@ class AchievementToast(QtWidgets.QFrame):
         seq.finished.connect(done)
         self._anim = seq
         self._anim.start(QtCore.QAbstractAnimation.DeleteWhenStopped)
+
+
+class AchievementsHubDialog(QtWidgets.QDialog):
+    def __init__(self, gamertag='Player1', parent=None):
+        super().__init__(parent)
+        self.gamertag = str(gamertag or 'Player1')
+        self._rows = []
+        self._filter = 'all'
+        self._progress = {'total': 0, 'unlocked': 0, 'locked': 0, 'score_total': 0, 'score_unlocked': 0}
+        self._stats = {'actions': 0, 'launches': 0, 'purchases': 0, 'missions': 0}
+        self.setWindowTitle('Logros')
+        self.setWindowFlags(QtCore.Qt.Dialog | QtCore.Qt.FramelessWindowHint)
+        self.setModal(True)
+        self.resize(980, 620)
+        self.setStyleSheet('''
+            QFrame#ach_panel {
+                background:qlineargradient(x1:0,y1:0,x2:1,y2:1, stop:0 #3a3f46, stop:1 #1e242b);
+                border:2px solid rgba(214,223,235,0.52);
+                border-radius:7px;
+            }
+            QLabel#ach_title {
+                color:#eef4f8;
+                font-size:28px;
+                font-weight:800;
+            }
+            QLabel#ach_meta {
+                color:rgba(235,242,248,0.78);
+                font-size:16px;
+                font-weight:600;
+            }
+            QListWidget#ach_list {
+                background:rgba(236,239,242,0.93);
+                color:#20252b;
+                border:1px solid rgba(0,0,0,0.26);
+                font-size:22px;
+                outline:none;
+            }
+            QListWidget#ach_list::item {
+                padding:5px 10px;
+                border:1px solid transparent;
+            }
+            QListWidget#ach_list::item:selected {
+                color:#f3fff2;
+                background:qlineargradient(x1:0,y1:0,x2:1,y2:0, stop:0 #4ea93f, stop:1 #2f8832);
+                border:1px solid rgba(255,255,255,0.25);
+            }
+            QFrame#ach_side {
+                background:rgba(65,74,84,0.95);
+                border:1px solid rgba(194,206,222,0.25);
+            }
+            QLabel#ach_stat {
+                color:#eef5fb;
+                font-size:15px;
+                font-weight:700;
+            }
+            QLabel#ach_name {
+                color:#f2f8fd;
+                font-size:20px;
+                font-weight:800;
+            }
+            QLabel#ach_desc {
+                color:#dce6f0;
+                font-size:14px;
+                font-weight:600;
+            }
+            QPushButton#ach_btn {
+                text-align:left;
+                padding:7px 10px;
+                color:#e9f1f8;
+                font-size:16px;
+                font-weight:700;
+                background:rgba(34,43,54,0.92);
+                border:1px solid rgba(186,205,224,0.24);
+            }
+            QPushButton#ach_btn:focus,
+            QPushButton#ach_btn:hover {
+                background:rgba(58,80,106,0.95);
+                border:1px solid rgba(218,233,246,0.52);
+            }
+            QLabel#ach_hint {
+                color:rgba(238,245,250,0.84);
+                font-size:15px;
+                font-weight:600;
+            }
+        ''')
+        outer = QtWidgets.QVBoxLayout(self)
+        outer.setContentsMargins(0, 0, 0, 0)
+        panel = QtWidgets.QFrame()
+        panel.setObjectName('ach_panel')
+        outer.addWidget(panel)
+
+        root = QtWidgets.QVBoxLayout(panel)
+        root.setContentsMargins(12, 10, 12, 10)
+        root.setSpacing(8)
+
+        top = QtWidgets.QHBoxLayout()
+        title = QtWidgets.QLabel('Logros')
+        title.setObjectName('ach_title')
+        self.meta = QtWidgets.QLabel('')
+        self.meta.setObjectName('ach_meta')
+        top.addWidget(title)
+        top.addStretch(1)
+        top.addWidget(self.meta)
+        root.addLayout(top)
+
+        body = QtWidgets.QHBoxLayout()
+        body.setSpacing(10)
+        self.listw = QtWidgets.QListWidget()
+        self.listw.setObjectName('ach_list')
+        self.listw.itemActivated.connect(self._show_current_detail)
+        self.listw.currentRowChanged.connect(self._refresh_detail)
+        body.addWidget(self.listw, 4)
+
+        side = QtWidgets.QFrame()
+        side.setObjectName('ach_side')
+        sl = QtWidgets.QVBoxLayout(side)
+        sl.setContentsMargins(8, 8, 8, 8)
+        sl.setSpacing(7)
+
+        self.stats_lbl = QtWidgets.QLabel('')
+        self.stats_lbl.setObjectName('ach_stat')
+        self.stats_lbl.setWordWrap(True)
+        sl.addWidget(self.stats_lbl, 0)
+
+        self.name_lbl = QtWidgets.QLabel('Selecciona un logro')
+        self.name_lbl.setObjectName('ach_name')
+        self.name_lbl.setWordWrap(True)
+        sl.addWidget(self.name_lbl, 0)
+
+        self.desc_lbl = QtWidgets.QLabel('Detalles del logro.')
+        self.desc_lbl.setObjectName('ach_desc')
+        self.desc_lbl.setWordWrap(True)
+        sl.addWidget(self.desc_lbl, 1)
+
+        self.btn_all = QtWidgets.QPushButton('Ver Todos')
+        self.btn_unlocked = QtWidgets.QPushButton('Ver Desbloqueados')
+        self.btn_locked = QtWidgets.QPushButton('Ver Bloqueados')
+        self.btn_refresh = QtWidgets.QPushButton('Actualizar')
+        self.btn_back = QtWidgets.QPushButton('Volver')
+        for b in (self.btn_all, self.btn_unlocked, self.btn_locked, self.btn_refresh, self.btn_back):
+            b.setObjectName('ach_btn')
+            sl.addWidget(b, 0)
+        sl.addStretch(1)
+        body.addWidget(side, 2)
+        root.addLayout(body, 1)
+
+        hint = QtWidgets.QLabel('A/ENTER = Detalle | X = Actualizar | B/ESC = Volver')
+        hint.setObjectName('ach_hint')
+        root.addWidget(hint)
+
+        self.btn_all.clicked.connect(lambda: self._set_filter('all'))
+        self.btn_unlocked.clicked.connect(lambda: self._set_filter('unlocked'))
+        self.btn_locked.clicked.connect(lambda: self._set_filter('locked'))
+        self.btn_refresh.clicked.connect(self.reload)
+        self.btn_back.clicked.connect(self.reject)
+
+        self._clock = QtCore.QTimer(self)
+        self._clock.timeout.connect(self._refresh_meta)
+        self._clock.start(1000)
+        self.reload()
+
+    def _refresh_meta(self):
+        now = QtCore.QDateTime.currentDateTime().toString('HH:mm')
+        unlocked = int(self._progress.get('unlocked', 0))
+        total = int(self._progress.get('total', 0))
+        self.meta.setText(f'{self.gamertag}    {now}    {unlocked}/{total}')
+
+    def _filtered_rows(self):
+        if self._filter == 'unlocked':
+            return [r for r in self._rows if r.get('unlocked')]
+        if self._filter == 'locked':
+            return [r for r in self._rows if not r.get('unlocked')]
+        return list(self._rows)
+
+    def _apply_filter(self):
+        rows = self._filtered_rows()
+        self.listw.blockSignals(True)
+        self.listw.clear()
+        for row in rows:
+            status = 'UNLOCKED' if row.get('unlocked') else 'LOCKED'
+            title = str(row.get('title', 'Achievement'))
+            score = int(row.get('score', 0) or 0)
+            item = QtWidgets.QListWidgetItem(f'{status}  {title}    {score}G')
+            item.setData(QtCore.Qt.UserRole, dict(row))
+            self.listw.addItem(item)
+        self.listw.blockSignals(False)
+        if self.listw.count() > 0:
+            self.listw.setCurrentRow(0)
+        self._refresh_detail(self.listw.currentRow())
+
+    def _set_filter(self, mode):
+        self._filter = str(mode or 'all')
+        self._apply_filter()
+
+    def _current_payload(self):
+        it = self.listw.currentItem()
+        if it is None:
+            return {}
+        data = it.data(QtCore.Qt.UserRole)
+        return data if isinstance(data, dict) else {}
+
+    def _refresh_detail(self, _row):
+        row = self._current_payload()
+        if not row:
+            self.name_lbl.setText('Selecciona un logro')
+            self.desc_lbl.setText('Detalles del logro.')
+            return
+        title = str(row.get('title', 'Achievement')).strip() or 'Achievement'
+        desc = str(row.get('desc', 'Sin descripcion.')).strip() or 'Sin descripcion.'
+        score = int(row.get('score', 0) or 0)
+        aid = str(row.get('id', '')).strip()
+        unlocked = bool(row.get('unlocked', False))
+        state = 'Desbloqueado' if unlocked else 'Bloqueado'
+        self.name_lbl.setText(f'{title} ({score}G)')
+        self.desc_lbl.setText(f'{desc}\n\nEstado: {state}\nID: {aid}')
+
+    def _show_current_detail(self, *_):
+        row = self._current_payload()
+        if not row:
+            return
+        title = str(row.get('title', 'Achievement')).strip() or 'Achievement'
+        desc = str(row.get('desc', 'Sin descripcion.')).strip() or 'Sin descripcion.'
+        score = int(row.get('score', 0) or 0)
+        unlocked = bool(row.get('unlocked', False))
+        state = 'Desbloqueado' if unlocked else 'Bloqueado'
+        QtWidgets.QMessageBox.information(
+            self,
+            title,
+            f'{desc}\n\nEstado: {state}\nGamerscore: {score}G'
+        )
+
+    def reload(self):
+        try:
+            state = ensure_achievements(5000)
+        except Exception:
+            state = {'items': [], 'unlocked': [], 'stats': {}}
+        items = state.get('items', [])
+        if not isinstance(items, list):
+            items = []
+        unlocked_list = state.get('unlocked', [])
+        if not isinstance(unlocked_list, list):
+            unlocked_list = []
+        unlocked_ts = {}
+        for rec in unlocked_list:
+            if not isinstance(rec, dict):
+                continue
+            aid = str(rec.get('id', '')).strip()
+            if not aid:
+                continue
+            try:
+                unlocked_ts[aid] = int(rec.get('ts', 0) or 0)
+            except Exception:
+                unlocked_ts[aid] = 0
+        rows = []
+        total_score = 0
+        unlocked_score = 0
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            aid = str(item.get('id', '')).strip()
+            if not aid:
+                continue
+            score = int(item.get('score', 0) or 0)
+            unlocked = aid in unlocked_ts
+            if unlocked:
+                unlocked_score += score
+            total_score += score
+            rows.append({
+                'id': aid,
+                'title': str(item.get('title', aid)).strip() or aid,
+                'desc': str(item.get('desc', '')).strip(),
+                'score': score,
+                'unlocked': unlocked,
+                'ts': int(unlocked_ts.get(aid, 0) or 0),
+            })
+        rows.sort(key=lambda r: (0 if r.get('unlocked') else 1, -int(r.get('ts', 0)), -int(r.get('score', 0)), str(r.get('title', '')).lower()))
+        self._rows = rows
+        unlocked_n = sum(1 for r in rows if r.get('unlocked'))
+        total_n = len(rows)
+        self._progress = {
+            'total': total_n,
+            'unlocked': unlocked_n,
+            'locked': max(0, total_n - unlocked_n),
+            'score_total': int(total_score),
+            'score_unlocked': int(unlocked_score),
+        }
+        stats = state.get('stats', {})
+        if not isinstance(stats, dict):
+            stats = {}
+        self._stats = {
+            'actions': int(stats.get('actions', 0) or 0),
+            'launches': int(stats.get('launches', 0) or 0),
+            'purchases': int(stats.get('purchases', 0) or 0),
+            'missions': int(stats.get('missions', 0) or 0),
+        }
+        self.stats_lbl.setText(
+            f'Logros: {unlocked_n}/{total_n}\n'
+            f'Gamerscore: {self._progress["score_unlocked"]}/{self._progress["score_total"]}G\n'
+            f'Actions: {self._stats["actions"]}\n'
+            f'Launches: {self._stats["launches"]}\n'
+            f'Purchases: {self._stats["purchases"]}\n'
+            f'Missions: {self._stats["missions"]}'
+        )
+        self._refresh_meta()
+        self._apply_filter()
+
+    def keyPressEvent(self, e):
+        if e.key() in (QtCore.Qt.Key_Escape, QtCore.Qt.Key_Back):
+            self.reject()
+            return
+        if e.key() in (QtCore.Qt.Key_Return, QtCore.Qt.Key_Enter):
+            self._show_current_detail()
+            return
+        if e.key() == QtCore.Qt.Key_X:
+            self.reload()
+            return
+        super().keyPressEvent(e)
 
 
 class Dashboard(QtWidgets.QMainWindow):
@@ -5309,12 +5626,20 @@ class Dashboard(QtWidgets.QMainWindow):
         else:
             self._play_sfx('back')
 
+    def _open_achievements_hub(self):
+        self._play_sfx('open')
+        d = AchievementsHubDialog(current_gamertag(), self)
+        if d.exec_() == QtWidgets.QDialog.Accepted:
+            self._play_sfx('select')
+        else:
+            self._play_sfx('back')
+
     def _handle_xbox_guide_action(self, action):
         name = str(action or '').strip()
         if not name:
             return
         if name == 'Logros':
-            self.handle_action('Missions')
+            self._open_achievements_hub()
             return
         if name == 'Premios':
             self.handle_action('Store')
@@ -5540,8 +5865,8 @@ class Dashboard(QtWidgets.QMainWindow):
             'Close Active App': 'Try to close the currently active external window/app.',
             'Casino': 'Launch casino minigame.',
             'Runner': 'Launch runner minigame.',
-            'Missions': 'Open missions and rewards.',
-            'Misiones': 'Open missions and rewards.',
+            'Missions': 'Open achievements hub (5000 logros) inside dashboard.',
+            'Misiones': 'Open achievements hub (5000 logros) inside dashboard.',
             'Web Control': 'Control local web API service.',
             'Web Start': 'Start web control API service.',
             'Web Status': 'Check web control service status.',
@@ -5646,7 +5971,7 @@ class Dashboard(QtWidgets.QMainWindow):
             out = subprocess.getoutput(f'/bin/sh -c "{xui}/bin/xui_close_active_app.sh"')
             self._msg('Close Active App', out or 'No output')
         elif action in ('Missions', 'Misiones'):
-            self._run('/bin/sh', ['-c', f'{xui}/bin/xui_missions.sh'])
+            self._open_achievements_hub()
         elif action == 'LAN':
             self._menu('LAN', ['LAN Chat', 'LAN Status', 'P2P Internet Help'])
         elif action in ('Messages', 'LAN Chat'):
@@ -9097,6 +9422,7 @@ class StoreWindow(QtWidgets.QMainWindow):
         self._gamepad = None
         self._gamepad_timer = None
         self._pad_prev = {}
+        self._search_kbd_opening = False
         self.reflow_timer = QtCore.QTimer(self)
         self.reflow_timer.setSingleShot(True)
         self.reflow_timer.timeout.connect(self._rebuild_tile_grid)
@@ -9155,6 +9481,7 @@ class StoreWindow(QtWidgets.QMainWindow):
         self.search = QtWidgets.QLineEdit()
         self.search.setObjectName('search')
         self.search.setPlaceholderText('Search Games')
+        self.search.installEventFilter(self)
         self.search.textChanged.connect(self.set_search)
         search_btn = QtWidgets.QPushButton('Search')
         search_btn.setObjectName('search_btn')
@@ -9500,11 +9827,30 @@ class StoreWindow(QtWidgets.QMainWindow):
         self.search_text = str(text or '')
         self._refresh_tiles()
 
+    def _search_input_active(self):
+        try:
+            return bool(self.search is not None and self.search.hasFocus())
+        except Exception:
+            return False
+
     def open_virtual_keyboard(self):
-        d = VirtualKeyboardDialog(self, self.search.text())
-        if d.exec_() == QtWidgets.QDialog.Accepted:
-            self.search.setText(d.get_text())
-            self.search.setFocus()
+        if self._search_kbd_opening:
+            return
+        self._search_kbd_opening = True
+        try:
+            d = VirtualKeyboardDialog(self, self.search.text())
+            if d.exec_() == QtWidgets.QDialog.Accepted:
+                self.search.setText(d.get_text())
+                self.search.setFocus()
+        finally:
+            self._search_kbd_opening = False
+
+    def eventFilter(self, obj, event):
+        if obj is self.search and event.type() == QtCore.QEvent.KeyPress:
+            if event.key() in (QtCore.Qt.Key_Return, QtCore.Qt.Key_Enter):
+                QtCore.QTimer.singleShot(0, self.open_virtual_keyboard)
+                return True
+        return super().eventFilter(obj, event)
 
     def _tile_columns(self):
         viewport_w = max(1, self.scroll.viewport().width())
@@ -9787,6 +10133,9 @@ class StoreWindow(QtWidgets.QMainWindow):
             self._move_selection(1, 0)
             return
         if k in (QtCore.Qt.Key_Return, QtCore.Qt.Key_Enter):
+            if self._search_input_active():
+                self.open_virtual_keyboard()
+                return
             self.launch_selected()
             return
         if k == QtCore.Qt.Key_X:
@@ -9799,6 +10148,9 @@ class StoreWindow(QtWidgets.QMainWindow):
             self.close()
             return
         if k == QtCore.Qt.Key_A:
+            if self._search_input_active():
+                self.open_virtual_keyboard()
+                return
             self.launch_selected()
             return
         if k == QtCore.Qt.Key_Space:
@@ -9866,7 +10218,10 @@ class StoreWindow(QtWidgets.QMainWindow):
         elif pressed('down'):
             self._move_selection(1, 0)
         elif pressed('a'):
-            self.launch_selected()
+            if self._search_input_active():
+                self.open_virtual_keyboard()
+            else:
+                self.launch_selected()
         elif pressed('x'):
             self.buy_selected()
         elif pressed('y'):
@@ -12690,6 +13045,7 @@ class WebHub(QtWidgets.QMainWindow):
         self.kiosk = bool(kiosk)
         self.pending_url = normalize_url(url)
         self._kbd_opening = False
+        self._skip_web_return_once = 0
         self._gp = None
         self._gp_prev = {}
         self._gp_timer = None
@@ -12799,6 +13155,7 @@ class WebHub(QtWidgets.QMainWindow):
             self.stack.addWidget(fallback)
         else:
             self.web = QtWebEngineWidgets.QWebEngineView()
+            self.web.installEventFilter(self)
             self.stack.addWidget(self.web)
         self.hub = self._build_hub_widget()
         self.stack.addWidget(self.hub)
@@ -12945,7 +13302,10 @@ class WebHub(QtWidgets.QMainWindow):
         elif pressed('rb'):
             self._go_forward()
         elif pressed('a'):
-            self._send_key_focus(QtCore.Qt.Key_Return)
+            if self.stack.currentWidget() is self.hub:
+                self._send_key_focus(QtCore.Qt.Key_Return)
+            else:
+                self._open_keyboard_if_web_editable()
         elif pressed('left'):
             self._send_key_focus(QtCore.Qt.Key_Left)
         elif pressed('right'):
@@ -13000,6 +13360,35 @@ class WebHub(QtWidgets.QMainWindow):
 """
         self.web.page().runJavaScript(js)
 
+    def _forward_enter_to_web(self):
+        if self.web is None:
+            return
+        self._skip_web_return_once = 1
+        press = QtGui.QKeyEvent(QtCore.QEvent.KeyPress, QtCore.Qt.Key_Return, QtCore.Qt.NoModifier)
+        rel = QtGui.QKeyEvent(QtCore.QEvent.KeyRelease, QtCore.Qt.Key_Return, QtCore.Qt.NoModifier)
+        QtWidgets.QApplication.postEvent(self.web, press)
+        QtWidgets.QApplication.postEvent(self.web, rel)
+
+    def _open_keyboard_if_web_editable(self):
+        if self.web is None:
+            return
+        probe = """
+(() => {
+  const el = document.activeElement;
+  if (!el) return false;
+  const tag = (el.tagName || '').toLowerCase();
+  const tp = (el.type || '').toLowerCase();
+  return !!(el.isContentEditable || tag === 'textarea' ||
+    (tag === 'input' && !['button','submit','checkbox','radio','range','color','file','image','reset'].includes(tp)));
+})();
+"""
+        def cb(editable):
+            if bool(editable):
+                self._open_virtual_keyboard_for_web()
+            else:
+                self._forward_enter_to_web()
+        self.web.page().runJavaScript(probe, cb)
+
     def _open_virtual_keyboard_for_web(self):
         if self.web is None:
             return
@@ -13018,6 +13407,13 @@ class WebHub(QtWidgets.QMainWindow):
     def eventFilter(self, obj, event):
         if obj is self.addr and event.type() == QtCore.QEvent.FocusIn:
             QtCore.QTimer.singleShot(0, self._open_virtual_keyboard_for_addr)
+        if obj is self.web and event.type() == QtCore.QEvent.KeyPress:
+            if event.key() in (QtCore.Qt.Key_Return, QtCore.Qt.Key_Enter):
+                if self._skip_web_return_once > 0:
+                    self._skip_web_return_once -= 1
+                    return False
+                self._open_keyboard_if_web_editable()
+                return True
         return super().eventFilter(obj, event)
 
     def _build_hub_widget(self):
@@ -13699,7 +14095,12 @@ def _handle_action(action, parent):
         _activate_dashboard()
         _resume_paused()
         return
-    if name in ('Logros', 'Premios', 'Mis juegos', 'Configuracion', 'Inicio de Xbox'):
+    if name == 'Logros':
+        if _activate_dashboard():
+            subprocess.getoutput('/bin/sh -lc "sleep 0.08; xdotool key --clearmodifiers F1 Return >/dev/null 2>&1 || true"')
+        _resume_paused()
+        return
+    if name in ('Premios', 'Mis juegos', 'Configuracion', 'Inicio de Xbox'):
         _activate_dashboard()
         _resume_paused()
         return
