@@ -1105,6 +1105,7 @@ PEERS_FILE = DATA_HOME / 'social_peers.json'
 WORLD_CHAT_FILE = DATA_HOME / 'world_chat.json'
 SOCIAL_MESSAGES_FILE = DATA_HOME / 'social_messages_recent.json'
 FRIEND_REQUESTS_FILE = DATA_HOME / 'friend_requests.json'
+BEACONS_FILE = DATA_HOME / 'beacons.json'
 
 sys.path.insert(0, str(XUI_HOME / 'bin'))
 try:
@@ -1206,6 +1207,8 @@ def ensure_data():
         PROFILE_FILE.write_text(json.dumps({'gamertag': 'Player1', 'signed_in': False}, indent=2))
     if not FRIEND_REQUESTS_FILE.exists():
         FRIEND_REQUESTS_FILE.write_text('[]')
+    if not BEACONS_FILE.exists():
+        BEACONS_FILE.write_text('[]')
 
 
 def pick_existing_sound(candidates):
@@ -3851,11 +3854,13 @@ class XboxGuideMenu(QtWidgets.QDialog):
         self.listw = QtWidgets.QListWidget()
         self.listw.setObjectName('xguide_list')
         self.listw.addItems([
+            'Bing',
             'Logros',
             'Premios',
             'Reciente',
             'Mensajes recientes',
             'Social global',
+            'Beacons',
             'Mis juegos',
             'Descargas activas',
             'Canjear codigo',
@@ -5219,8 +5224,29 @@ class Dashboard(QtWidgets.QMainWindow):
             self.resize(min(1600, g.width()), min(900, g.height()))
         else:
             self.resize(1600, 900)
-        self.tabs = ['home', 'social', 'games', 'tv & movies', 'music', 'apps', 'settings']
+        self.tabs = ['bing', 'home', 'social', 'games', 'tv & movies', 'music', 'apps', 'settings']
         self.page_specs = {
+            'bing': {
+                'hint': 'bing: busca juegos, apps y entretenimiento',
+                'hero_action': 'Bing Hub',
+                'hero_title': 'bing',
+                'hero_subtitle': 'search all',
+                'left': [
+                    ('Bing Search', 'Bing Search', (320, 170)),
+                    ('Voice Search', 'Voice Search', (320, 170)),
+                    ('Bing Categories', 'Categories', (320, 205)),
+                ],
+                'right': [
+                    ('Bing Games', 'Bing Games', (270, 130)),
+                    ('Bing Apps', 'Bing Apps', (270, 130)),
+                    ('Bing TV', 'Bing TV', (270, 130)),
+                    ('Bing Movies', 'Bing Movies', (270, 130)),
+                    ('Bing Music', 'Bing Music', (270, 130)),
+                    ('Kinect Hub', 'Kinect Hub', (270, 130)),
+                    ('Beacons', 'Beacons', (270, 130)),
+                    ('Cloud Storage', 'Cloud Storage', (270, 130)),
+                ],
+            },
             'home': {
                 'hint': 'home: usa flechas para moverte y Enter para abrir',
                 'hero_action': 'Hub',
@@ -5228,10 +5254,14 @@ class Dashboard(QtWidgets.QMainWindow):
                 'hero_subtitle': 'featured',
                 'left': [
                     ('Open Tray', 'Open Tray', (320, 170)),
+                    ('Quickplay Queue', 'Quickplay Queue', (320, 170)),
                     ('My Pins', 'My Pins', (320, 170)),
                     ('Recent', 'Recent', (320, 205)),
                 ],
                 'right': [
+                    ('Spotlight', 'Spotlight', (270, 130)),
+                    ('Bing Search', 'Bing Search', (270, 130)),
+                    ('Downloads', 'Downloads', (270, 130)),
                     ('Friends', 'Friends', (270, 130)),
                     ('Avatar Store', 'Avatar Store', (270, 130)),
                     ('Sign In', 'Sign In', (270, 130)),
@@ -5248,6 +5278,10 @@ class Dashboard(QtWidgets.QMainWindow):
                     ('LAN Chat', 'LAN Chat', (320, 205)),
                 ],
                 'right': [
+                    ('Activity Feed', 'Activity Feed', (270, 130)),
+                    ('Friend Requests', 'Friend Requests', (270, 130)),
+                    ('Party Center', 'Party Center', (270, 130)),
+                    ('Beacons', 'Beacons', (270, 130)),
                     ('Gamer Card', 'Gamer Card', (270, 130)),
                     ('Social Apps', 'Social Apps', (270, 130)),
                     ('Sign In', 'Sign In', (270, 130)),
@@ -5265,6 +5299,9 @@ class Dashboard(QtWidgets.QMainWindow):
                     ('Missions', 'Missions', (320, 205)),
                 ],
                 'right': [
+                    ('Game Marketplace', 'Game Marketplace', (270, 130)),
+                    ('Indie Channel', 'Indie Channel', (270, 130)),
+                    ('Demos', 'Demos', (270, 130)),
                     ('Steam', 'Steam', (270, 130)),
                     ('RetroArch', 'RetroArch', (270, 130)),
                     ('FNAE', 'FNAE', (270, 130)),
@@ -5284,6 +5321,11 @@ class Dashboard(QtWidgets.QMainWindow):
                     ('System Info', 'System Info', (320, 205)),
                 ],
                 'right': [
+                    ('Video Marketplace', 'Video Market', (270, 130)),
+                    ('Movie Trailers', 'Movie Trailers', (270, 130)),
+                    ('Twitch', 'Twitch', (270, 130)),
+                    ('Live TV', 'Live TV', (270, 130)),
+                    ('Skype', 'Skype', (270, 130)),
                     ('Netflix', 'Netflix', (270, 130)),
                     ('YouTube', 'YouTube', (270, 130)),
                     ('Kodi', 'Kodi', (270, 130)),
@@ -5300,6 +5342,9 @@ class Dashboard(QtWidgets.QMainWindow):
                     ('Mute / Unmute', 'Mute / Unmute', (320, 205)),
                 ],
                 'right': [
+                    ('Music Marketplace', 'Music Market', (270, 130)),
+                    ('Internet Radio', 'Internet Radio', (270, 130)),
+                    ('Podcasts', 'Podcasts', (270, 130)),
                     ('Playlist', 'Playlist', (270, 130)),
                     ('Visualizer', 'Visualizer', (270, 130)),
                     ('System Music', 'System Music', (270, 130)),
@@ -5311,11 +5356,15 @@ class Dashboard(QtWidgets.QMainWindow):
                 'hero_title': 'apps',
                 'hero_subtitle': 'tools, diagnostics and control',
                 'left': [
+                    ('Browser Hub', 'Browser Hub', (320, 170)),
                     ('Store', 'Store', (320, 170)),
                     ('Web Control', 'Web Control', (320, 170)),
                     ('Utilities', 'Utilities', (320, 205)),
                 ],
                 'right': [
+                    ('Downloads', 'Downloads', (270, 130)),
+                    ('Avatar Editor', 'Avatar Editor', (270, 130)),
+                    ('Controller Center', 'Controller', (270, 130)),
                     ('Web Browser', 'Web Browser', (270, 130)),
                     ('App Launcher', 'App Launcher', (270, 130)),
                     ('Service Manager', 'Services', (270, 130)),
@@ -5328,11 +5377,15 @@ class Dashboard(QtWidgets.QMainWindow):
                 'hero_title': 'settings',
                 'hero_subtitle': 'system control',
                 'left': [
+                    ('System Settings', 'System Settings', (320, 170)),
+                    ('Storage', 'Storage', (320, 170)),
+                    ('Network Setup', 'Network Setup', (320, 205)),
                     ('System Info', 'System', (320, 170)),
                     ('Power Profile', 'Preferences', (320, 170)),
                     ('Battery Saver', 'Profile', (320, 205)),
                 ],
                 'right': [
+                    ('Account Security', 'Account', (270, 130)),
                     ('Family', 'Family', (270, 130)),
                     ('Theme Toggle', 'Account', (270, 130)),
                     ('WiFi Toggle', 'WiFi', (270, 130)),
@@ -5900,11 +5953,11 @@ OLD_PID="${1:-}"
 RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
 DBUS_ADDR="${DBUS_SESSION_BUS_ADDRESS:-unix:path=${RUNTIME_DIR}/bus}"
 
-dashboard_running(){
+dashboard_ui_running(){
   if ! command -v pgrep >/dev/null 2>&1; then
     return 1
   fi
-  pgrep -u "$(id -u)" -f "pyqt_dashboard_improved.py|xui_startup_and_dashboard.sh|xui_start.sh" >/dev/null 2>&1
+  pgrep -u "$(id -u)" -f "pyqt_dashboard_improved.py|pyqt_dashboard.py" >/dev/null 2>&1
 }
 
 wait_old_dashboard_exit(){
@@ -5960,13 +6013,13 @@ start_direct_dashboard(){
 wait_old_dashboard_exit "$OLD_PID"
 sleep 0.20
 
-if dashboard_running; then
+if dashboard_ui_running; then
   exit 0
 fi
 
 restart_via_systemd || true
 for _ in $(seq 1 45); do
-  if dashboard_running; then
+  if dashboard_ui_running; then
     exit 0
   fi
   sleep 0.15
@@ -5974,7 +6027,7 @@ done
 
 start_via_wrapper || true
 for _ in $(seq 1 45); do
-  if dashboard_running; then
+  if dashboard_ui_running; then
     exit 0
   fi
   sleep 0.15
@@ -5983,7 +6036,7 @@ done
 restart_via_systemd || true
 start_via_wrapper || true
 for _ in $(seq 1 30); do
-  if dashboard_running; then
+  if dashboard_ui_running; then
     exit 0
   fi
   sleep 0.15
@@ -6642,6 +6695,12 @@ exit 0
         name = str(action or '').strip()
         if not name:
             return
+        if name == 'Bing':
+            if 'bing' in self.tabs:
+                self._switch_tab(self.tabs.index('bing'), animate=True, keep_tabs_focus=True)
+            else:
+                self.handle_action('Bing Search')
+            return
         if name == 'Logros':
             self._open_achievements_hub()
             return
@@ -6656,6 +6715,9 @@ exit 0
             return
         if name == 'Social global':
             self._open_social_chat()
+            return
+        if name == 'Beacons':
+            self.handle_action('Beacons')
             return
         if name == 'Mis juegos':
             if 'games' in self.tabs:
@@ -6900,6 +6962,43 @@ exit 0
             'Diagnostics': 'Run diagnostics helper.',
             'Update Check': 'Checks mandatory GitHub update status (repo afitler79-alt/XUI-X360-FRONTEND).',
             'System Update': 'Runs distro package update flow.',
+            'Quickplay Queue': 'Metro quick launch queue with your frequent games and apps.',
+            'Spotlight': 'Featured highlights and announcements style hub.',
+            'Bing Search': 'Search the web quickly from dashboard and open browser results.',
+            'Bing Hub': 'Metro search hub for games, apps and media discovery.',
+            'Voice Search': 'Voice-style search flow (uses keyboard input fallback).',
+            'Bing Categories': 'Filter Bing-style discovery into games/apps/tv/movies/music.',
+            'Bing Games': 'Open Bing results focused on games.',
+            'Bing Apps': 'Open Bing results focused on apps.',
+            'Bing TV': 'Open Bing results focused on TV.',
+            'Bing Movies': 'Open Bing results focused on movies.',
+            'Bing Music': 'Open Bing results focused on music.',
+            'Beacons': 'Set beacons to announce what you want to play.',
+            'Cloud Storage': 'Shows local save/storage usage and cloud-ready paths.',
+            'Kinect Hub': 'Kinect-style hub with voice/navigation helpers.',
+            'Kinect Settings': 'Configure Kinect-like input and guidance hints.',
+            'Downloads': 'Shows current download queue and recent transfer status.',
+            'Activity Feed': 'Recent local activity feed (games/apps/messages).',
+            'Friend Requests': 'Shows pending friend requests and social invites.',
+            'Party Center': 'Party related social controls and shortcuts.',
+            'Game Marketplace': 'Opens game marketplace and rotating catalog.',
+            'Indie Channel': 'Opens indie games channel inspired menu.',
+            'Demos': 'Launch demo/minigame picks quickly.',
+            'Video Marketplace': 'Open video marketplace style web hub.',
+            'Movie Trailers': 'Open trailers hub in browser.',
+            'Twitch': 'Open Twitch streaming in browser.',
+            'Live TV': 'Open live TV style portal in browser.',
+            'Skype': 'Open Skype web app.',
+            'Music Marketplace': 'Open music marketplace/web catalog.',
+            'Internet Radio': 'Open internet radio directory.',
+            'Podcasts': 'Open podcast directory/player page.',
+            'Browser Hub': 'Open XUI browser in hub mode.',
+            'Avatar Editor': 'Open avatar tools/store editor section.',
+            'Controller Center': 'Open unified gamepad setup and diagnostics.',
+            'System Settings': 'Open system settings submenu.',
+            'Storage': 'View storage usage and disk details.',
+            'Network Setup': 'Open network setup and diagnostics menu.',
+            'Account Security': 'Review profile sign-in state and account safety info.',
         }
         out = {}
         prefix = (title or 'menu').strip()
@@ -6920,7 +7019,7 @@ exit 0
         xui = str(XUI_HOME)
         if action == 'Games Hub':
             self._open_games_hub_menu()
-        elif action in ('Hub', 'Social Hub', 'Media Hub', 'Music Hub', 'Apps Hub', 'Settings Hub'):
+        elif action in ('Hub', 'Bing Hub', 'Social Hub', 'Media Hub', 'Music Hub', 'Apps Hub', 'Settings Hub'):
             self._open_current_tab_menu()
         elif action == 'Open Tray':
             self._open_tray_dashboard_menu()
@@ -6930,6 +7029,85 @@ exit 0
             self._menu('My Games', ['Runner', 'Casino', 'Gem Match', 'FNAE', 'Steam', 'RetroArch', 'Games Integrations'])
         elif action in ('Browse Games', 'Browse'):
             self._run('/bin/sh', ['-c', f'{xui}/bin/xui_store.sh'])
+        elif action == 'Quickplay Queue':
+            self._menu('Quickplay Queue', ['My Games', 'Recently Played', 'Arcade Picks', 'Games Marketplace', 'Web Browser'])
+        elif action == 'Spotlight':
+            self._open_url_external('https://www.xbox.com/en-US/games', normal_mode=True)
+        elif action == 'Bing Search':
+            q, ok = self._input_text('Bing Search', 'Search the web:', '')
+            if ok and str(q).strip():
+                query = urllib.parse.quote_plus(str(q).strip())
+                self._open_url_external(f'https://www.bing.com/search?q={query}', normal_mode=True)
+        elif action == 'Voice Search':
+            q, ok = self._input_text('Voice Search', 'Say something to search:', '')
+            if ok and str(q).strip():
+                query = urllib.parse.quote_plus(str(q).strip())
+                self._open_url_external(f'https://www.bing.com/search?q={query}', normal_mode=True)
+        elif action == 'Bing Categories':
+            self._menu('Bing Categories', ['Bing Games', 'Bing Apps', 'Bing TV', 'Bing Movies', 'Bing Music'])
+        elif action == 'Bing Games':
+            self._open_url_external('https://www.bing.com/search?q=xbox+360+games', normal_mode=True)
+        elif action == 'Bing Apps':
+            self._open_url_external('https://www.bing.com/search?q=xbox+360+apps', normal_mode=True)
+        elif action == 'Bing TV':
+            self._open_url_external('https://www.bing.com/search?q=xbox+360+tv+apps', normal_mode=True)
+        elif action == 'Bing Movies':
+            self._open_url_external('https://www.bing.com/search?q=xbox+360+movies', normal_mode=True)
+        elif action == 'Bing Music':
+            self._open_url_external('https://www.bing.com/search?q=xbox+360+music', normal_mode=True)
+        elif action == 'Beacons':
+            beacons = safe_json_read(BEACONS_FILE, [])
+            if not isinstance(beacons, list):
+                beacons = []
+            pick = self._choose_from_menu('Beacons', ['View Beacons', 'Add Beacon', 'Remove Beacon', 'Clear Beacons'])
+            if not pick:
+                return
+            if pick == 'View Beacons':
+                lines = [f'{i+1:02d}. {b}' for i, b in enumerate(beacons[:20])]
+                self._msg('Beacons', '\n'.join(lines) if lines else 'No active beacons.')
+            elif pick == 'Add Beacon':
+                game, ok = self._input_text('Add Beacon', 'Game or activity:', '')
+                name = str(game).strip()
+                if ok and name:
+                    if name not in beacons:
+                        beacons.insert(0, name)
+                        beacons = beacons[:40]
+                        safe_json_write(BEACONS_FILE, beacons)
+                    self._msg('Beacons', f'Beacon set: {name}')
+            elif pick == 'Remove Beacon':
+                if not beacons:
+                    self._msg('Beacons', 'No beacons to remove.')
+                else:
+                    selected = self._choose_from_menu('Remove Beacon', beacons[:30])
+                    if selected and selected in beacons:
+                        beacons.remove(selected)
+                        safe_json_write(BEACONS_FILE, beacons)
+                        self._msg('Beacons', f'Removed beacon: {selected}')
+            elif pick == 'Clear Beacons':
+                if self._ask_yes_no('Beacons', 'Clear all active beacons?'):
+                    safe_json_write(BEACONS_FILE, [])
+                    self._msg('Beacons', 'All beacons cleared.')
+        elif action == 'Cloud Storage':
+            out = subprocess.getoutput('/bin/sh -c "du -sh $HOME/.xui/data 2>/dev/null | head -n 1"').strip()
+            info = (
+                f'Profile: {PROFILE_FILE}\n'
+                f'Data: {DATA_HOME}\n'
+                f'Usage: {out or "Unknown"}\n\n'
+                'Cloud save style sync: keep ~/.xui/data backed up or synced.'
+            )
+            self._msg('Cloud Storage', info)
+        elif action == 'Kinect Hub':
+            self._menu('Kinect Hub', ['Voice Search', 'Kinect Settings', 'Movie Trailers'])
+        elif action == 'Kinect Settings':
+            self._msg(
+                'Kinect Settings',
+                'Kinect mode emulation:\n'
+                '- Voice Search opens virtual keyboard input\n'
+                '- Guide button (F1/HOME) opens Xbox Guide\n'
+                '- Gamepad stick + dpad navigates dashboard tiles'
+            )
+        elif action == 'Downloads':
+            self._msg('Downloads', self._xbox_guide_downloads_text())
         elif action in ('Search Games', 'Games Search'):
             q, ok = self._input_text('Search Games', 'Game or app:', '')
             if ok and str(q).strip():
@@ -6937,6 +7115,12 @@ exit 0
                 self._msg('Search Games', f'Store opened. Use search: {str(q).strip()}')
         elif action in ('Games Marketplace', 'Games Market'):
             self._run('/bin/sh', ['-c', f'{xui}/bin/xui_store.sh'])
+        elif action == 'Game Marketplace':
+            self._run('/bin/sh', ['-c', f'{xui}/bin/xui_store.sh'])
+        elif action == 'Indie Channel':
+            self._menu('Indie Channel', ['Store', 'Games Marketplace', 'Itch.io Free Games Hub', 'Game Jolt Games Hub'])
+        elif action == 'Demos':
+            self._menu('Demos', ['Runner', 'Casino', 'Gem Match', 'Movie Trailers'])
         elif action == 'Recently Played':
             try:
                 arr = json.loads(RECENT_FILE.read_text()) if RECENT_FILE.exists() else []
@@ -7028,7 +7212,7 @@ exit 0
             signed = 'Yes' if p.get('signed_in') else 'No'
             self._msg('Gamer Card', f"Gamertag: {p.get('gamertag','Player1')}\nSigned In: {signed}")
         elif action == 'Social Apps':
-            self._menu('Social Apps', ['Friends', 'Messages', 'LAN Chat', 'LAN Status', 'P2P Internet Help', 'Party', 'Avatar Store'])
+            self._menu('Social Apps', ['Friends', 'Messages', 'LAN Chat', 'LAN Status', 'P2P Internet Help', 'Party', 'Beacons', 'Avatar Store'])
         elif action == 'Friends':
             try:
                 friends = json.loads(FRIENDS_FILE.read_text()) if FRIENDS_FILE.exists() else []
@@ -7045,6 +7229,31 @@ exit 0
             p['gamertag'] = p.get('gamertag', 'Player1')
             PROFILE_FILE.write_text(json.dumps(p, indent=2))
             self._msg('Profile', 'Signed in.' if p['signed_in'] else 'Signed out.')
+        elif action == 'Activity Feed':
+            recent = safe_json_read(RECENT_FILE, [])
+            if not isinstance(recent, list):
+                recent = []
+            msgs = safe_json_read(SOCIAL_MESSAGES_FILE, [])
+            if not isinstance(msgs, list):
+                msgs = []
+            lines = []
+            for i, item in enumerate(recent[:8], 1):
+                lines.append(f'{i:02d}. {item}')
+            if msgs:
+                lines.append('')
+                lines.append('Recent messages:')
+                for i, item in enumerate(msgs[:6], 1):
+                    if isinstance(item, dict):
+                        who = str(item.get('from', 'Unknown'))
+                        txt = str(item.get('text', ''))
+                        lines.append(f'{i:02d}. {who}: {txt}')
+                    else:
+                        lines.append(f'{i:02d}. {item}')
+            self._msg('Activity Feed', '\n'.join(lines) if lines else 'No activity yet.')
+        elif action == 'Friend Requests':
+            self._open_friend_requests()
+        elif action == 'Party Center':
+            self._menu('Party Center', ['Party', 'Friends', 'Messages', 'LAN Chat', 'LAN Status'])
         elif action == 'Utilities':
             self._menu('Utilities', [
                 'System Info', 'Web Control', 'Theme Toggle', 'Power Profile', 'Battery Saver',
@@ -7120,6 +7329,16 @@ exit 0
                 self._run('/bin/sh', ['-c', f'mpv --really-quiet --fullscreen "{p}"'])
             else:
                 self._msg('Media', 'No startup.mp4 found.')
+        elif action == 'Video Marketplace':
+            self._open_url_external('https://www.xbox.com/en-US/entertainment', normal_mode=True)
+        elif action == 'Movie Trailers':
+            self._open_url_external('https://www.youtube.com/results?search_query=movie+trailers', normal_mode=True)
+        elif action == 'Twitch':
+            self._open_url_external('https://www.twitch.tv/directory', normal_mode=True)
+        elif action == 'Live TV':
+            self._open_url_external('https://www.youtube.com/live', normal_mode=True)
+        elif action == 'Skype':
+            self._open_url_external('https://web.skype.com', normal_mode=True)
         elif action == 'Netflix':
             self._open_url_external('https://www.netflix.com', normal_mode=True)
         elif action == 'YouTube':
@@ -7135,6 +7354,12 @@ exit 0
         elif action == 'All Audio Files':
             files = sorted([f.name for f in ASSETS.glob('*.mp3')])
             self._msg('Audio', '\n'.join(files) if files else 'No mp3 files found.')
+        elif action == 'Music Marketplace':
+            self._open_url_external('https://music.youtube.com', normal_mode=True)
+        elif action == 'Internet Radio':
+            self._open_url_external('https://radio.garden', normal_mode=True)
+        elif action == 'Podcasts':
+            self._open_url_external('https://podcasts.google.com', normal_mode=True)
         elif action in ('Playlist', 'Visualizer', 'System Music'):
             self._run('/bin/sh', ['-c', f'{xui}/bin/xui_music.sh'])
         elif action == 'Mute / Unmute':
@@ -7142,6 +7367,12 @@ exit 0
         elif action == 'System Info':
             out = subprocess.getoutput("uname -srmo; free -h | sed -n '1,3p'; df -h / | sed -n '1,2p'")
             self._msg('System Info', out or 'No data.')
+        elif action in ('Browser Hub',):
+            self._menu('Browser Hub', ['Web Browser', 'Bing Search', 'YouTube', 'Twitch', 'Netflix'])
+        elif action == 'Avatar Editor':
+            self._menu('Avatar Editor', ['Avatar Store', 'Gamer Card', 'Sign In'])
+        elif action == 'Controller Center':
+            self._menu('Controller Center', ['Gamepad Test', 'Controller Probe', 'Controller Mappings', 'Controller Profile', 'Controller L4T Fix'])
         elif action == 'Web Control':
             self._menu('Web Control', ['Web Start', 'Web Status', 'Web Stop'])
         elif action == 'Web Start':
@@ -7153,6 +7384,14 @@ exit 0
             self._run('/bin/sh', ['-c', f'{xui}/bin/xui_web_control.sh stop'])
         elif action == 'Theme Toggle':
             self._run('/bin/sh', ['-c', f'{xui}/bin/xui_theme.sh toggle'])
+        elif action == 'System Settings':
+            self._menu('System Settings', ['Theme Toggle', 'Power Profile', 'Battery Saver', 'Update Check', 'System Update', 'Setup Wizard'])
+        elif action == 'Storage':
+            self.handle_action('Disk Usage')
+        elif action == 'Network Setup':
+            self._menu('Network Setup', ['Network Info', 'WiFi Toggle', 'Bluetooth Toggle', 'Ping Test', 'LAN Status', 'P2P Internet Help'])
+        elif action == 'Account Security':
+            self._menu('Account Security', ['Gamer Card', 'Sign In', 'Family'])
         elif action == 'Setup Wizard':
             setup = XUI_HOME / 'bin' / 'xui_first_setup.py'
             runner = XUI_HOME / 'bin' / 'xui_python.sh'
@@ -13243,6 +13482,10 @@ items = []
 items.extend(flathub_items(limit=260))
 items.extend(curated_web_sources())
 items.extend(itch_collection_items(
+    'https://itch.io/c/3790859/easy-fps-editor-games',
+    id_prefix='itch_easyfps'
+))
+items.extend(itch_collection_items(
     'https://itch.io/c/5283593/games-made-with-fps-creator',
     id_prefix='itch_fpscreator'
 ))
@@ -15890,6 +16133,16 @@ apply_update(){
     fi
   )
   echo "step=installer-done"
+
+  # Ensure dashboard service stays enabled after updates.
+  if command -v systemctl >/dev/null 2>&1; then
+    XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}" \
+    DBUS_SESSION_BUS_ADDRESS="${DBUS_SESSION_BUS_ADDRESS:-unix:path=${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/bus}" \
+      systemctl --user daemon-reload >/dev/null 2>&1 || true
+    XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}" \
+    DBUS_SESSION_BUS_ADDRESS="${DBUS_SESSION_BUS_ADDRESS:-unix:path=${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/bus}" \
+      systemctl --user enable xui-dashboard.service >/dev/null 2>&1 || true
+  fi
 
   if [ -x "$HOME/.xui/bin/xui_install_fnae_deps.sh" ]; then
     # Keep mandatory update responsive: run FNAE deps best-effort in background.
