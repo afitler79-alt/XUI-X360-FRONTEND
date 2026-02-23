@@ -1719,22 +1719,61 @@ class SocialOverlay(QtWidgets.QDialog):
         self._append_system(f"World chat ready via relay ({self.engine.world_relay}) room: {self.engine.world_topic}")
 
     def _build(self):
+        self._vk_opening = False
+        self._vk_last_close = 0.0
+        self._action_items = {}
         self.setStyleSheet('''
             QFrame#social_panel {
-                background:qlineargradient(x1:0,y1:0,x2:1,y2:1, stop:0 #0f151c, stop:1 #1c2632);
-                border:2px solid rgba(139,198,255,0.33);
-                border-radius:8px;
+                background:qlineargradient(x1:0,y1:0,x2:1,y2:1, stop:0 #313740, stop:1 #1a2028);
+                border:2px solid rgba(214,223,235,0.52);
+                border-radius:7px;
             }
-            QLabel#social_title { color:#f3f7f7; font-size:30px; font-weight:800; }
-            QLabel#social_hint { color:rgba(237,243,247,0.75); font-size:16px; }
-            QListWidget { background:#08111b; border:1px solid #2c3a4a; color:#e7eff5; font-size:17px; }
-            QPlainTextEdit { background:#07101a; border:1px solid #2c3a4a; color:#e7eff5; font-size:17px; }
-            QLineEdit { background:#0c1621; border:1px solid #2c3a4a; color:#eef5fa; font-size:18px; padding:7px; }
+            QFrame#social_col {
+                background:rgba(52,61,72,0.92);
+                border:1px solid rgba(196,208,222,0.32);
+            }
+            QLabel#social_title { color:#f3f7f7; font-size:28px; font-weight:800; }
+            QLabel#social_hint { color:rgba(237,243,247,0.82); font-size:15px; }
+            QLabel#social_col_title { color:#ecf3f8; font-size:20px; font-weight:800; }
+            QListWidget {
+                background:rgba(236,239,242,0.92);
+                color:#20252b;
+                border:1px solid rgba(0,0,0,0.26);
+                font-size:24px;
+                outline:none;
+            }
+            QListWidget::item {
+                padding:6px 10px;
+                border:1px solid transparent;
+            }
+            QListWidget::item:selected {
+                color:#f3fff2;
+                background:qlineargradient(x1:0,y1:0,x2:1,y2:0, stop:0 #4ea93f, stop:1 #2f8832);
+                border:1px solid rgba(255,255,255,0.25);
+            }
+            QPlainTextEdit {
+                background:rgba(228,233,238,0.96);
+                border:1px solid rgba(32,39,48,0.28);
+                color:#17202a;
+                font-size:18px;
+            }
+            QLineEdit {
+                background:#eef2f6;
+                border:1px solid #8fa0b1;
+                color:#17202a;
+                font-size:21px;
+                font-weight:700;
+                padding:8px;
+            }
             QPushButton {
-                background:qlineargradient(x1:0,y1:0,x2:1,y2:1, stop:0 #34d85a, stop:1 #20b540);
-                color:#efffee; border:1px solid rgba(255,255,255,0.2); font-size:17px; font-weight:700; padding:8px 12px;
+                background:qlineargradient(x1:0,y1:0,x2:1,y2:0, stop:0 #4ea93f, stop:1 #2f8832);
+                color:#efffee;
+                border:1px solid rgba(255,255,255,0.2);
+                font-size:17px;
+                font-weight:700;
+                padding:8px 12px;
             }
-            QPushButton:hover { background:#42e666; }
+            QPushButton:hover { background:#58b449; }
         ''')
         outer = QtWidgets.QVBoxLayout(self)
         outer.setContentsMargins(0, 0, 0, 0)
@@ -1760,43 +1799,46 @@ class SocialOverlay(QtWidgets.QDialog):
         root.addLayout(top)
 
         body = QtWidgets.QHBoxLayout()
-        left = QtWidgets.QVBoxLayout()
-        left_lbl = QtWidgets.QLabel('Peers (LAN / P2P / WORLD)')
-        left_lbl.setStyleSheet('font-size:24px; font-weight:700; color:#f4f8fa;')
+        body.setSpacing(10)
+
+        left_wrap = QtWidgets.QFrame()
+        left_wrap.setObjectName('social_col')
+        left = QtWidgets.QVBoxLayout(left_wrap)
+        left.setContentsMargins(8, 8, 8, 8)
+        left.setSpacing(6)
+        left_lbl = QtWidgets.QLabel('Messages / Peers')
+        left_lbl.setObjectName('social_col_title')
         self.peers = QtWidgets.QListWidget()
-        self.peers.setMinimumWidth(360)
-        self.btn_add = QtWidgets.QPushButton('Add Peer ID')
-        self.btn_friend_request = QtWidgets.QPushButton('Send Friend Request')
-        self.btn_friend_requests = QtWidgets.QPushButton('Friend Requests')
-        self.btn_friends = QtWidgets.QPushButton('Friends List')
-        self.btn_ids = QtWidgets.QPushButton('My Peer IDs')
-        self.btn_lan = QtWidgets.QPushButton('LAN Status')
-        self.btn_world_toggle = QtWidgets.QPushButton('World Chat: ON')
-        self.btn_world_room = QtWidgets.QPushButton('World Room')
-        self.btn_add.clicked.connect(self._add_peer)
-        self.btn_friend_request.clicked.connect(self._send_friend_request)
-        self.btn_friend_requests.clicked.connect(self._open_friend_requests)
-        self.btn_friends.clicked.connect(self._show_friends)
-        self.btn_ids.clicked.connect(self._show_peer_ids)
-        self.btn_lan.clicked.connect(self._show_lan_status)
-        self.btn_world_toggle.clicked.connect(self._toggle_world_chat)
-        self.btn_world_room.clicked.connect(self._change_world_room)
+        self.peers.setMinimumWidth(340)
         left.addWidget(left_lbl)
         left.addWidget(self.peers, 1)
-        left.addWidget(self.btn_add)
-        left.addWidget(self.btn_friend_request)
-        left.addWidget(self.btn_friend_requests)
-        left.addWidget(self.btn_friends)
-        left.addWidget(self.btn_ids)
-        left.addWidget(self.btn_lan)
-        left.addWidget(self.btn_world_toggle)
-        left.addWidget(self.btn_world_room)
 
-        right = QtWidgets.QVBoxLayout()
+        center_wrap = QtWidgets.QFrame()
+        center_wrap.setObjectName('social_col')
+        center = QtWidgets.QVBoxLayout(center_wrap)
+        center.setContentsMargins(8, 8, 8, 8)
+        center.setSpacing(6)
+        center_lbl = QtWidgets.QLabel('Actions')
+        center_lbl.setObjectName('social_col_title')
+        self.actions = QtWidgets.QListWidget()
+        self.actions.setMinimumWidth(290)
+        center.addWidget(center_lbl)
+        center.addWidget(self.actions, 1)
+
+        right_wrap = QtWidgets.QFrame()
+        right_wrap.setObjectName('social_col')
+        right = QtWidgets.QVBoxLayout(right_wrap)
+        right.setContentsMargins(8, 8, 8, 8)
+        right.setSpacing(6)
+        right_lbl = QtWidgets.QLabel('Message Detail')
+        right_lbl.setObjectName('social_col_title')
+        self.peer_meta = QtWidgets.QLabel('Select a peer to chat.')
+        self.peer_meta.setObjectName('social_hint')
         self.chat = QtWidgets.QPlainTextEdit()
         self.chat.setReadOnly(True)
         self.input = QtWidgets.QLineEdit()
-        self.input.setPlaceholderText('Write a message...')
+        self.input.setPlaceholderText('Press A/ENTER to type message...')
+        self.input.installEventFilter(self)
         self.btn_send = QtWidgets.QPushButton('Send')
         self.btn_send.clicked.connect(self._send_current)
         self.input.returnPressed.connect(self._send_current)
@@ -1805,16 +1847,112 @@ class SocialOverlay(QtWidgets.QDialog):
         send_row.addWidget(self.btn_send)
         self.status = QtWidgets.QLabel('Ready')
         self.status.setObjectName('social_hint')
+        right.addWidget(right_lbl)
+        right.addWidget(self.peer_meta)
         right.addWidget(self.chat, 1)
         right.addLayout(send_row)
         right.addWidget(self.status)
 
-        body.addLayout(left)
-        body.addLayout(right, 1)
+        body.addWidget(left_wrap, 3)
+        body.addWidget(center_wrap, 2)
+        body.addWidget(right_wrap, 5)
         root.addLayout(body, 1)
-        bottom = QtWidgets.QLabel('ENTER = send | ESC/BACK = close | Use alias@host:port or select WORLD room')
+
+        self._add_action_item('reply', 'Reply / Send Message')
+        self._add_action_item('friend_request', 'Send Friend Request')
+        self._add_action_item('friend_requests', 'Friend Requests')
+        self._add_action_item('friends', 'Friends List')
+        self._add_action_item('add_peer', 'Add Peer ID')
+        self._add_action_item('peer_ids', 'My Peer IDs')
+        self._add_action_item('lan_status', 'LAN Status')
+        self._add_action_item('world_toggle', 'World Chat: ON')
+        self._add_action_item('world_room', 'World Room')
+        if self.actions.count() > 0:
+            self.actions.setCurrentRow(0)
+        self.actions.itemActivated.connect(self._run_selected_action)
+        self.actions.itemDoubleClicked.connect(self._run_selected_action)
+        self.peers.currentItemChanged.connect(lambda *_: self._update_peer_meta())
+
+        bottom = QtWidgets.QLabel('A/ENTER = select | B/ESC = close | X = quick send | Text input opens virtual keyboard')
         bottom.setObjectName('social_hint')
         root.addWidget(bottom)
+
+    def _add_action_item(self, key, text):
+        it = QtWidgets.QListWidgetItem(str(text))
+        it.setData(QtCore.Qt.UserRole, str(key))
+        self.actions.addItem(it)
+        self._action_items[str(key)] = it
+
+    def _run_selected_action(self, *_):
+        it = self.actions.currentItem()
+        if it is None:
+            return
+        key = str(it.data(QtCore.Qt.UserRole) or '').strip()
+        if key == 'reply':
+            self.input.setFocus(QtCore.Qt.OtherFocusReason)
+            self._open_chat_keyboard()
+            return
+        if key == 'friend_request':
+            self._send_friend_request()
+            return
+        if key == 'friend_requests':
+            self._open_friend_requests()
+            return
+        if key == 'friends':
+            self._show_friends()
+            return
+        if key == 'add_peer':
+            self._add_peer()
+            return
+        if key == 'peer_ids':
+            self._show_peer_ids()
+            return
+        if key == 'lan_status':
+            self._show_lan_status()
+            return
+        if key == 'world_toggle':
+            self._toggle_world_chat()
+            return
+        if key == 'world_room':
+            self._change_world_room()
+            return
+
+    def _update_peer_meta(self):
+        peer = self._selected_peer()
+        if not peer:
+            self.peer_meta.setText('Select a peer to chat.')
+            return
+        if str(peer.get('source')) == 'WORLD':
+            self.peer_meta.setText(f"WORLD relay room #{self.engine.world_topic}")
+            return
+        name = str(peer.get('name') or 'Peer')
+        host = str(peer.get('host') or '-')
+        port = int(peer.get('port') or 0)
+        src = str(peer.get('source') or 'LAN')
+        self.peer_meta.setText(f'{name}  [{host}:{port}]  ({src})')
+
+    def _open_chat_keyboard(self):
+        if self._vk_opening:
+            return
+        if (time.monotonic() - float(self._vk_last_close)) < 0.35:
+            return
+        self._vk_opening = True
+        try:
+            d = VirtualKeyboardDialog(self.input.text(), self)
+            if d.exec_() == QtWidgets.QDialog.Accepted:
+                self.input.setText(d.text())
+        finally:
+            self._vk_last_close = time.monotonic()
+            self._vk_opening = False
+            self.input.setFocus(QtCore.Qt.OtherFocusReason)
+
+    def eventFilter(self, obj, event):
+        if obj is self.input:
+            et = event.type()
+            if et in (QtCore.QEvent.FocusIn, QtCore.QEvent.MouseButtonPress):
+                if not self._vk_opening and (time.monotonic() - float(self._vk_last_close)) >= 0.35:
+                    QtCore.QTimer.singleShot(0, self._open_chat_keyboard)
+        return super().eventFilter(obj, event)
 
     def showEvent(self, e):
         super().showEvent(e)
@@ -2095,6 +2233,7 @@ class SocialOverlay(QtWidgets.QDialog):
             self.peer_data[key] = data
             if self.peers.currentRow() < 0:
                 self.peers.setCurrentRow(0)
+        self._update_peer_meta()
         if persist:
             self._save_manual_peers()
 
@@ -2106,6 +2245,7 @@ class SocialOverlay(QtWidgets.QDialog):
         row = self.peers.row(it)
         if row >= 0:
             self.peers.takeItem(row)
+        self._update_peer_meta()
 
     def _selected_peer(self):
         it = self.peers.currentItem()
@@ -2252,10 +2392,13 @@ class SocialOverlay(QtWidgets.QDialog):
         self._update_world_toggle_button()
 
     def _update_world_toggle_button(self):
+        it = self._action_items.get('world_toggle')
+        if it is None:
+            return
         if self.engine.world_enabled:
-            self.btn_world_toggle.setText('World Chat: ON')
+            it.setText('World Chat: ON')
         else:
-            self.btn_world_toggle.setText('World Chat: OFF')
+            it.setText('World Chat: OFF')
 
     def _toggle_world_chat(self):
         self.engine.set_world_enabled(not self.engine.world_enabled)
@@ -2288,6 +2431,7 @@ class SocialOverlay(QtWidgets.QDialog):
             try:
                 self.engine.send_world_chat(txt)
                 self._append_line(f"[{time.strftime('%H:%M:%S')}] You -> WORLD: {txt}")
+                self._push_recent_message('You -> WORLD', txt)
                 self.status.setText(f"World sent to room {self.engine.world_topic}")
                 self.input.clear()
             except Exception as e:
@@ -16248,6 +16392,147 @@ class SocialNetworkEngine:
                 backoff = min(8.0, backoff * 1.5)
 
 
+class VirtualKeyboardDialog(QtWidgets.QDialog):
+    def __init__(self, initial='', parent=None):
+        super().__init__(parent)
+        self._nav_default_cols = 10
+        self.setWindowTitle('Virtual Keyboard')
+        self.setWindowFlags(QtCore.Qt.Dialog | QtCore.Qt.FramelessWindowHint)
+        self.setModal(True)
+        self.resize(920, 420)
+        self.setStyleSheet('''
+            QDialog { background:#d2d7dc; border:2px solid #e8edf1; }
+            QLineEdit { background:#ffffff; border:1px solid #8a96a3; color:#1e2731; font-size:24px; font-weight:700; padding:8px; }
+            QListWidget { background:#eef2f5; border:1px solid #9da8b3; color:#24303b; font-size:18px; font-weight:800; outline:none; }
+            QListWidget::item { border:1px solid #c1c9d2; min-width:74px; min-height:46px; margin:4px; }
+            QListWidget::item:selected { background:#66b340; color:#fff; border:2px solid #2f6e28; }
+            QLabel { color:#2f3944; font-size:14px; font-weight:700; }
+        ''')
+        v = QtWidgets.QVBoxLayout(self)
+        v.setContentsMargins(12, 10, 12, 10)
+        v.setSpacing(8)
+        self.edit = QtWidgets.QLineEdit(str(initial or ''))
+        self.edit.setFocusPolicy(QtCore.Qt.ClickFocus)
+        self.edit.installEventFilter(self)
+        v.addWidget(self.edit)
+        self.keys = QtWidgets.QListWidget()
+        self.keys.setViewMode(QtWidgets.QListView.IconMode)
+        self.keys.setMovement(QtWidgets.QListView.Static)
+        self.keys.setResizeMode(QtWidgets.QListView.Adjust)
+        self.keys.setWrapping(True)
+        self.keys.setSpacing(4)
+        self.keys.setGridSize(QtCore.QSize(84, 54))
+        self.keys.itemActivated.connect(self._activate_current)
+        self.keys.installEventFilter(self)
+        tokens = list('1234567890QWERTYUIOPASDFGHJKLZXCVBNM') + ['-', '_', '@', '.', '/', ':', 'SPACE', 'BACK', 'CLEAR', 'DONE']
+        for token in tokens:
+            self.keys.addItem(QtWidgets.QListWidgetItem(token))
+        self.keys.setCurrentRow(0)
+        self.keys.setFocus(QtCore.Qt.OtherFocusReason)
+        v.addWidget(self.keys, 1)
+        v.addWidget(QtWidgets.QLabel('A/ENTER = Select | B/ESC = Back | X = Backspace | Y = Space'))
+
+    def text(self):
+        return self.edit.text()
+
+    def _activate_current(self):
+        it = self.keys.currentItem()
+        if it is None:
+            return
+        key = str(it.text() or '')
+        if key == 'DONE':
+            self.accept()
+            return
+        if key == 'SPACE':
+            self.edit.setText(self.edit.text() + ' ')
+            self.keys.setFocus(QtCore.Qt.OtherFocusReason)
+            return
+        if key == 'BACK':
+            self.edit.setText(self.edit.text()[:-1])
+            self.keys.setFocus(QtCore.Qt.OtherFocusReason)
+            return
+        if key == 'CLEAR':
+            self.edit.setText('')
+            self.keys.setFocus(QtCore.Qt.OtherFocusReason)
+            return
+        self.edit.setText(self.edit.text() + key)
+        self.keys.setFocus(QtCore.Qt.OtherFocusReason)
+
+    def _nav_cols(self):
+        try:
+            grid_w = int(self.keys.gridSize().width())
+            view_w = int(self.keys.viewport().width())
+            return max(1, view_w // max(1, grid_w))
+        except Exception:
+            return self._nav_default_cols
+
+    def _move_selection(self, dr=0, dc=0):
+        total = int(self.keys.count())
+        if total <= 0:
+            return
+        cols = max(1, int(self._nav_cols() or self._nav_default_cols))
+        idx = int(self.keys.currentRow())
+        if idx < 0:
+            idx = 0
+        row = idx // cols
+        col = idx % cols
+        row += int(dr)
+        col += int(dc)
+        max_row = (total - 1) // cols
+        row = max(0, min(max_row, row))
+        col = max(0, col)
+        row_start = row * cols
+        row_end = min(total - 1, row_start + cols - 1)
+        new_idx = min(row_end, row_start + col)
+        self.keys.setCurrentRow(new_idx)
+        it = self.keys.currentItem()
+        if it is not None:
+            self.keys.scrollToItem(it, QtWidgets.QAbstractItemView.PositionAtCenter)
+
+    def eventFilter(self, obj, event):
+        if event.type() == QtCore.QEvent.KeyPress:
+            if event.key() in (
+                QtCore.Qt.Key_Left, QtCore.Qt.Key_Right,
+                QtCore.Qt.Key_Up, QtCore.Qt.Key_Down,
+                QtCore.Qt.Key_Return, QtCore.Qt.Key_Enter,
+                QtCore.Qt.Key_Escape, QtCore.Qt.Key_Back,
+                QtCore.Qt.Key_Space, QtCore.Qt.Key_Backspace,
+            ):
+                self.keyPressEvent(event)
+                return True
+        return super().eventFilter(obj, event)
+
+    def keyPressEvent(self, e):
+        k = e.key()
+        if k == QtCore.Qt.Key_Left:
+            self._move_selection(0, -1)
+            return
+        if k == QtCore.Qt.Key_Right:
+            self._move_selection(0, 1)
+            return
+        if k == QtCore.Qt.Key_Up:
+            self._move_selection(-1, 0)
+            return
+        if k == QtCore.Qt.Key_Down:
+            self._move_selection(1, 0)
+            return
+        if k in (QtCore.Qt.Key_Escape, QtCore.Qt.Key_Back):
+            self.reject()
+            return
+        if k in (QtCore.Qt.Key_Return, QtCore.Qt.Key_Enter):
+            self._activate_current()
+            return
+        if k == QtCore.Qt.Key_Space:
+            self.edit.setText(self.edit.text() + ' ')
+            self.keys.setFocus(QtCore.Qt.OtherFocusReason)
+            return
+        if k == QtCore.Qt.Key_Backspace:
+            self.edit.setText(self.edit.text()[:-1])
+            self.keys.setFocus(QtCore.Qt.OtherFocusReason)
+            return
+        super().keyPressEvent(e)
+
+
 class SocialChatWindow(QtWidgets.QWidget):
     def __init__(self):
         super().__init__()
@@ -16258,6 +16543,9 @@ class SocialChatWindow(QtWidgets.QWidget):
         self.engine = SocialNetworkEngine(self.nickname)
         self.peer_items = {}
         self.peer_data = {}
+        self._vk_opening = False
+        self._vk_last_close = 0.0
+        self._action_items = {}
         self._build_ui()
         self._load_manual_peers()
         self._load_world_settings()
@@ -16271,63 +16559,213 @@ class SocialChatWindow(QtWidgets.QWidget):
 
     def _build_ui(self):
         self.setStyleSheet('''
-            QWidget { background:#1a1f25; color:#e9eff2; font-size:15px; }
-            QListWidget { background:#12171d; border:1px solid #2d3641; }
-            QPlainTextEdit { background:#0f141a; border:1px solid #2d3641; }
-            QLineEdit { background:#10161d; border:1px solid #2d3641; padding:6px; }
-            QPushButton { background:#2aaa49; border:1px solid #5ce27f; color:#eefaf0; padding:8px 12px; font-weight:700; }
-            QPushButton:hover { background:#33bf54; }
+            QWidget { background:#242b33; color:#edf3f8; font-size:15px; }
+            QFrame#social_col {
+                background:rgba(52,61,72,0.94);
+                border:1px solid rgba(196,208,222,0.30);
+            }
+            QLabel#social_title { color:#edf4fa; font-size:22px; font-weight:800; }
+            QLabel#social_hint { color:rgba(234,242,248,0.84); font-size:15px; }
+            QListWidget {
+                background:rgba(236,239,242,0.92);
+                color:#20252b;
+                border:1px solid rgba(0,0,0,0.26);
+                font-size:23px;
+                outline:none;
+            }
+            QListWidget::item {
+                padding:6px 10px;
+                border:1px solid transparent;
+            }
+            QListWidget::item:selected {
+                color:#f3fff2;
+                background:qlineargradient(x1:0,y1:0,x2:1,y2:0, stop:0 #4ea93f, stop:1 #2f8832);
+                border:1px solid rgba(255,255,255,0.25);
+            }
+            QPlainTextEdit {
+                background:rgba(228,233,238,0.96);
+                border:1px solid rgba(32,39,48,0.28);
+                color:#17202a;
+                font-size:18px;
+            }
+            QLineEdit {
+                background:#eef2f6;
+                border:1px solid #8fa0b1;
+                color:#17202a;
+                font-size:21px;
+                font-weight:700;
+                padding:8px;
+            }
+            QPushButton {
+                background:qlineargradient(x1:0,y1:0,x2:1,y2:0, stop:0 #4ea93f, stop:1 #2f8832);
+                border:1px solid rgba(238,246,236,0.40);
+                color:#eefaf0;
+                padding:8px 12px;
+                font-weight:700;
+            }
+            QPushButton:hover { background:#58b449; }
         ''')
-        root = QtWidgets.QHBoxLayout(self)
-        root.setContentsMargins(12, 12, 12, 12)
-        root.setSpacing(10)
+        root = QtWidgets.QVBoxLayout(self)
+        root.setContentsMargins(10, 10, 10, 10)
+        root.setSpacing(8)
 
-        left = QtWidgets.QVBoxLayout()
-        left_title = QtWidgets.QLabel('Peers (LAN / P2P / WORLD)')
-        left_title.setStyleSheet('font-size:22px; font-weight:700;')
+        top = QtWidgets.QHBoxLayout()
+        self.title = QtWidgets.QLabel('social / messages')
+        self.title.setObjectName('social_title')
+        self.gamer = QtWidgets.QLabel(f'gamertag: {self.nickname}')
+        self.gamer.setObjectName('social_hint')
+        top.addWidget(self.title)
+        top.addStretch(1)
+        top.addWidget(self.gamer)
+        root.addLayout(top)
+
+        body = QtWidgets.QHBoxLayout()
+        body.setSpacing(10)
+
+        left_wrap = QtWidgets.QFrame()
+        left_wrap.setObjectName('social_col')
+        left = QtWidgets.QVBoxLayout(left_wrap)
+        left.setContentsMargins(8, 8, 8, 8)
+        left.setSpacing(6)
+        left_title = QtWidgets.QLabel('Messages / Peers')
+        left_title.setObjectName('social_title')
         self.peer_list = QtWidgets.QListWidget()
-        self.peer_list.setMinimumWidth(360)
-        self.btn_add = QtWidgets.QPushButton('Add Peer ID')
-        self.btn_me = QtWidgets.QPushButton('My Peer IDs')
-        self.btn_lan = QtWidgets.QPushButton('LAN Status')
-        self.btn_world_toggle = QtWidgets.QPushButton('World Chat: ON')
-        self.btn_world_room = QtWidgets.QPushButton('World Room')
-        self.btn_add.clicked.connect(self._add_peer_dialog)
-        self.btn_me.clicked.connect(self._show_my_peer_ids)
-        self.btn_lan.clicked.connect(self._show_lan_status)
-        self.btn_world_toggle.clicked.connect(self._toggle_world_chat)
-        self.btn_world_room.clicked.connect(self._change_world_room)
+        self.peer_list.setMinimumWidth(340)
+        self.peer_list.currentItemChanged.connect(lambda *_: self._update_peer_meta())
 
         left.addWidget(left_title)
         left.addWidget(self.peer_list, 1)
-        left.addWidget(self.btn_add)
-        left.addWidget(self.btn_me)
-        left.addWidget(self.btn_lan)
-        left.addWidget(self.btn_world_toggle)
-        left.addWidget(self.btn_world_room)
 
-        right = QtWidgets.QVBoxLayout()
+        center_wrap = QtWidgets.QFrame()
+        center_wrap.setObjectName('social_col')
+        center = QtWidgets.QVBoxLayout(center_wrap)
+        center.setContentsMargins(8, 8, 8, 8)
+        center.setSpacing(6)
+        center_title = QtWidgets.QLabel('Actions')
+        center_title.setObjectName('social_title')
+        self.actions = QtWidgets.QListWidget()
+        self.actions.setMinimumWidth(290)
+        center.addWidget(center_title)
+        center.addWidget(self.actions, 1)
+        self.actions.itemActivated.connect(self._run_selected_action)
+        self.actions.itemDoubleClicked.connect(self._run_selected_action)
+
+        right_wrap = QtWidgets.QFrame()
+        right_wrap.setObjectName('social_col')
+        right = QtWidgets.QVBoxLayout(right_wrap)
+        right.setContentsMargins(8, 8, 8, 8)
+        right.setSpacing(6)
+        right_title = QtWidgets.QLabel('Message Detail')
+        right_title.setObjectName('social_title')
+        self.peer_meta = QtWidgets.QLabel('Select a peer to chat.')
+        self.peer_meta.setObjectName('social_hint')
         self.chat = QtWidgets.QPlainTextEdit()
         self.chat.setReadOnly(True)
         self.chat.setLineWrapMode(QtWidgets.QPlainTextEdit.WidgetWidth)
         self.msg = QtWidgets.QLineEdit()
-        self.msg.setPlaceholderText('Write a message...')
+        self.msg.setPlaceholderText('Press A/ENTER to type message...')
+        self.msg.installEventFilter(self)
         self.btn_send = QtWidgets.QPushButton('Send')
         self.btn_send.clicked.connect(self._send_current)
         self.msg.returnPressed.connect(self._send_current)
         self.status = QtWidgets.QLabel('Ready')
-        self.status.setStyleSheet('color:#99a9b7;')
+        self.status.setObjectName('social_hint')
 
         bottom = QtWidgets.QHBoxLayout()
         bottom.addWidget(self.msg, 1)
         bottom.addWidget(self.btn_send)
 
+        right.addWidget(right_title)
+        right.addWidget(self.peer_meta)
         right.addWidget(self.chat, 1)
         right.addLayout(bottom)
         right.addWidget(self.status)
 
-        root.addLayout(left)
-        root.addLayout(right, 1)
+        body.addWidget(left_wrap, 3)
+        body.addWidget(center_wrap, 2)
+        body.addWidget(right_wrap, 5)
+        root.addLayout(body, 1)
+
+        self._add_action_item('reply', 'Reply / Send Message')
+        self._add_action_item('add_peer', 'Add Peer ID')
+        self._add_action_item('peer_ids', 'My Peer IDs')
+        self._add_action_item('lan_status', 'LAN Status')
+        self._add_action_item('world_toggle', 'World Chat: ON')
+        self._add_action_item('world_room', 'World Room')
+        if self.actions.count() > 0:
+            self.actions.setCurrentRow(0)
+
+        hint = QtWidgets.QLabel('A/ENTER = select | B/ESC = close | Text input opens virtual keyboard')
+        hint.setObjectName('social_hint')
+        root.addWidget(hint)
+
+    def _add_action_item(self, key, text):
+        it = QtWidgets.QListWidgetItem(str(text))
+        it.setData(QtCore.Qt.UserRole, str(key))
+        self.actions.addItem(it)
+        self._action_items[str(key)] = it
+
+    def _run_selected_action(self, *_):
+        it = self.actions.currentItem()
+        if it is None:
+            return
+        key = str(it.data(QtCore.Qt.UserRole) or '').strip()
+        if key == 'reply':
+            self.msg.setFocus(QtCore.Qt.OtherFocusReason)
+            self._open_chat_keyboard()
+            return
+        if key == 'add_peer':
+            self._add_peer_dialog()
+            return
+        if key == 'peer_ids':
+            self._show_my_peer_ids()
+            return
+        if key == 'lan_status':
+            self._show_lan_status()
+            return
+        if key == 'world_toggle':
+            self._toggle_world_chat()
+            return
+        if key == 'world_room':
+            self._change_world_room()
+            return
+
+    def _update_peer_meta(self):
+        peer = self._current_peer()
+        if not peer:
+            self.peer_meta.setText('Select a peer to chat.')
+            return
+        if str(peer.get('source')) == 'WORLD':
+            self.peer_meta.setText(f"WORLD relay room #{self.engine.world_topic}")
+            return
+        name = str(peer.get('name') or 'Peer')
+        host = str(peer.get('host') or '-')
+        port = int(peer.get('port') or 0)
+        src = str(peer.get('source') or 'LAN')
+        self.peer_meta.setText(f'{name}  [{host}:{port}]  ({src})')
+
+    def _open_chat_keyboard(self):
+        if self._vk_opening:
+            return
+        if (time.monotonic() - float(self._vk_last_close)) < 0.35:
+            return
+        self._vk_opening = True
+        try:
+            d = VirtualKeyboardDialog(self.msg.text(), self)
+            if d.exec_() == QtWidgets.QDialog.Accepted:
+                self.msg.setText(d.text())
+        finally:
+            self._vk_last_close = time.monotonic()
+            self._vk_opening = False
+            self.msg.setFocus(QtCore.Qt.OtherFocusReason)
+
+    def eventFilter(self, obj, event):
+        if obj is self.msg:
+            et = event.type()
+            if et in (QtCore.QEvent.FocusIn, QtCore.QEvent.MouseButtonPress):
+                if not self._vk_opening and (time.monotonic() - float(self._vk_last_close)) >= 0.35:
+                    QtCore.QTimer.singleShot(0, self._open_chat_keyboard)
+        return super().eventFilter(obj, event)
 
     def _peer_row_text(self, p):
         if str(p.get('source')) == 'WORLD':
@@ -16355,6 +16793,7 @@ class SocialChatWindow(QtWidgets.QWidget):
             self.peer_data[key] = data
             if self.peer_list.currentRow() < 0:
                 self.peer_list.setCurrentRow(0)
+        self._update_peer_meta()
         if persist:
             self._save_manual_peers()
 
@@ -16366,6 +16805,7 @@ class SocialChatWindow(QtWidgets.QWidget):
         row = self.peer_list.row(item)
         if row >= 0:
             self.peer_list.takeItem(row)
+        self._update_peer_meta()
 
     def _append_line(self, line):
         self.chat.appendPlainText(line)
@@ -16425,10 +16865,13 @@ class SocialChatWindow(QtWidgets.QWidget):
         self._update_world_toggle_button()
 
     def _update_world_toggle_button(self):
+        it = self._action_items.get('world_toggle')
+        if it is None:
+            return
         if self.engine.world_enabled:
-            self.btn_world_toggle.setText('World Chat: ON')
+            it.setText('World Chat: ON')
         else:
-            self.btn_world_toggle.setText('World Chat: OFF')
+            it.setText('World Chat: OFF')
 
     def _load_world_settings(self):
         cfg = safe_json_read(WORLD_CHAT_FILE, {})
