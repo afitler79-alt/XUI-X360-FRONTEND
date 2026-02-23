@@ -1077,6 +1077,7 @@ import shutil
 import os
 import time
 import re
+import hashlib
 import shlex
 import queue
 import socket
@@ -3563,6 +3564,166 @@ class MandatoryUpdateDialog(QtWidgets.QDialog):
         super().keyPressEvent(e)
 
 
+class MandatoryUpdateFailedDialog(QtWidgets.QDialog):
+    def __init__(self, detail_text='', status_code='4476-4497-A080-0F00-8007-2EE2', parent=None):
+        super().__init__(parent)
+        self._open_anim = None
+        self.setWindowTitle('Update Failed')
+        self.setWindowFlags(QtCore.Qt.Dialog | QtCore.Qt.FramelessWindowHint)
+        self.setAttribute(QtCore.Qt.WA_TranslucentBackground, True)
+        self.setModal(True)
+        self.resize(980, 640)
+        self.setStyleSheet('''
+            QDialog { background:rgba(9,12,16,0.55); }
+            QFrame#fail_panel {
+                background:#e9edf1;
+                border:2px solid rgba(246,250,254,0.82);
+                border-radius:0px;
+            }
+            QFrame#fail_header {
+                background:qlineargradient(x1:0,y1:0,x2:1,y2:0, stop:0 #1a2028, stop:1 #0f141b);
+                border:none;
+            }
+            QLabel#fail_title {
+                color:#f4f8fb;
+                font-size:56px;
+                font-weight:900;
+                padding:6px 10px;
+            }
+            QLabel#fail_body {
+                color:#1f2832;
+                font-size:26px;
+                font-weight:600;
+            }
+            QLabel#fail_status {
+                color:#1f2832;
+                font-size:22px;
+                font-weight:800;
+            }
+            QPushButton#fail_ok {
+                background:qlineargradient(x1:0,y1:0,x2:0,y2:1, stop:0 #58d53e, stop:1 #34af2e);
+                color:#f6fff3;
+                border:1px solid rgba(250,255,248,0.42);
+                border-radius:0px;
+                font-size:40px;
+                font-weight:800;
+                min-height:76px;
+                padding:6px 14px;
+            }
+            QPushButton#fail_ok:hover, QPushButton#fail_ok:focus {
+                background:qlineargradient(x1:0,y1:0,x2:0,y2:1, stop:0 #66df4b, stop:1 #3dba35);
+            }
+            QLabel#fail_hint {
+                color:#ecf1f5;
+                font-size:20px;
+                font-weight:700;
+            }
+        ''')
+
+        outer = QtWidgets.QVBoxLayout(self)
+        outer.setContentsMargins(14, 14, 14, 14)
+        outer.setSpacing(10)
+
+        panel = QtWidgets.QFrame()
+        panel.setObjectName('fail_panel')
+        outer.addWidget(panel, 1)
+        root = QtWidgets.QVBoxLayout(panel)
+        root.setContentsMargins(0, 0, 0, 0)
+        root.setSpacing(0)
+
+        header = QtWidgets.QFrame()
+        header.setObjectName('fail_header')
+        h_l = QtWidgets.QHBoxLayout(header)
+        h_l.setContentsMargins(14, 10, 14, 8)
+        title = QtWidgets.QLabel('Update Failed')
+        title.setObjectName('fail_title')
+        h_l.addWidget(title)
+        h_l.addStretch(1)
+        root.addWidget(header)
+
+        body = QtWidgets.QWidget()
+        b_l = QtWidgets.QVBoxLayout(body)
+        b_l.setContentsMargins(24, 24, 24, 18)
+        b_l.setSpacing(16)
+        message = (
+            "Can't download or apply the update.\n"
+            "To test your connection, open System Settings and select Network Setup.\n\n"
+            "If the problem persists, review git/network access and try again.\n"
+        )
+        lbl = QtWidgets.QLabel(message)
+        lbl.setObjectName('fail_body')
+        lbl.setWordWrap(True)
+        b_l.addWidget(lbl)
+
+        detail = str(detail_text or '').strip()
+        if detail:
+            det = QtWidgets.QLabel(detail[:420])
+            det.setObjectName('fail_body')
+            det.setWordWrap(True)
+            b_l.addWidget(det)
+
+        code_raw = str(status_code or '').strip()
+        code_fmt = ' - '.join([p for p in code_raw.split('-') if p]) if code_raw else ''
+        code_lbl = QtWidgets.QLabel(f'Status Code: {code_fmt or code_raw}')
+        code_lbl.setObjectName('fail_status')
+        b_l.addWidget(code_lbl)
+        b_l.addStretch(1)
+
+        ok_btn = QtWidgets.QPushButton('Return to Xbox Dashboard')
+        ok_btn.setObjectName('fail_ok')
+        ok_btn.clicked.connect(self.accept)
+        b_l.addWidget(ok_btn)
+        root.addWidget(body, 1)
+
+        hint = QtWidgets.QLabel('<font color="#54d642">A Select</font>   <font color="#d53434">B Back</font>')
+        hint.setObjectName('fail_hint')
+        outer.addWidget(hint, 0, QtCore.Qt.AlignLeft)
+
+    def showEvent(self, e):
+        super().showEvent(e)
+        parent = self.parentWidget()
+        if parent is not None:
+            w = min(max(980, int(parent.width() * 0.74)), max(980, parent.width() - 70))
+            h = min(max(620, int(parent.height() * 0.74)), max(620, parent.height() - 70))
+            self.resize(w, h)
+            x = parent.x() + max(10, (parent.width() - w) // 2)
+            y = parent.y() + max(10, (parent.height() - h) // 2)
+            self.move(max(0, x), max(0, y))
+        self._animate_open()
+
+    def _animate_open(self):
+        effect = QtWidgets.QGraphicsOpacityEffect(self)
+        self.setGraphicsEffect(effect)
+        effect.setOpacity(0.0)
+        end_rect = self.geometry()
+        start_rect = QtCore.QRect(end_rect.x(), end_rect.y() + max(16, end_rect.height() // 24), end_rect.width(), end_rect.height())
+        self.setGeometry(start_rect)
+        self._open_anim = QtCore.QParallelAnimationGroup(self)
+        fade = QtCore.QPropertyAnimation(effect, b'opacity', self)
+        fade.setDuration(180)
+        fade.setStartValue(0.0)
+        fade.setEndValue(1.0)
+        fade.setEasingCurve(QtCore.QEasingCurve.OutCubic)
+        slide = QtCore.QPropertyAnimation(self, b'geometry', self)
+        slide.setDuration(210)
+        slide.setStartValue(start_rect)
+        slide.setEndValue(end_rect)
+        slide.setEasingCurve(QtCore.QEasingCurve.OutCubic)
+        self._open_anim.addAnimation(fade)
+        self._open_anim.addAnimation(slide)
+        self._open_anim.finished.connect(lambda: self.setGraphicsEffect(None))
+        self._open_anim.start(QtCore.QAbstractAnimation.DeleteWhenStopped)
+
+    def keyPressEvent(self, e):
+        if e.key() in (QtCore.Qt.Key_Escape, QtCore.Qt.Key_Back):
+            self.accept()
+            return
+        if e.key() in (QtCore.Qt.Key_Return, QtCore.Qt.Key_Enter):
+            self.accept()
+            return
+        super().keyPressEvent(e)
+
+
 class UpdateProgressDialog(QtWidgets.QDialog):
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -3809,11 +3970,13 @@ class InstallTaskProgressDialog(QtWidgets.QDialog):
 
 
 class XboxGuideMenu(QtWidgets.QDialog):
-    def __init__(self, gamertag='Player1', parent=None):
+    def __init__(self, gamertag='Player1', parent=None, sfx_cb=None):
         super().__init__(parent)
         self.gamertag = str(gamertag or 'Player1')
+        self._play_sfx = sfx_cb
         self._selection = None
         self._open_anim = None
+        self._last_row = 0
         self.setWindowTitle('Xbox Guide')
         self.setWindowFlags(QtCore.Qt.Dialog | QtCore.Qt.FramelessWindowHint)
         self.setAttribute(QtCore.Qt.WA_TranslucentBackground, True)
@@ -3917,6 +4080,7 @@ class XboxGuideMenu(QtWidgets.QDialog):
         self.listw.setCurrentRow(0)
         self.listw.itemActivated.connect(self._accept_current)
         self.listw.itemDoubleClicked.connect(self._accept_current)
+        self.listw.currentRowChanged.connect(self._on_row_changed)
         body.addWidget(self.listw, 7)
 
         actions = QtWidgets.QFrame()
@@ -3942,6 +4106,22 @@ class XboxGuideMenu(QtWidgets.QDialog):
         self._clock.start(1000)
         self._refresh_meta()
 
+    def _sfx(self, name):
+        if callable(self._play_sfx):
+            try:
+                self._play_sfx(str(name))
+            except Exception:
+                pass
+
+    def _on_row_changed(self, row):
+        try:
+            row = int(row)
+        except Exception:
+            return
+        if row != int(self._last_row):
+            self._last_row = row
+            self._sfx('hover')
+
     def _refresh_meta(self):
         now = QtCore.QDateTime.currentDateTime().toString('HH:mm')
         self.meta.setText(f'{self.gamertag}    {now}')
@@ -3951,10 +4131,12 @@ class XboxGuideMenu(QtWidgets.QDialog):
         if it is None:
             return
         self._selection = it.text()
+        self._sfx('select')
         self.accept()
 
     def _accept_action(self, action):
         self._selection = str(action)
+        self._sfx('select')
         self.accept()
 
     def selected(self):
@@ -4002,10 +4184,12 @@ class XboxGuideMenu(QtWidgets.QDialog):
     def keyPressEvent(self, e):
         if e.key() in (QtCore.Qt.Key_Y, QtCore.Qt.Key_Tab):
             self._selection = 'Inicio de Xbox'
+            self._sfx('select')
             self.accept()
             return
         if e.key() in (QtCore.Qt.Key_X, QtCore.Qt.Key_Space):
             self._selection = 'Cerrar sesion'
+            self._sfx('select')
             self.accept()
             return
         if e.key() in (QtCore.Qt.Key_Escape, QtCore.Qt.Key_Back):
@@ -4532,8 +4716,9 @@ class WebKioskWindow(QtWidgets.QMainWindow):
                 gamertag = str(parent._gamertag())
             except Exception:
                 pass
-        d = XboxGuideMenu(gamertag, self)
+        d = XboxGuideMenu(gamertag, self, sfx_cb=self._play_sfx)
         if d.exec_() != QtWidgets.QDialog.Accepted:
+            self._sfx('back')
             return
         sel = str(d.selected() or '').strip()
         if not sel:
@@ -6083,6 +6268,21 @@ class Dashboard(QtWidgets.QMainWindow):
         if hasattr(dlg, 'set_detail'):
             dlg.set_detail(tail)
 
+    def _build_update_status_code(self, text='', exit_code=None, process_err=None):
+        raw = str(text or '').strip()
+        if not raw:
+            raw = 'unknown-update-failure'
+        seed = f'{raw}|{exit_code}|{process_err}'
+        hx = hashlib.sha1(seed.encode('utf-8', errors='ignore')).hexdigest().upper()
+        return f'{hx[0:4]}-{hx[4:8]}-{hx[8:12]}-{hx[12:16]}-{hx[16:20]}-{hx[20:24]}'
+
+    def _show_update_failed_dialog(self, detail_text='', status_code=''):
+        code = str(status_code or '').strip() or self._build_update_status_code(detail_text)
+        self._play_sfx('open')
+        d = MandatoryUpdateFailedDialog(detail_text=detail_text, status_code=code, parent=self)
+        d.exec_()
+        self._play_sfx('back')
+
     def _restart_dashboard_after_update(self):
         helper = XUI_HOME / 'bin' / 'xui_postupdate_restart.sh'
         script = '''#!/usr/bin/env bash
@@ -6219,7 +6419,9 @@ exit 0
             err_code = int(err)
         except Exception:
             err_code = str(err)
-        self._msg('Update Failed', f'Updater process error: {err_code}')
+        detail = f'Updater process error: {err_code}'
+        status_code = self._build_update_status_code(detail, process_err=err_code)
+        self._show_update_failed_dialog(detail, status_code)
         QtCore.QTimer.singleShot(250, self._check_mandatory_update_gate)
 
     def _on_mandatory_update_finished(self, code, status):
@@ -6245,12 +6447,13 @@ exit 0
         tail = '\n'.join(lines[-14:]).strip()
         if not tail:
             tail = f'Updater finished with exit code: {int(code)}'
-        self._msg(
-            'Update Failed',
+        detail = (
             'Could not apply mandatory update.\n\n'
             + tail
-            + '\n\nFix network/git access and try again.',
+            + '\n\nFix network/git access and try again.'
         )
+        status_code = self._build_update_status_code(tail, exit_code=code, process_err=status)
+        self._show_update_failed_dialog(detail, status_code)
         QtCore.QTimer.singleShot(250, self._check_mandatory_update_gate)
 
     def _check_mandatory_update_gate(self):
@@ -6816,7 +7019,7 @@ exit 0
             return
         self._guide_open_last_at = now
         self._play_sfx('open')
-        d = XboxGuideMenu(current_gamertag(), self)
+        d = XboxGuideMenu(current_gamertag(), self, sfx_cb=self._play_sfx)
         if d.exec_() == QtWidgets.QDialog.Accepted:
             opt = d.selected()
             if opt:
@@ -16103,17 +16306,35 @@ now_iso(){
 }
 
 require_sudo_ticket(){
+  XUI_AUTH_MODE="none"
   if [ "$(id -u)" -eq 0 ]; then
+    XUI_AUTH_MODE="root"
     return 0
   fi
-  if ! command -v sudo >/dev/null 2>&1; then
-    return 0
+  if command -v sudo >/dev/null 2>&1; then
+    if sudo -n true >/dev/null 2>&1; then
+      XUI_AUTH_MODE="sudo"
+      return 0
+    fi
+    if sudo -v >/dev/null 2>&1; then
+      XUI_AUTH_MODE="sudo"
+      return 0
+    fi
   fi
-  sudo -v
+  if command -v pkexec >/dev/null 2>&1; then
+    if pkexec /bin/sh -c "true" >/dev/null 2>&1; then
+      XUI_AUTH_MODE="pkexec"
+      return 0
+    fi
+  fi
+  return 1
 }
 
 start_sudo_keepalive(){
   if [ "$(id -u)" -eq 0 ]; then
+    return 0
+  fi
+  if [ "${XUI_AUTH_MODE:-}" != "sudo" ]; then
     return 0
   fi
   if ! command -v sudo >/dev/null 2>&1; then
@@ -16382,20 +16603,35 @@ apply_update(){
     echo "sudo authentication failed or cancelled."
     exit 1
   fi
-  start_sudo_keepalive || true
-  trap stop_sudo_keepalive EXIT
+  if [ "${XUI_AUTH_MODE:-}" = "sudo" ]; then
+    start_sudo_keepalive || true
+    trap stop_sudo_keepalive EXIT
+  fi
 
   echo "step=installer-start"
-  (
-    cd "$SRC"
-    if command -v timeout >/dev/null 2>&1; then
-      AUTO_CONFIRM=1 XUI_SKIP_LAUNCH_PROMPT=1 XUI_NONINTERACTIVE=1 XUI_SYSTEMCTL_TIMEOUT_SEC="${XUI_SYSTEMCTL_TIMEOUT_SEC:-15}" \
-        timeout "${XUI_APPLY_INSTALLER_TIMEOUT_SEC:-900}" bash "$installer" --no-auto-install --skip-apt-wait
-    else
-      AUTO_CONFIRM=1 XUI_SKIP_LAUNCH_PROMPT=1 XUI_NONINTERACTIVE=1 XUI_SYSTEMCTL_TIMEOUT_SEC="${XUI_SYSTEMCTL_TIMEOUT_SEC:-15}" \
-        bash "$installer" --no-auto-install --skip-apt-wait
-    fi
-  )
+  if [ "${XUI_AUTH_MODE:-}" = "pkexec" ]; then
+    (
+      cd "$SRC"
+      if command -v timeout >/dev/null 2>&1; then
+        pkexec env AUTO_CONFIRM=1 XUI_SKIP_LAUNCH_PROMPT=1 XUI_NONINTERACTIVE=1 XUI_SYSTEMCTL_TIMEOUT_SEC="${XUI_SYSTEMCTL_TIMEOUT_SEC:-15}" \
+          timeout "${XUI_APPLY_INSTALLER_TIMEOUT_SEC:-900}" bash "$installer" --no-auto-install --skip-apt-wait
+      else
+        pkexec env AUTO_CONFIRM=1 XUI_SKIP_LAUNCH_PROMPT=1 XUI_NONINTERACTIVE=1 XUI_SYSTEMCTL_TIMEOUT_SEC="${XUI_SYSTEMCTL_TIMEOUT_SEC:-15}" \
+          bash "$installer" --no-auto-install --skip-apt-wait
+      fi
+    )
+  else
+    (
+      cd "$SRC"
+      if command -v timeout >/dev/null 2>&1; then
+        AUTO_CONFIRM=1 XUI_SKIP_LAUNCH_PROMPT=1 XUI_NONINTERACTIVE=1 XUI_SYSTEMCTL_TIMEOUT_SEC="${XUI_SYSTEMCTL_TIMEOUT_SEC:-15}" \
+          timeout "${XUI_APPLY_INSTALLER_TIMEOUT_SEC:-900}" bash "$installer" --no-auto-install --skip-apt-wait
+      else
+        AUTO_CONFIRM=1 XUI_SKIP_LAUNCH_PROMPT=1 XUI_NONINTERACTIVE=1 XUI_SYSTEMCTL_TIMEOUT_SEC="${XUI_SYSTEMCTL_TIMEOUT_SEC:-15}" \
+          bash "$installer" --no-auto-install --skip-apt-wait
+      fi
+    )
+  fi
   echo "step=installer-done"
 
   # Ensure dashboard service stays enabled after updates.
@@ -16429,8 +16665,10 @@ apply_update(){
   echo "step=state-written"
   echo "update-applied"
   echo "installed_commit=$installed_commit"
-  stop_sudo_keepalive || true
-  trap - EXIT
+  if [ "${XUI_AUTH_MODE:-}" = "sudo" ]; then
+    stop_sudo_keepalive || true
+    trap - EXIT
+  fi
 }
 
 pull_only(){
@@ -17480,6 +17718,22 @@ CLOSE_SCRIPT = str(Path.home() / '.xui' / 'bin' / 'xui_close_active_app.sh')
 XUI_BIN = Path.home() / '.xui' / 'bin'
 SOCIAL_CHAT_APP = XUI_BIN / 'xui_social_chat.py'
 PYRUN = XUI_BIN / 'xui_python.sh'
+ASSETS_DIR = Path.home() / '.xui' / 'assets'
+
+SFX = {
+    'hover': 'hover.mp3',
+    'open': 'open.mp3',
+    'select': 'select.mp3',
+    'back': 'back.mp3',
+    'close': 'close.mp3',
+}
+SFX_ALIASES = {
+    'hover': ['hover.mp3', 'click.mp3'],
+    'open': ['open.mp3', 'click.mp3'],
+    'select': ['select.mp3', '10. Select A.mp3', 'click.mp3'],
+    'back': ['back.mp3', '14. Back.mp3'],
+    'close': ['close.mp3', '14. Back.mp3'],
+}
 
 
 def _json_read(path, default):
@@ -17647,6 +17901,60 @@ def _close_session():
     _json_write(PROFILE_FILE, prof)
 
 
+def _pick_existing_sound(candidates):
+    if not candidates:
+        return None
+    search_dirs = [
+        ASSETS_DIR / 'SONIDOS',
+        ASSETS_DIR / 'sonidos',
+        Path.home() / '.xui' / 'SONIDOS',
+        Path.home() / '.xui' / 'sonidos',
+        Path.home() / '.xui' / 'user_sounds',
+        ASSETS_DIR,
+    ]
+    for fn in candidates:
+        if not fn:
+            continue
+        for d in search_dirs:
+            p = d / str(fn)
+            if p.exists():
+                return p
+    return None
+
+
+def _play_sfx(name):
+    key = str(name or '').strip()
+    if not key:
+        return
+    if key == 'hover':
+        now = time.monotonic()
+        last = float(getattr(_play_sfx, '_last_hover_at', 0.0))
+        if (now - last) < 0.08:
+            return
+        _play_sfx._last_hover_at = now
+
+    candidates = []
+    base = SFX.get(key)
+    if base:
+        candidates.append(base)
+    candidates.extend(SFX_ALIASES.get(key, []))
+    snd = _pick_existing_sound(candidates)
+    if snd is None:
+        return
+
+    for cmd in (
+        ['mpv', '--really-quiet', '--no-terminal', '--no-video', str(snd)],
+        ['ffplay', '-nodisp', '-autoexit', '-loglevel', 'quiet', str(snd)],
+        ['paplay', str(snd)],
+        ['aplay', '-q', str(snd)],
+    ):
+        try:
+            subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            return
+        except Exception:
+            continue
+
+
 class Guide(QtWidgets.QDialog):
     def __init__(self, gamertag='Player1', paused_pid=None):
         super().__init__()
@@ -17654,6 +17962,7 @@ class Guide(QtWidgets.QDialog):
         self.gamertag = str(gamertag or 'Player1')
         self.action = ''
         self._open_anim = None
+        self._last_row = 0
         self.setWindowTitle('Xbox Guide')
         self.setWindowFlags(
             QtCore.Qt.Dialog
@@ -17764,6 +18073,7 @@ class Guide(QtWidgets.QDialog):
         self.listw.setCurrentRow(0)
         self.listw.itemActivated.connect(self._accept_current)
         self.listw.itemDoubleClicked.connect(self._accept_current)
+        self.listw.currentRowChanged.connect(self._on_row_changed)
         body.addWidget(self.listw, 7)
 
         actions = QtWidgets.QFrame()
@@ -17789,6 +18099,15 @@ class Guide(QtWidgets.QDialog):
         self._clock.start(1000)
         self._refresh_meta()
 
+    def _on_row_changed(self, row):
+        try:
+            row = int(row)
+        except Exception:
+            return
+        if row != int(self._last_row):
+            self._last_row = row
+            _play_sfx('hover')
+
     def _refresh_meta(self):
         now = QtCore.QDateTime.currentDateTime().toString('HH:mm')
         pid_meta = f' PID:{self.paused_pid}' if self.paused_pid else ''
@@ -17799,10 +18118,12 @@ class Guide(QtWidgets.QDialog):
         if it is None:
             return
         self.action = it.text()
+        _play_sfx('select')
         self.accept()
 
     def _accept_action(self, action):
         self.action = str(action or '')
+        _play_sfx('select')
         self.accept()
 
     def showEvent(self, e):
@@ -17814,6 +18135,7 @@ class Guide(QtWidgets.QDialog):
             g = scr.geometry()
             self.setGeometry(g)
             self.showFullScreen()
+        _play_sfx('open')
         self._refresh_meta()
         self._animate_open()
 
@@ -17848,14 +18170,17 @@ class Guide(QtWidgets.QDialog):
     def keyPressEvent(self, e):
         if e.key() in (QtCore.Qt.Key_Y, QtCore.Qt.Key_Tab):
             self.action = 'Inicio de Xbox'
+            _play_sfx('select')
             self.accept()
             return
         if e.key() in (QtCore.Qt.Key_X, QtCore.Qt.Key_Space):
             self.action = 'Cerrar sesion'
+            _play_sfx('select')
             self.accept()
             return
         if e.key() in (QtCore.Qt.Key_Escape, QtCore.Qt.Key_Back):
             self.action = ''
+            _play_sfx('back')
             self.reject()
             return
         if e.key() in (QtCore.Qt.Key_Return, QtCore.Qt.Key_Enter):
