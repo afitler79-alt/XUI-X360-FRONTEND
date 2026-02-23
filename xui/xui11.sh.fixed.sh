@@ -93,6 +93,19 @@ apt_safe_install(){
     run_as_root apt install -y "$@"
 }
 
+# Install APT packages one by one and continue on errors.
+apt_install_each_best_effort(){
+    local pkg
+    local failed=0
+    for pkg in "$@"; do
+        if ! apt_safe_install "$pkg"; then
+            warn "Failed apt package: $pkg"
+            failed=1
+        fi
+    done
+    return "$failed"
+}
+
 # Simple confirmation helper. Respects AUTO_CONFIRM=1 for automation.
 confirm(){
     if [ "${AUTO_CONFIRM:-0}" = "1" ] || [ "${AUTO_INSTALL_TOOLS:-0}" = "1" ]; then
@@ -133,26 +146,37 @@ BASH
     info "Installing system dependencies (best effort)"
     if command -v apt >/dev/null 2>&1; then
         local arch_now
+        local core_pkgs optional_pkgs
         arch_now="$(uname -m)"
+        core_pkgs=(
+            python3 python3-pip python3-venv python3-pyqt5
+            python3-pyqt5.qtmultimedia python3-pyqt5.qtgamepad
+            python3-pil python3-evdev
+        )
+        optional_pkgs=(
+            ffmpeg mpv jq xdotool curl ca-certificates iproute2 bc
+            xclip xsel rofi feh maim scrot udisks2 p7zip-full joystick joycond evtest jstest-gtk xboxdrv
+            retroarch lutris kodi
+        )
         apt_safe_update || warn "apt update failed"
         # Install critical runtime first (must succeed for dashboard)
-        apt_safe_install \
-            python3 python3-pip python3-venv python3-pyqt5 python3-pyqt5.qtmultimedia python3-pyqt5.qtgamepad python3-pil python3-evdev || warn "Core apt dependencies failed"
+        if ! apt_safe_install "${core_pkgs[@]}"; then
+            warn "Core apt dependencies failed in bulk install; retrying one by one"
+            apt_install_each_best_effort "${core_pkgs[@]}" || warn "Some core apt dependencies are still missing"
+        fi
         apt_safe_install python3-pyqt5.qtwebengine || warn "Optional apt package missing: python3-pyqt5.qtwebengine"
-        for pkg in qml-module-qtgamepad libqt5gamepad5; do
-            apt_safe_install "$pkg" || true
-        done
+        apt_install_each_best_effort qml-module-qtgamepad libqt5gamepad5 || true
         # Optional tools (can fail without breaking dashboard runtime)
-        apt_safe_install \
-            ffmpeg mpv jq xdotool curl ca-certificates iproute2 bc \
-            xclip xsel rofi feh maim scrot udisks2 p7zip-full joystick joycond evtest jstest-gtk xboxdrv \
-            retroarch lutris kodi || warn "Some apt packages failed to install"
+        if ! apt_safe_install "${optional_pkgs[@]}"; then
+            warn "Optional apt packages failed in bulk install; retrying one by one"
+            apt_install_each_best_effort "${optional_pkgs[@]}" || warn "Some optional apt packages are still missing"
+        fi
         # Windows compatibility (best effort): Wine + Winetricks + ARM helpers
         if [ "$arch_now" = "x86_64" ] || [ "$arch_now" = "amd64" ]; then
-            apt_safe_install wine wine64 winetricks || warn "Wine/Winetricks install failed on x86_64"
+            apt_install_each_best_effort wine wine64 winetricks || warn "Wine/Winetricks install failed on x86_64"
         elif [ "$arch_now" = "aarch64" ] || [ "$arch_now" = "arm64" ]; then
-            apt_safe_install wine64 winetricks || true
-            apt_safe_install box64 box86 qemu-user-static || warn "ARM compatibility packages failed (box64/box86/qemu)"
+            apt_install_each_best_effort wine64 winetricks || true
+            apt_install_each_best_effort box64 box86 qemu-user-static || warn "ARM compatibility packages failed (box64/box86/qemu)"
             info "AArch64 detected: x86 Windows .exe may need box64 + x86 Wine build"
         fi
         # Optional gaming/compat packages (best effort one by one)
@@ -293,7 +317,7 @@ parse_args(){
             --help|-h)
                 echo "Usage: $0 [--yes-install|-y] [--no-auto-install] [--use-external-dashboard] [--skip-apt-wait] [--apt-wait-seconds N] [--refresh-store-ui] [--refresh-controllers]"; exit 0 ;;
             *)
-                # pass-through unknown args
+                warn "Ignoring unknown argument: $1"
                 shift
                 ;;
         esac
@@ -6462,11 +6486,18 @@ RESCAN_SEC = float(os.environ.get('XUI_JOY_RESCAN_SEC', '2.5'))
 GUIDE_COOLDOWN_SEC = float(os.environ.get('XUI_GUIDE_COOLDOWN_SEC', '0.85'))
 NINTENDO_AB_SWAP = os.environ.get('XUI_JOY_NINTENDO_AB_SWAP', '1').lower() not in ('0', 'false', 'no')
 JOY_PROFILE = os.environ.get('XUI_JOY_PROFILE', 'auto').strip().lower()
+JOYCON_COMBINED_MODE = os.environ.get('XUI_JOY_SWITCH_COMBINED_MODE', 'auto').strip().lower()
+if JOYCON_COMBINED_MODE not in ('auto', 'prefer-combined', 'split'):
+    JOYCON_COMBINED_MODE = 'auto'
 XDOTOOL = shutil.which('xdotool')
 GUIDE_SCRIPT = os.path.expanduser('~/.xui/bin/xui_global_guide.sh')
 NINTENDO_VENDOR = 0x057E
 MICROSOFT_VENDOR = 0x045E
 HYPERKIN_VENDOR = 0x2E24
+JOYCON_LEFT_PRODUCTS = {0x2006}
+JOYCON_RIGHT_PRODUCTS = {0x2007}
+JOYCON_COMBINED_PRODUCTS = {0x200E, 0x2017}
+NINTENDO_PRO_PRODUCTS = {0x2009}
 
 
 def _default_display():
@@ -6569,6 +6600,19 @@ JOYCON_RIGHT_BUTTON_MAP = {
     _c('KEY_MENU', 139): 'F1',
 }
 
+JOYCON_COMBINED_BUTTON_MAP = {
+    _c('BTN_TL', 310): 'Left',
+    _c('BTN_TR', 311): 'Right',
+    _c('BTN_TL2', 312): 'Tab',
+    _c('BTN_TR2', 313): 'Tab',
+    _c('BTN_START', 315): 'Return',
+    _c('BTN_SELECT', 314): 'Escape',
+    _c('BTN_MODE', 316): 'F1',
+    _c('KEY_HOMEPAGE', 172): 'F1',
+    _c('KEY_HOME', 102): 'F1',
+    _c('KEY_MENU', 139): 'F1',
+}
+
 XBOX360_PROFILE_MAP = {
     _c('BTN_SOUTH', 304): 'Return',
     _c('BTN_EAST', 305): 'Escape',
@@ -6637,11 +6681,22 @@ def classify_controller(dev):
     vendor, product = _vendor_product(dev)
 
     if vendor == NINTENDO_VENDOR:
-        if product == 0x2006 or 'joy-con (l)' in name:
+        if product in JOYCON_LEFT_PRODUCTS or 'joy-con (l)' in name:
             return 'joycon_l'
-        if product == 0x2007 or 'joy-con (r)' in name:
+        if product in JOYCON_RIGHT_PRODUCTS or 'joy-con (r)' in name:
             return 'joycon_r'
-        if product in (0x2009, 0x2017) or 'combined joy-cons' in name or 'joy-cons (combined)' in name:
+        if (
+            product in JOYCON_COMBINED_PRODUCTS
+            or 'combined joy-cons' in name
+            or 'joy-cons (combined)' in name
+            or 'joycon pair' in name
+            or 'left+right joy-con' in name
+            or 'left/right joy-con' in name
+        ):
+            return 'joycon_combined'
+        if product in NINTENDO_PRO_PRODUCTS or 'pro controller' in name:
+            return 'nintendo_pro'
+        if 'nintendo switch' in name or 'joy-con' in name or 'joycon' in name:
             return 'nintendo'
         return 'nintendo'
     if vendor in (MICROSOFT_VENDOR, HYPERKIN_VENDOR):
@@ -6651,7 +6706,11 @@ def classify_controller(dev):
         return 'joycon_l'
     if any(token in name for token in ('joy-con (r)', 'right joy-con', 'joycon r')):
         return 'joycon_r'
-    if any(token in name for token in ('joy-con', 'joycon', 'combined joy-cons', 'joy-cons (combined)', 'nintendo switch', 'pro controller', 'switch')):
+    if any(token in name for token in ('combined joy-cons', 'joy-cons (combined)', 'joycon pair', 'left+right joy-con', 'left/right joy-con')):
+        return 'joycon_combined'
+    if any(token in name for token in ('pro controller', 'nintendo switch pro')):
+        return 'nintendo_pro'
+    if any(token in name for token in ('joy-con', 'joycon', 'nintendo switch', 'switch')):
         return 'nintendo'
     if any(token in name for token in (
         'xbox', 'x-input', 'xinput', 'x-pad', 'xpadneo',
@@ -6721,7 +6780,7 @@ def _profile_overrides(kind):
     if profile in ('xbox360', 'xbox'):
         return dict(XBOX360_PROFILE_MAP)
     if profile in ('switch', 'nintendo'):
-        if kind in ('nintendo', 'joycon_l', 'joycon_r'):
+        if kind in ('nintendo', 'nintendo_pro', 'joycon_combined', 'joycon_l', 'joycon_r'):
             return dict(SWITCH_PROFILE_MAP)
     return {}
 
@@ -6735,6 +6794,8 @@ class ControllerBridge:
         self.axis_state = {}
         self.axis_last_emit = {}
         self.key_last_emit = {}
+        self.suppressed_paths = set()
+        self.last_suppressed_snapshot = ()
         self.last_guide_open = 0.0
 
     def _open_global_guide(self):
@@ -6757,7 +6818,7 @@ class ControllerBridge:
     def _mapping_for_kind(self, kind):
         mapping = dict(COMMON_BUTTON_MAP)
         mapping.update(TRIGGER_HAPPY_MAP)
-        if kind in ('nintendo', 'joycon_l', 'joycon_r') and NINTENDO_AB_SWAP:
+        if kind in ('nintendo', 'nintendo_pro', 'joycon_combined', 'joycon_l', 'joycon_r') and NINTENDO_AB_SWAP:
             mapping.update(NINTENDO_BUTTON_MAP)
         if kind == 'xbox':
             mapping.update(XBOX_BUTTON_MAP)
@@ -6765,11 +6826,40 @@ class ControllerBridge:
             mapping.update(JOYCON_LEFT_BUTTON_MAP)
         elif kind == 'joycon_r':
             mapping.update(JOYCON_RIGHT_BUTTON_MAP)
-        elif kind == 'nintendo':
-            mapping.update(JOYCON_LEFT_BUTTON_MAP)
-            mapping.update(JOYCON_RIGHT_BUTTON_MAP)
+        elif kind in ('joycon_combined', 'nintendo', 'nintendo_pro'):
+            mapping.update(JOYCON_COMBINED_BUTTON_MAP)
         mapping.update(_profile_overrides(kind))
         return mapping
+
+    def _refresh_joycon_combined_mode(self):
+        left_paths = sorted([p for p, k in self.device_kind.items() if k == 'joycon_l'])
+        right_paths = sorted([p for p, k in self.device_kind.items() if k == 'joycon_r'])
+        combined_paths = sorted([p for p, k in self.device_kind.items() if k in ('joycon_combined',)])
+        suppressed = set()
+        mode = JOYCON_COMBINED_MODE
+
+        if mode in ('auto', 'prefer-combined') and combined_paths:
+            suppressed.update(left_paths)
+            suppressed.update(right_paths)
+        elif mode == 'split':
+            suppressed = set()
+
+        snapshot = tuple(sorted(suppressed))
+        if snapshot != self.last_suppressed_snapshot:
+            if suppressed:
+                logging.info(
+                    'joycon source mode=%s -> using combined (%s), suppressing split devices: %s',
+                    mode,
+                    ','.join(combined_paths) if combined_paths else '<none>',
+                    ','.join(sorted(suppressed)),
+                )
+            else:
+                if combined_paths:
+                    logging.info('joycon source mode=%s -> split mode active; combined available=%s', mode, ','.join(combined_paths))
+                elif left_paths or right_paths:
+                    logging.info('joycon source mode=%s -> split mode (no virtual combined device)', mode)
+            self.last_suppressed_snapshot = snapshot
+        self.suppressed_paths = suppressed
 
     def _open_device(self, path):
         try:
@@ -6841,6 +6931,7 @@ class ControllerBridge:
                 'controller connected: %s (%s) kind=%s vid=0x%04x pid=0x%04x',
                 path, dev.name, kind, vendor, product
             )
+        self._refresh_joycon_combined_mode()
         active = set(self.devices.keys())
         self.axis_state = {k: v for k, v in self.axis_state.items() if k[0] in active}
         self.axis_last_emit = {k: v for k, v in self.axis_last_emit.items() if k[0] in active}
@@ -6870,6 +6961,8 @@ class ControllerBridge:
         return -1 if delta < 0 else 1
 
     def _handle_key(self, dev, ev):
+        if dev.path in self.suppressed_paths:
+            return
         if ev.value not in (1, 2):
             return
         if int(ev.code) in GUIDE_FALLBACK_CODES and ev.value == 1:
@@ -6893,6 +6986,8 @@ class ControllerBridge:
         self.key_last_emit[key] = now
 
     def _handle_abs(self, dev, ev):
+        if dev.path in self.suppressed_paths:
+            return
         pair = ABS_MAP.get(int(ev.code))
         if not pair:
             return
@@ -6916,10 +7011,11 @@ class ControllerBridge:
             if (now - last_scan) >= RESCAN_SEC:
                 self.scan()
                 last_scan = now
-            if not self.devices:
+            active_devices = {p: d for p, d in self.devices.items() if p not in self.suppressed_paths}
+            if not active_devices:
                 time.sleep(0.35)
                 continue
-            fd_to_dev = {dev.fd: dev for dev in self.devices.values()}
+            fd_to_dev = {dev.fd: dev for dev in active_devices.values()}
             try:
                 ready, _, _ = select.select(list(fd_to_dev.keys()), [], [], 0.35)
             except Exception:
@@ -6953,7 +7049,10 @@ if __name__ == '__main__':
         level=logging.INFO,
         format='%(asctime)s %(levelname)s %(message)s'
     )
-    logging.info('xui joy bridge starting (profile=%s, nintendo_ab_swap=%s)', JOY_PROFILE, NINTENDO_AB_SWAP)
+    logging.info(
+        'xui joy bridge starting (profile=%s, nintendo_ab_swap=%s, switch_combined_mode=%s)',
+        JOY_PROFILE, NINTENDO_AB_SWAP, JOYCON_COMBINED_MODE
+    )
     if os.environ.get('XDG_SESSION_TYPE', '').lower() == 'wayland':
         logging.warning('Wayland detected: xdotool key injection may fail; X11 session is recommended')
     logging.info('controller bridge display=%s', os.environ.get('DISPLAY', ''))
@@ -6979,7 +7078,7 @@ if [ -f "$ENV_FILE" ]; then
   # shellcheck disable=SC1090
   source "$ENV_FILE" || true
 fi
-echo "Profile: ${XUI_JOY_PROFILE:-auto} | Nintendo AB swap: ${XUI_JOY_NINTENDO_AB_SWAP:-1}"
+echo "Profile: ${XUI_JOY_PROFILE:-auto} | Nintendo AB swap: ${XUI_JOY_NINTENDO_AB_SWAP:-1} | Switch combined mode: ${XUI_JOY_SWITCH_COMBINED_MODE:-auto}"
 echo
 cat <<'TXT'
 XUI Default Controller Mapping
@@ -7013,10 +7112,16 @@ Joy-Con Right profile:
   Plus -> Enter
   Home/Mode -> F1
 
+Switch combined/acoplado:
+  auto (default): usa mando virtual combinado cuando existe y evita eventos duplicados L/R
+  prefer-combined: igual que auto, pero forzado a priorizar combinado
+  split: usa L y R por separado siempre
+
 Profiles:
   xui_controller_profile.sh auto
   xui_controller_profile.sh xbox360
   xui_controller_profile.sh switch
+  xui_controller_profile.sh switch-split
 TXT
 BASH
   chmod +x "$BIN_DIR/xui_controller_mappings.sh"
@@ -7158,6 +7263,10 @@ echo "Done. If buttons are inverted on Nintendo layout, toggle:"
 echo "  export XUI_JOY_NINTENDO_AB_SWAP=1  # Nintendo A=Enter, B=Back"
 echo "or"
 echo "  export XUI_JOY_NINTENDO_AB_SWAP=0  # Keep physical labels"
+echo "Switch combined/acoplado mode:"
+echo "  export XUI_JOY_SWITCH_COMBINED_MODE=auto            # Recommended"
+echo "  export XUI_JOY_SWITCH_COMBINED_MODE=prefer-combined # Force combined virtual pad if present"
+echo "  export XUI_JOY_SWITCH_COMBINED_MODE=split           # Use L/R independently"
 echo "Profile helper:"
 echo "  ~/.xui/bin/xui_controller_profile.sh xbox360"
 BASH
@@ -7173,9 +7282,11 @@ mkdir -p "$(dirname "$ENV_FILE")"
 write_env(){
   local p="$1"
   local swap="$2"
+  local combined_mode="$3"
   cat > "$ENV_FILE" <<EOF
 XUI_JOY_PROFILE=$p
 XUI_JOY_NINTENDO_AB_SWAP=$swap
+XUI_JOY_SWITCH_COMBINED_MODE=$combined_mode
 EOF
 }
 
@@ -7186,20 +7297,24 @@ case "$PROFILE" in
     else
       echo "XUI_JOY_PROFILE=auto"
       echo "XUI_JOY_NINTENDO_AB_SWAP=1"
+      echo "XUI_JOY_SWITCH_COMBINED_MODE=auto"
     fi
     exit 0
     ;;
   auto|default)
-    write_env auto 1
+    write_env auto 1 auto
     ;;
   xbox|xbox360)
-    write_env xbox360 1
+    write_env xbox360 1 split
     ;;
   switch|nintendo)
-    write_env switch 0
+    write_env switch 0 prefer-combined
+    ;;
+  switch-split|nintendo-split)
+    write_env switch 0 split
     ;;
   *)
-    echo "Usage: $0 {show|auto|xbox360|switch}"
+    echo "Usage: $0 {show|auto|xbox360|switch|switch-split}"
     exit 1
     ;;
 esac
@@ -7217,6 +7332,7 @@ BASH
     cat > "$DATA_DIR/controller_profile.env" <<'EOF'
 XUI_JOY_PROFILE=auto
 XUI_JOY_NINTENDO_AB_SWAP=1
+XUI_JOY_SWITCH_COMBINED_MODE=auto
 EOF
   fi
 }
@@ -11723,7 +11839,16 @@ write_backup_restore(){
 set -euo pipefail
 DST="$HOME/.xui/backups/xui-backup-$(date +%Y%m%d-%H%M%S).tar.gz"
 mkdir -p "$HOME/.xui/backups"
-tar -czf "$DST" -C "$HOME/.xui" data bin dashboard casino games assets || true
+PARTS=(data bin dashboard casino games assets)
+EXISTING=()
+for part in "${PARTS[@]}"; do
+  [ -e "$HOME/.xui/$part" ] && EXISTING+=("$part")
+done
+if [ "${#EXISTING[@]}" -eq 0 ]; then
+  echo "Nothing to backup under $HOME/.xui" >&2
+  exit 1
+fi
+tar -czf "$DST" -C "$HOME/.xui" "${EXISTING[@]}"
 echo "$DST"
 BASH
     chmod +x "$BIN_DIR/xui_backup.sh"
@@ -11733,6 +11858,9 @@ BASH
 set -euo pipefail
 ARCH=${1:-}
 if [ -z "$ARCH" ]; then echo "Usage: $0 <backup-archive>"; exit 1; fi
+[ -f "$ARCH" ] || { echo "Backup archive not found: $ARCH"; exit 1; }
+mkdir -p "$HOME/.xui"
+tar -tzf "$ARCH" >/dev/null || { echo "Invalid archive: $ARCH"; exit 1; }
 tar -xzf "$ARCH" -C "$HOME/.xui" || { echo "Restore failed"; exit 1; }
 echo "Restored from $ARCH"
 BASH
@@ -11769,11 +11897,24 @@ case ${1:-list} in
     list) ls -1 "$PROFDIR" || echo "no profiles"; ;;
     save)
         name=${2:-default}
-        tar -czf "$PROFDIR/$name.tgz" -C "$HOME/.xui" data || echo saved
+        out="$PROFDIR/$name.tgz"
+        if tar -czf "$out" -C "$HOME/.xui" data; then
+            echo "Saved profile: $out"
+        else
+            echo "Profile save failed"
+            exit 1
+        fi
         ;;
     restore)
-        file=$2
-        tar -xzf "$file" -C "$HOME/.xui" || echo restored
+        file=${2:-}
+        [ -n "$file" ] || { echo "Usage: $0 restore <file>"; exit 1; }
+        [ -f "$file" ] || { echo "Profile archive not found: $file"; exit 1; }
+        if tar -xzf "$file" -C "$HOME/.xui"; then
+            echo "Restored profile from $file"
+        else
+            echo "Profile restore failed"
+            exit 1
+        fi
         ;;
     *) echo "Usage: $0 {list|save <name>|restore <file>}"; exit 1;;
 esac
@@ -14008,10 +14149,19 @@ BASH
     # Simple HTTP server
     cat > "$BIN_DIR/xui_http_server.sh" <<'BASH'
 #!/usr/bin/env bash
+set -euo pipefail
 PORT=${1:-8000}
 DIR=${2:-$HOME}
+[ -d "$DIR" ] || { echo "Directory not found: $DIR"; exit 1; }
+case "$PORT" in
+  ''|*[!0-9]*) echo "Port must be numeric"; exit 1 ;;
+esac
+if ! command -v python3 >/dev/null 2>&1; then
+  echo "python3 not available"
+  exit 1
+fi
 cd "$DIR"
-python3 -m http.server "$PORT"
+exec python3 -m http.server "$PORT"
 BASH
     chmod +x "$BIN_DIR/xui_http_server.sh"
 
@@ -14776,16 +14926,29 @@ write_even_more_apps(){
         # Screen recorder using ffmpeg
         cat > "$BIN_DIR/xui_screenrec.sh" <<'BASH'
 #!/usr/bin/env bash
+set -euo pipefail
 OUT_DIR="$HOME/.xui/assets/records"
 mkdir -p "$OUT_DIR"
 OUT="$OUT_DIR/rec-$(date +%Y%m%d-%H%M%S).mkv"
 FPS=${1:-25}
-if command -v ffmpeg >/dev/null 2>&1; then
-    ffmpeg -video_size $(xdpyinfo | grep dimensions | awk '{print $2}') -framerate $FPS -f x11grab $DISPLAY -i ${DISPLAY:-:0} -f pulse -i default "$OUT"
-    echo "$OUT"
-else
+case "$FPS" in
+  ''|*[!0-9]*) echo "FPS must be numeric"; exit 1 ;;
+esac
+if ! command -v ffmpeg >/dev/null 2>&1; then
     echo "ffmpeg not installed"; exit 1
 fi
+if ! command -v xdpyinfo >/dev/null 2>&1; then
+    echo "xdpyinfo not installed"; exit 1
+fi
+DISPLAY_ID="${DISPLAY:-:0}"
+SIZE="$(xdpyinfo 2>/dev/null | awk '/dimensions:/{print $2; exit}')"
+[ -n "${SIZE:-}" ] || { echo "Could not determine display size"; exit 1; }
+if command -v pactl >/dev/null 2>&1 && pactl info >/dev/null 2>&1; then
+    ffmpeg -video_size "$SIZE" -framerate "$FPS" -f x11grab -i "$DISPLAY_ID" -f pulse -i default "$OUT"
+else
+    ffmpeg -video_size "$SIZE" -framerate "$FPS" -f x11grab -i "$DISPLAY_ID" "$OUT"
+fi
+echo "$OUT"
 BASH
         chmod +x "$BIN_DIR/xui_screenrec.sh"
 
@@ -14930,6 +15093,23 @@ set_cpu_max(){
     done
 }
 
+set_cpu_default_max(){
+    local cpu f max_file max_val
+    for cpu in /sys/devices/system/cpu/cpu[0-9]*; do
+        f="$cpu/cpufreq/scaling_max_freq"
+        max_file="$cpu/cpufreq/cpuinfo_max_freq"
+        [ -f "$f" ] || continue
+        [ -f "$max_file" ] || continue
+        max_val="$(cat "$max_file" 2>/dev/null || true)"
+        [ -n "$max_val" ] || continue
+        if [ -w "$f" ]; then
+            echo "$max_val" > "$f" || true
+        else
+            sudo sh -c "echo $max_val > $f" 2>/dev/null || true
+        fi
+    done
+}
+
 set_brightness_pct(){
     pct=${1:-25}
     # try brightnessctl, xbacklight, sysfs
@@ -14991,7 +15171,7 @@ case "$ACTION" in
         echo "Battery saver enabled"
         ;;
     disable)
-        set_cpu_max 0 || true
+        set_cpu_default_max || true
         set_brightness_pct 85 || true
         unmute_audio || true
         enable_net_bt || true
