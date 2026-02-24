@@ -15753,10 +15753,10 @@ XUI_HOME="$HOME/.xui"
 APP_HOME="$XUI_HOME/apps/fnae"
 DATA_FILE="$XUI_HOME/data/fnae_paths.json"
 BIN_DIR="$XUI_HOME/bin"
-LINUX_MEDIAFIRE_URL="https://www.mediafire.com/file/a4q4l09vdfqzzws/Five_Nights_At_Epsteins_Linux.tar/file"
-LINUX_MEDIAFIRE_DIRECT_URL="https://www.mediafire.com/download/a4q4l09vdfqzzws/Five_Nights_At_Epsteins_Linux.tar"
-WINDOWS_MEDIAFIRE_URL="https://www.mediafire.com/file/6tj1rd7kmsxv4oe/Five_Nights_At_Epstein%2527s.zip/file"
-WINDOWS_MEDIAFIRE_DIRECT_URL="https://www.mediafire.com/download/6tj1rd7kmsxv4oe/Five_Nights_At_Epstein%27s.zip"
+LINUX_MEDIAFIRE_URL="${XUI_FNAE_LINUX_URL:-https://www.mediafire.com/file/a4q4l09vdfqzzws/Five_Nights_At_Epsteins_Linux.tar/file}"
+LINUX_MEDIAFIRE_DIRECT_URL="${XUI_FNAE_LINUX_DIRECT_URL:-https://www.mediafire.com/download/a4q4l09vdfqzzws/Five_Nights_At_Epsteins_Linux.tar}"
+WINDOWS_MEDIAFIRE_URL="${XUI_FNAE_WINDOWS_URL:-https://www.mediafire.com/file/6tj1rd7kmsxv4oe/Five_Nights_At_Epstein%2527s.zip/file}"
+WINDOWS_MEDIAFIRE_DIRECT_URL="${XUI_FNAE_WINDOWS_DIRECT_URL:-https://www.mediafire.com/download/6tj1rd7kmsxv4oe/Five_Nights_At_Epstein%27s.zip}"
 mkdir -p "$APP_HOME/linux" "$APP_HOME/windows" "$XUI_HOME/data"
 HOST_OS="$(uname -s 2>/dev/null || echo Linux)"
 IS_LINUX=0
@@ -15901,6 +15901,86 @@ extract_mediafire_direct(){
   return 1
 }
 
+extract_mediafire_quickkey(){
+  local src="$1"
+  local key=""
+  key="$(printf '%s' "$src" | sed -n 's#.*mediafire\.com/file/\([^/?#][^/?#]*\).*#\1#p' | head -n1 || true)"
+  if [ -z "$key" ]; then
+    key="$(printf '%s' "$src" | sed -n 's#.*mediafire\.com/download/\([^/?#][^/?#]*\).*#\1#p' | head -n1 || true)"
+  fi
+  if [ -n "$key" ]; then
+    printf '%s\n' "$key"
+    return 0
+  fi
+  return 1
+}
+
+resolve_mediafire_direct_via_api(){
+  local src_url="$1"
+  local key api_url tmp_json direct
+  key="$(extract_mediafire_quickkey "$src_url" || true)"
+  [ -n "$key" ] || return 1
+  api_url="https://www.mediafire.com/api/1.5/file/get_info.php?quick_key=${key}&response_format=json"
+  tmp_json="$(mktemp)"
+  if ! fetch_url_to_file "$api_url" "$tmp_json" "$src_url"; then
+    rm -f "$tmp_json" >/dev/null 2>&1 || true
+    return 1
+  fi
+  if command -v python3 >/dev/null 2>&1; then
+    direct="$(python3 - "$tmp_json" <<'PY'
+import json
+import sys
+
+try:
+    with open(sys.argv[1], "r", encoding="utf-8", errors="ignore") as fh:
+        data = json.load(fh)
+except Exception:
+    raise SystemExit(1)
+
+resp = data.get("response") or {}
+if str(resp.get("result") or "").lower() != "success":
+    raise SystemExit(1)
+file_info = resp.get("file_info") or {}
+links = file_info.get("links") or {}
+for key in ("normal_download", "direct_download", "one_time_download"):
+    val = links.get(key)
+    if isinstance(val, str) and val.startswith("http"):
+        print(val.strip())
+        raise SystemExit(0)
+raise SystemExit(1)
+PY
+)" || true
+  else
+    direct="$(grep -Eo '"normal_download"[[:space:]]*:[[:space:]]*"[^"]+"' "$tmp_json" | head -n1 | sed -E 's/.*"([^"]+)".*/\1/' || true)"
+  fi
+  rm -f "$tmp_json" >/dev/null 2>&1 || true
+  if [ -n "$direct" ]; then
+    direct="$(printf '%s' "$direct" | sed -e 's/&amp;/\&/g' -e 's#\\/#/#g')"
+    printf '%s\n' "$direct"
+    return 0
+  fi
+  return 1
+}
+
+download_from_mediafire_api(){
+  local page_url="$1"
+  local out_file="$2"
+  local direct=""
+  direct="$(resolve_mediafire_direct_via_api "$page_url" || true)"
+  [ -n "$direct" ] || return 1
+  rm -f "$out_file" >/dev/null 2>&1 || true
+  if ! fetch_url_to_file "$direct" "$out_file" "$page_url"; then
+    rm -f "$out_file" >/dev/null 2>&1 || true
+    return 1
+  fi
+  [ -s "$out_file" ] || { rm -f "$out_file" >/dev/null 2>&1 || true; return 1; }
+  if is_html_file "$out_file"; then
+    rm -f "$out_file" >/dev/null 2>&1 || true
+    return 1
+  fi
+  return 0
+}
+
 download_from_mediafire(){
   local page_url="$1"
   local out_file="$2"
@@ -15967,33 +16047,36 @@ def fetch(url, referer=''):
     with urllib.request.urlopen(req, timeout=60, context=ctx) as r:
         return r.read()
 
-raw = fetch(page_url)
-txt = raw.decode('utf-8', 'ignore')
+try:
+    raw = fetch(page_url)
+    txt = raw.decode('utf-8', 'ignore')
 
-m = re.search(r'id=["\']downloadButton["\'][^>]*href=["\']([^"\']+)', txt, re.IGNORECASE)
-if not m:
-    m = re.search(r'https?://download[0-9]*\.mediafire\.com/[^\s"\'<>]+', txt, re.IGNORECASE)
-if not m:
-    m = re.search(r'https:\\/\\/download[0-9]*\\.mediafire\\.com\\/[^\s"\'<>]+', txt, re.IGNORECASE)
-if not m:
+    m = re.search(r'id=["\']downloadButton["\'][^>]*href=["\']([^"\']+)', txt, re.IGNORECASE)
+    if not m:
+        m = re.search(r'https?://download[0-9]*\.mediafire\.com/[^\s"\'<>]+', txt, re.IGNORECASE)
+    if not m:
+        m = re.search(r'https:\\/\\/download[0-9]*\\.mediafire\\.com\\/[^\s"\'<>]+', txt, re.IGNORECASE)
+    if not m:
+        raise SystemExit(1)
+
+    raw_direct = m.group(1) if (getattr(m, 'lastindex', 0) or 0) >= 1 else m.group(0)
+    direct = html.unescape(raw_direct).replace('\\/', '/')
+    if direct.startswith('//'):
+        direct = 'https:' + direct
+    if direct.startswith('/'):
+        direct = urllib.parse.urljoin(page_url, direct)
+
+    payload = fetch(direct, page_url)
+    head = payload[:4096].lower()
+    if b'<html' in head or b'<!doctype html' in head:
+        raise SystemExit(2)
+    if not payload:
+        raise SystemExit(3)
+
+    with open(out_file, 'wb') as fh:
+        fh.write(payload)
+except Exception:
     raise SystemExit(1)
-
-raw_direct = m.group(1) if (getattr(m, 'lastindex', 0) or 0) >= 1 else m.group(0)
-direct = html.unescape(raw_direct).replace('\\/', '/')
-if direct.startswith('//'):
-    direct = 'https:' + direct
-if direct.startswith('/'):
-    direct = urllib.parse.urljoin(page_url, direct)
-
-payload = fetch(direct, page_url)
-head = payload[:4096].lower()
-if b'<html' in head or b'<!doctype html' in head:
-    raise SystemExit(2)
-if not payload:
-    raise SystemExit(3)
-
-with open(out_file, 'wb') as fh:
-    fh.write(payload)
 raise SystemExit(0)
 PY
   return $?
@@ -16017,6 +16100,14 @@ download_mediafire_archive(){
     [ -n "$src" ] || continue
     echo "[FNAE] MediaFire parse attempt: $src"
     if download_from_mediafire "$src" "$out_file" && "$validator" "$out_file"; then
+      return 0
+    fi
+    rm -f "$out_file" >/dev/null 2>&1 || true
+  done
+  for src in "$@"; do
+    [ -n "$src" ] || continue
+    echo "[FNAE] MediaFire API attempt: $src"
+    if download_from_mediafire_api "$src" "$out_file" && "$validator" "$out_file"; then
       return 0
     fi
     rm -f "$out_file" >/dev/null 2>&1 || true
@@ -16271,6 +16362,12 @@ fi
 
 if [ "$IS_LINUX" = "1" ] && [ -z "$TAR_SRC" ]; then
   echo "FNAE Linux archive was not found or download failed."
+  if command -v getent >/dev/null 2>&1; then
+    if ! getent hosts mediafire.com >/dev/null 2>&1; then
+      echo "DNS check failed: mediafire.com is not resolvable on this system."
+      echo "Verify Network Setup / DNS and retry."
+    fi
+  fi
   echo "Required Linux URL:"
   echo "  $LINUX_MEDIAFIRE_URL"
   exit 1
