@@ -6708,6 +6708,7 @@ class Dashboard(QtWidgets.QMainWindow):
         self._mandatory_update_proc = None
         self._mandatory_update_progress = None
         self._mandatory_update_output = ''
+        self._mandatory_update_retry_scheduled = False
         self._install_task_proc = None
         self._install_task_progress = None
         self._install_task_output = ''
@@ -6888,17 +6889,36 @@ class Dashboard(QtWidgets.QMainWindow):
         QtCore.QTimer.singleShot(0, self._apply_responsive_layout)
         if not self._startup_update_checked:
             self._startup_update_checked = True
-            QtCore.QTimer.singleShot(260, self._check_mandatory_update_gate)
+            # Startup burst: detect mandatory updates immediately after dashboard appears.
+            for delay in (120, 420, 900, 1700):
+                QtCore.QTimer.singleShot(delay, self._check_mandatory_update_gate)
             self._start_mandatory_update_monitor()
 
     def _start_mandatory_update_monitor(self):
         if self._mandatory_update_timer is not None:
             return
         t = QtCore.QTimer(self)
-        t.setInterval(120000)
+        t.setInterval(30000)
         t.timeout.connect(self._check_mandatory_update_gate)
         t.start()
         self._mandatory_update_timer = t
+
+    def _queue_mandatory_update_retry(self, delay_ms=900):
+        if self._mandatory_update_retry_scheduled:
+            return
+        if self._mandatory_update_in_progress or self._mandatory_update_dialog_open:
+            return
+        try:
+            delay = int(delay_ms)
+        except Exception:
+            delay = 900
+        if delay < 180:
+            delay = 180
+        self._mandatory_update_retry_scheduled = True
+        def _retry():
+            self._mandatory_update_retry_scheduled = False
+            self._check_mandatory_update_gate()
+        QtCore.QTimer.singleShot(delay, _retry)
 
     def resizeEvent(self, e):
         super().resizeEvent(e)
@@ -7586,13 +7606,19 @@ exit 0
         if self._mandatory_update_dialog_open:
             return
         if not self.isVisible():
+            self._queue_mandatory_update_retry(1200)
             return
         if QtWidgets.QApplication.activeModalWidget() is not None:
+            # Defer while another popup is active, then retry quickly.
+            self._queue_mandatory_update_retry(900)
             return
         payload = self._mandatory_update_payload()
         if not isinstance(payload, dict):
+            self._queue_mandatory_update_retry(3000)
             return
         if not bool(payload.get('checked', False)):
+            # Network/GitHub can come up a bit later after boot; retry sooner than monitor interval.
+            self._queue_mandatory_update_retry(25000)
             return
         if not bool(payload.get('update_required', False)):
             return
@@ -7919,7 +7945,9 @@ exit 0
             return
         kiosk = XUI_HOME / 'bin' / 'xui_browser.sh'
         if kiosk.exists():
-            mode = '--normal' if bool(normal_mode) else '--kiosk'
+            # Keep browser apps useful but always fullscreen by default.
+            # Use hub mode (fullscreen + controls) unless caller explicitly asks kiosk.
+            mode = '--hub' if bool(normal_mode) else '--kiosk'
             self._run('/bin/sh', ['-c', f'"{kiosk}" {mode} "{u}"'])
             return
         self._run('/bin/sh', ['-c', f'xdg-open "{u}"'])
@@ -19618,19 +19646,26 @@ if __name__ == '__main__':
 PY
     chmod +x "$BIN_DIR/xui_webhub.py"
 
-    cat > "$BIN_DIR/xui_browser.sh" <<'BASH'
+cat > "$BIN_DIR/xui_browser.sh" <<'BASH'
 #!/usr/bin/env bash
 set -euo pipefail
 MODE=hub
 URL="https://www.xbox.com"
+FORCE_FULLSCREEN="${XUI_BROWSER_FORCE_FULLSCREEN:-1}"
 while [ $# -gt 0 ]; do
   case "${1:-}" in
     --kiosk) MODE=kiosk; shift ;;
     --hub) MODE=hub; shift ;;
     --normal) MODE=normal; shift ;;
+    --fullscreen|--full) FORCE_FULLSCREEN=1; shift ;;
+    --windowed) FORCE_FULLSCREEN=0; shift ;;
     *) URL="${1:-$URL}"; shift ;;
   esac
 done
+
+if [ "$FORCE_FULLSCREEN" = "1" ] && [ "$MODE" = "normal" ]; then
+  MODE=hub
+fi
 
 PYRUN="$HOME/.xui/bin/xui_python.sh"
 WEBHUB="$HOME/.xui/bin/xui_webhub.py"
