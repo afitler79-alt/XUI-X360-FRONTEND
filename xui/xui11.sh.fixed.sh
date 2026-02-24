@@ -26,24 +26,30 @@ run_as_root(){
         "$@"
         return $?
     fi
+    if check_cmd sudo && sudo -n true >/dev/null 2>&1; then
+        sudo -n "$@"
+        return $?
+    fi
     if [ "${XUI_NONINTERACTIVE:-0}" = "1" ] || [ ! -t 0 ]; then
-        if check_cmd pkexec; then
+        if [ "${XUI_ALLOW_NONINTERACTIVE_PKEXEC:-0}" = "1" ] && check_cmd pkexec; then
             pkexec "$@"
             return $?
         fi
-        if check_cmd sudo; then
+        warn "non-interactive root unavailable (no cached sudo); skipping: $*"
+        return 1
+    fi
+    if check_cmd sudo; then
+        sudo -v >/dev/null 2>&1 || true
+        if sudo -n true >/dev/null 2>&1; then
             sudo -n "$@"
             return $?
         fi
-    else
-        if check_cmd sudo; then
-            sudo "$@"
-            return $?
-        fi
-        if check_cmd pkexec; then
-            pkexec "$@"
-            return $?
-        fi
+        sudo "$@"
+        return $?
+    fi
+    if check_cmd pkexec; then
+        pkexec "$@"
+        return $?
     fi
     warn "root privileges unavailable; cannot run: $*"
     return 1
@@ -112,6 +118,12 @@ apt_safe_install(){
 apt_install_each_best_effort(){
     local pkg
     local failed=0
+    if [ "${XUI_NONINTERACTIVE:-0}" = "1" ] || [ ! -t 0 ]; then
+        if ! check_cmd sudo || ! sudo -n true >/dev/null 2>&1; then
+            warn "Skipping per-package apt retries to avoid repeated auth popups (cached sudo not available)"
+            return 1
+        fi
+    fi
     for pkg in "$@"; do
         if ! apt_safe_install "$pkg"; then
             warn "Failed apt package: $pkg"
@@ -435,17 +447,30 @@ fi
 BASH
     chmod +x "$BIN_DIR/xui_run_x86.sh"
 
-    cat > "$BIN_DIR/xui_install_box64.sh" <<'BASH'
+cat > "$BIN_DIR/xui_install_box64.sh" <<'BASH'
 #!/usr/bin/env bash
 set -euo pipefail
 as_root(){
   if [ "$(id -u)" -eq 0 ]; then "$@"; return $?; fi
+  if command -v sudo >/dev/null 2>&1 && sudo -n true >/dev/null 2>&1; then
+    sudo -n "$@"; return $?
+  fi
   if [ "${XUI_NONINTERACTIVE:-0}" = "1" ] || [ ! -t 0 ]; then
-    if command -v pkexec >/dev/null 2>&1; then pkexec "$@"; return $?; fi
-    if command -v sudo >/dev/null 2>&1; then sudo -n "$@"; return $?; fi
-  else
-    if command -v sudo >/dev/null 2>&1; then sudo "$@"; return $?; fi
-    if command -v pkexec >/dev/null 2>&1; then pkexec "$@"; return $?; fi
+    if [ "${XUI_ALLOW_NONINTERACTIVE_PKEXEC:-0}" = "1" ] && command -v pkexec >/dev/null 2>&1; then
+      pkexec "$@"; return $?
+    fi
+    echo "non-interactive root unavailable (no cached sudo): $*" >&2
+    return 1
+  fi
+  if command -v sudo >/dev/null 2>&1; then
+    sudo -v >/dev/null 2>&1 || true
+    if sudo -n true >/dev/null 2>&1; then
+      sudo -n "$@"; return $?
+    fi
+    sudo "$@"; return $?
+  fi
+  if command -v pkexec >/dev/null 2>&1; then
+    pkexec "$@"; return $?
   fi
   echo "root privileges unavailable: $*" >&2
   return 1
@@ -490,17 +515,30 @@ exit 1
 BASH
     chmod +x "$BIN_DIR/xui_install_box64.sh"
 
-    cat > "$BIN_DIR/xui_install_steam.sh" <<'BASH'
+cat > "$BIN_DIR/xui_install_steam.sh" <<'BASH'
 #!/usr/bin/env bash
 set -euo pipefail
 as_root(){
   if [ "$(id -u)" -eq 0 ]; then "$@"; return $?; fi
+  if command -v sudo >/dev/null 2>&1 && sudo -n true >/dev/null 2>&1; then
+    sudo -n "$@"; return $?
+  fi
   if [ "${XUI_NONINTERACTIVE:-0}" = "1" ] || [ ! -t 0 ]; then
-    if command -v pkexec >/dev/null 2>&1; then pkexec "$@"; return $?; fi
-    if command -v sudo >/dev/null 2>&1; then sudo -n "$@"; return $?; fi
-  else
-    if command -v sudo >/dev/null 2>&1; then sudo "$@"; return $?; fi
-    if command -v pkexec >/dev/null 2>&1; then pkexec "$@"; return $?; fi
+    if [ "${XUI_ALLOW_NONINTERACTIVE_PKEXEC:-0}" = "1" ] && command -v pkexec >/dev/null 2>&1; then
+      pkexec "$@"; return $?
+    fi
+    echo "non-interactive root unavailable (no cached sudo): $*" >&2
+    return 1
+  fi
+  if command -v sudo >/dev/null 2>&1; then
+    sudo -v >/dev/null 2>&1 || true
+    if sudo -n true >/dev/null 2>&1; then
+      sudo -n "$@"; return $?
+    fi
+    sudo "$@"; return $?
+  fi
+  if command -v pkexec >/dev/null 2>&1; then
+    pkexec "$@"; return $?
   fi
   echo "root privileges unavailable: $*" >&2
   return 1
@@ -653,17 +691,30 @@ exit 1
 BASH
     chmod +x "$BIN_DIR/xui_steam.sh"
 
-    cat > "$BIN_DIR/xui_install_wine.sh" <<'BASH'
+cat > "$BIN_DIR/xui_install_wine.sh" <<'BASH'
 #!/usr/bin/env bash
 set -euo pipefail
 as_root(){
   if [ "$(id -u)" -eq 0 ]; then "$@"; return $?; fi
+  if command -v sudo >/dev/null 2>&1 && sudo -n true >/dev/null 2>&1; then
+    sudo -n "$@"; return $?
+  fi
   if [ "${XUI_NONINTERACTIVE:-0}" = "1" ] || [ ! -t 0 ]; then
-    if command -v pkexec >/dev/null 2>&1; then pkexec "$@"; return $?; fi
-    if command -v sudo >/dev/null 2>&1; then sudo -n "$@"; return $?; fi
-  else
-    if command -v sudo >/dev/null 2>&1; then sudo "$@"; return $?; fi
-    if command -v pkexec >/dev/null 2>&1; then pkexec "$@"; return $?; fi
+    if [ "${XUI_ALLOW_NONINTERACTIVE_PKEXEC:-0}" = "1" ] && command -v pkexec >/dev/null 2>&1; then
+      pkexec "$@"; return $?
+    fi
+    echo "non-interactive root unavailable (no cached sudo): $*" >&2
+    return 1
+  fi
+  if command -v sudo >/dev/null 2>&1; then
+    sudo -v >/dev/null 2>&1 || true
+    if sudo -n true >/dev/null 2>&1; then
+      sudo -n "$@"; return $?
+    fi
+    sudo "$@"; return $?
+  fi
+  if command -v pkexec >/dev/null 2>&1; then
+    pkexec "$@"; return $?
   fi
   echo "root privileges unavailable: $*" >&2
   return 1
@@ -1140,6 +1191,24 @@ def play_media(path, video=False, blocking=False):
     except Exception:
         pass
     if video:
+        video_cmds = []
+        if shutil.which('ffplay'):
+            video_cmds.append(['ffplay', '-autoexit', '-fs', '-loglevel', 'quiet', str(p)])
+        if shutil.which('gst-play-1.0'):
+            video_cmds.append(['gst-play-1.0', '--no-interactive', str(p)])
+        if shutil.which('cvlc'):
+            video_cmds.append(['cvlc', '--play-and-exit', '--fullscreen', '--quiet', str(p)])
+        elif shutil.which('vlc'):
+            video_cmds.append(['vlc', '--play-and-exit', '--fullscreen', '--quiet', str(p)])
+        for cmd in video_cmds:
+            try:
+                if blocking:
+                    subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False)
+                else:
+                    subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                return True
+            except Exception:
+                continue
         return False
     fallback_cmds = []
     if shutil.which('ffplay'):
@@ -1182,18 +1251,10 @@ def ensure_audio_output_ready(min_volume=35):
 def play_startup_video():
     if os.environ.get('XUI_SKIP_STARTUP_VIDEO', '0') == '1':
         return
-    once_flag = DATA_HOME / 'startup_video_once.flag'
-    try:
-        sid = os.environ.get('XDG_SESSION_ID', '').strip() or str(os.getpid())
-        if once_flag.exists():
-            prev = once_flag.read_text(encoding='utf-8', errors='ignore').strip()
-            if prev == sid:
-                return
-        once_flag.parent.mkdir(parents=True, exist_ok=True)
-        once_flag.write_text(sid, encoding='utf-8')
-    except Exception:
-        pass
-    play_media(ASSETS / 'startup.mp4', video=True, blocking=True)
+    startup_path = ASSETS / 'startup.mp4'
+    if not startup_path.exists():
+        return
+    play_media(startup_path, video=True, blocking=True)
 
 
 def ensure_data():
@@ -3056,7 +3117,7 @@ class GreenTile(QtWidgets.QFrame):
         self.set_selected(False)
 
     def apply_scale(self, scale=1.0, compact=False):
-        s = max(0.62, float(scale))
+        s = max(0.58, float(scale))
         compact_factor = 0.88 if compact else 1.0
         if self.dense:
             compact_factor *= 0.84
@@ -3129,7 +3190,7 @@ class HeroPanel(QtWidgets.QFrame):
         self.set_selected(False)
 
     def apply_scale(self, scale=1.0, compact=False):
-        s = max(0.62, float(scale))
+        s = max(0.58, float(scale))
         compact_factor = 0.9 if compact else 1.0
         w = max(460, int(self.base_size[0] * s * compact_factor))
         h = max(220, int(self.base_size[1] * s * compact_factor))
@@ -3264,7 +3325,7 @@ class GamesShowcasePanel(QtWidgets.QFrame):
         root.addWidget(self.sub_label, 0, QtCore.Qt.AlignLeft | QtCore.Qt.AlignBottom)
 
     def apply_scale(self, scale=1.0, compact=False):
-        s = max(0.62, float(scale))
+        s = max(0.58, float(scale))
         compact_factor = 0.9 if compact else 1.0
         w = max(500, int(self.base_size[0] * s * compact_factor))
         h = max(240, int(self.base_size[1] * s * compact_factor))
@@ -5525,6 +5586,7 @@ class DashboardPage(QtWidgets.QWidget):
         self._body_layout = None
         self.left_col = None
         self.left_layout = None
+        self.center_col = None
         self.center_layout = None
         self.center_tiles_layout = None
         self.right_col = None
@@ -5583,6 +5645,7 @@ class DashboardPage(QtWidgets.QWidget):
         left.addStretch(1)
 
         center_col = QtWidgets.QWidget()
+        self.center_col = center_col
         center_col.setSizePolicy(QtWidgets.QSizePolicy.Fixed, QtWidgets.QSizePolicy.Preferred)
         center = QtWidgets.QVBoxLayout(center_col)
         self.center_layout = center
@@ -5618,7 +5681,7 @@ class DashboardPage(QtWidgets.QWidget):
                 self.center_tiles,
                 center_tiles_row,
                 QtCore.Qt.AlignVCenter,
-                tile_opts={'icon_scale': 0.78, 'text_scale': 0.88},
+                tile_opts={'dense': True, 'icon_scale': 0.72, 'text_scale': 0.84},
             )
             center_tiles_row.addStretch(1)
             center.addWidget(center_tiles_wrap, 0, alignment=QtCore.Qt.AlignHCenter | QtCore.Qt.AlignTop)
@@ -5641,20 +5704,20 @@ class DashboardPage(QtWidgets.QWidget):
         right.addStretch(1)
 
         body.addStretch(1)
-        body.addWidget(left_col, 0, alignment=QtCore.Qt.AlignVCenter)
-        body.addWidget(center_col, 0, alignment=QtCore.Qt.AlignVCenter)
-        body.addWidget(right_col, 0, alignment=QtCore.Qt.AlignVCenter)
+        body.addWidget(left_col, 0, alignment=QtCore.Qt.AlignTop)
+        body.addWidget(center_col, 0, alignment=QtCore.Qt.AlignTop)
+        body.addWidget(right_col, 0, alignment=QtCore.Qt.AlignTop)
         body.addStretch(1)
         wrap.addLayout(body, 0)
         wrap.addStretch(1)
 
-    def apply_scale(self, scale=1.0, compact=False):
-        s = max(0.62, float(scale))
+    def _apply_scale_once(self, scale=1.0, compact=False):
+        s = max(0.58, float(scale))
         compact_factor = 0.88 if compact else 1.0
-        left_w = max(116, int(220 * s * compact_factor))
-        right_w = max(98, int(170 * s * compact_factor))
-        gap = max(6, int(12 * s * compact_factor))
-        col_gap = max(4, int(7 * s * compact_factor))
+        left_w = max(112, int(220 * s * compact_factor))
+        right_w = max(96, int(170 * s * compact_factor))
+        gap = max(4, int(12 * s * compact_factor))
+        col_gap = max(3, int(7 * s * compact_factor))
         if self._body_layout is not None:
             self._body_layout.setSpacing(gap)
         if self.left_col is not None:
@@ -5666,13 +5729,42 @@ class DashboardPage(QtWidgets.QWidget):
         if self.center_layout is not None:
             self.center_layout.setSpacing(col_gap)
         if self.center_tiles_layout is not None:
-            self.center_tiles_layout.setSpacing(max(4, int(6 * s * compact_factor)))
+            self.center_tiles_layout.setSpacing(max(3, int(6 * s * compact_factor)))
         if self.right_layout is not None:
             self.right_layout.setSpacing(col_gap)
         for tile in self.left_tiles + self.center_tiles + self.right_tiles:
             tile.apply_scale(s, compact)
         if self.hero is not None:
             self.hero.apply_scale(s, compact)
+
+    def _content_size_hint(self):
+        gap = int(self._body_layout.spacing()) if self._body_layout is not None else 0
+        left_w = int(self.left_col.width()) if self.left_col is not None else 0
+        center_w = int(self.center_col.sizeHint().width()) if self.center_col is not None else 0
+        right_w = int(self.right_col.width()) if self.right_col is not None else 0
+        total_w = left_w + center_w + right_w + max(0, gap * 2)
+
+        left_h = int(self.left_col.sizeHint().height()) if self.left_col is not None else 0
+        center_h = int(self.center_col.sizeHint().height()) if self.center_col is not None else 0
+        right_h = int(self.right_col.sizeHint().height()) if self.right_col is not None else 0
+        total_h = max(left_h, center_h, right_h)
+        return total_w, total_h
+
+    def apply_scale(self, scale=1.0, compact=False):
+        base = max(0.58, float(scale))
+        fitted = base
+        for _ in range(10):
+            self._apply_scale_once(fitted, compact)
+            self.layout().activate()
+            avail_w = max(520, int(self.width()) - 8)
+            avail_h = max(300, int(self.height()) - 8)
+            need_w, need_h = self._content_size_hint()
+            if need_w <= avail_w and need_h <= avail_h:
+                break
+            nxt = max(0.58, fitted * 0.94)
+            if abs(nxt - fitted) < 0.002:
+                break
+            fitted = nxt
 
 
 class AchievementToast(QtWidgets.QFrame):
@@ -9119,7 +9211,33 @@ ASSETS_DIR="$TARGET_HOME/.xui/assets"
 DASH_SCRIPT="$TARGET_HOME/.xui/dashboard/pyqt_dashboard_improved.py"
 PY_RUNNER="$TARGET_HOME/.xui/bin/xui_python.sh"
 info(){ echo "[INFO] $*"; }
+play_video(){
+  local file="$1"
+  [ -f "$file" ] || return 1
+  if command -v mpv >/dev/null 2>&1; then
+    mpv --no-terminal --really-quiet --fullscreen "$file"; return $?
+  elif command -v ffplay >/dev/null 2>&1; then
+    ffplay -autoexit -fs -loglevel quiet "$file"; return $?
+  elif command -v gst-play-1.0 >/dev/null 2>&1; then
+    gst-play-1.0 --no-interactive "$file"; return $?
+  elif command -v cvlc >/dev/null 2>&1; then
+    cvlc --play-and-exit --fullscreen --quiet "$file"; return $?
+  elif command -v vlc >/dev/null 2>&1; then
+    vlc --play-and-exit --fullscreen --quiet "$file"; return $?
+  fi
+  return 1
+}
+PLAYED_STARTUP=0
+if [ -f "$ASSETS_DIR/startup.mp4" ]; then
+  info "Playing startup video"
+  if play_video "$ASSETS_DIR/startup.mp4"; then
+    PLAYED_STARTUP=1
+  fi
+fi
 if [ -f "$DASH_SCRIPT" ]; then
+  if [ "$PLAYED_STARTUP" = "1" ]; then
+    export XUI_SKIP_STARTUP_VIDEO=1
+  fi
   if [ -x "$PY_RUNNER" ]; then
     exec "$PY_RUNNER" "$DASH_SCRIPT"
   fi
@@ -10238,12 +10356,25 @@ BASH
 set -euo pipefail
 as_root(){
   if [ "$(id -u)" -eq 0 ]; then "$@"; return $?; fi
+  if command -v sudo >/dev/null 2>&1 && sudo -n true >/dev/null 2>&1; then
+    sudo -n "$@"; return $?
+  fi
   if [ "${XUI_NONINTERACTIVE:-0}" = "1" ] || [ ! -t 0 ]; then
-    if command -v pkexec >/dev/null 2>&1; then pkexec "$@"; return $?; fi
-    if command -v sudo >/dev/null 2>&1; then sudo -n "$@"; return $?; fi
-  else
-    if command -v sudo >/dev/null 2>&1; then sudo "$@"; return $?; fi
-    if command -v pkexec >/dev/null 2>&1; then pkexec "$@"; return $?; fi
+    if [ "${XUI_ALLOW_NONINTERACTIVE_PKEXEC:-0}" = "1" ] && command -v pkexec >/dev/null 2>&1; then
+      pkexec "$@"; return $?
+    fi
+    echo "non-interactive root unavailable (no cached sudo): $*" >&2
+    return 1
+  fi
+  if command -v sudo >/dev/null 2>&1; then
+    sudo -v >/dev/null 2>&1 || true
+    if sudo -n true >/dev/null 2>&1; then
+      sudo -n "$@"; return $?
+    fi
+    sudo "$@"; return $?
+  fi
+  if command -v pkexec >/dev/null 2>&1; then
+    pkexec "$@"; return $?
   fi
   echo "root privileges unavailable for: $*" >&2
   return 1
@@ -14978,23 +15109,25 @@ set -euo pipefail
 
 as_root(){
   if [ "$(id -u)" -eq 0 ]; then "$@"; return $?; fi
+  if command -v sudo >/dev/null 2>&1 && sudo -n true >/dev/null 2>&1; then
+    sudo -n "$@" && return 0
+  fi
   if [ "${XUI_NONINTERACTIVE:-0}" = "1" ] || [ ! -t 0 ]; then
-    if command -v pkexec >/dev/null 2>&1; then
+    if [ "${XUI_ALLOW_NONINTERACTIVE_PKEXEC:-0}" = "1" ] && command -v pkexec >/dev/null 2>&1; then
       pkexec "$@" && return 0
     fi
-    if command -v sudo >/dev/null 2>&1; then
-      sudo -n "$@" && return 0
-    fi
-    echo "non-interactive root unavailable; skipping: $*" >&2
+    echo "non-interactive root unavailable (no cached sudo); skipping: $*" >&2
     return 1
   fi
   if command -v sudo >/dev/null 2>&1; then
-    sudo "$@"
-    return $?
+    sudo -v >/dev/null 2>&1 || true
+    if sudo -n true >/dev/null 2>&1; then
+      sudo -n "$@" && return 0
+    fi
+    sudo "$@"; return $?
   fi
   if command -v pkexec >/dev/null 2>&1; then
-    pkexec "$@"
-    return $?
+    pkexec "$@"; return $?
   fi
   echo "root privileges unavailable: $*" >&2
   return 1
@@ -15002,11 +15135,13 @@ as_root(){
 
 can_noninteractive_root(){
   [ "$(id -u)" -eq 0 ] && return 0
-  if command -v pkexec >/dev/null 2>&1; then
+  if command -v sudo >/dev/null 2>&1 && sudo -n -v >/dev/null 2>&1; then
     return 0
   fi
-  command -v sudo >/dev/null 2>&1 || return 1
-  sudo -n -v >/dev/null 2>&1
+  if [ "${XUI_ALLOW_NONINTERACTIVE_PKEXEC:-0}" = "1" ] && command -v pkexec >/dev/null 2>&1; then
+    return 0
+  fi
+  return 1
 }
 
 wait_apt(){
@@ -16723,7 +16858,7 @@ if [ "${XUI_FORCE_SETUP:-0}" = "1" ] || [ ! -s "$SETUP_STATE" ]; then
     fi
 fi
 
-# Helper to play video (blocking) using mpv or ffplay
+# Helper to play video (blocking) with multiple backends
 play_video(){
     local file="$1"
     if [ ! -f "$file" ]; then return 1; fi
@@ -16732,6 +16867,15 @@ play_video(){
         return $?
     elif command -v ffplay >/dev/null 2>&1; then
         ffplay -autoexit -fs -loglevel quiet "$file"
+        return $?
+    elif command -v gst-play-1.0 >/dev/null 2>&1; then
+        gst-play-1.0 --no-interactive "$file"
+        return $?
+    elif command -v cvlc >/dev/null 2>&1; then
+        cvlc --play-and-exit --fullscreen --quiet "$file"
+        return $?
+    elif command -v vlc >/dev/null 2>&1; then
+        vlc --play-and-exit --fullscreen --quiet "$file"
         return $?
     else
         warn "No video player found for $file"
@@ -16776,9 +16920,14 @@ PY
 }
 
 # Play startup video (blocking) if present
+PLAYED_STARTUP=0
 if [ -f "$ASSETS_DIR/startup.mp4" ]; then
     info "Playing startup video"
-    play_video "$ASSETS_DIR/startup.mp4" || true
+    if play_video "$ASSETS_DIR/startup.mp4"; then
+        PLAYED_STARTUP=1
+    else
+        warn "Startup video playback failed; dashboard fallback will try again."
+    fi
 fi
 
 # Finally start the dashboard
@@ -16788,10 +16937,14 @@ if [ ! -f "$DASH_SCRIPT" ]; then
     exit 1
 fi
 if [ -x "$PY_RUNNER" ]; then
-    export XUI_SKIP_STARTUP_VIDEO=1
+    if [ "$PLAYED_STARTUP" = "1" ]; then
+        export XUI_SKIP_STARTUP_VIDEO=1
+    fi
     exec "$PY_RUNNER" "$DASH_SCRIPT"
 fi
-export XUI_SKIP_STARTUP_VIDEO=1
+if [ "$PLAYED_STARTUP" = "1" ]; then
+    export XUI_SKIP_STARTUP_VIDEO=1
+fi
 exec python3 "$DASH_SCRIPT"
 SH
 chmod +x "$BIN_DIR/xui_startup_and_dashboard.sh"
@@ -21774,12 +21927,25 @@ BASH
 set -euo pipefail
 as_root(){
   if [ "$(id -u)" -eq 0 ]; then "$@"; return $?; fi
+  if command -v sudo >/dev/null 2>&1 && sudo -n true >/dev/null 2>&1; then
+    sudo -n "$@"; return $?
+  fi
   if [ "${XUI_NONINTERACTIVE:-0}" = "1" ] || [ ! -t 0 ]; then
-    if command -v pkexec >/dev/null 2>&1; then pkexec "$@"; return $?; fi
-    if command -v sudo >/dev/null 2>&1; then sudo -n "$@"; return $?; fi
-  else
-    if command -v sudo >/dev/null 2>&1; then sudo "$@"; return $?; fi
-    if command -v pkexec >/dev/null 2>&1; then pkexec "$@"; return $?; fi
+    if [ "${XUI_ALLOW_NONINTERACTIVE_PKEXEC:-0}" = "1" ] && command -v pkexec >/dev/null 2>&1; then
+      pkexec "$@"; return $?
+    fi
+    echo "non-interactive root unavailable (no cached sudo): $*" >&2
+    return 1
+  fi
+  if command -v sudo >/dev/null 2>&1; then
+    sudo -v >/dev/null 2>&1 || true
+    if sudo -n true >/dev/null 2>&1; then
+      sudo -n "$@"; return $?
+    fi
+    sudo "$@"; return $?
+  fi
+  if command -v pkexec >/dev/null 2>&1; then
+    pkexec "$@"; return $?
   fi
   echo "root privileges unavailable: $*" >&2
   return 1
@@ -21879,12 +22045,25 @@ BASH
 set -euo pipefail
 as_root(){
   if [ "$(id -u)" -eq 0 ]; then "$@"; return $?; fi
+  if command -v sudo >/dev/null 2>&1 && sudo -n true >/dev/null 2>&1; then
+    sudo -n "$@"; return $?
+  fi
   if [ "${XUI_NONINTERACTIVE:-0}" = "1" ] || [ ! -t 0 ]; then
-    if command -v pkexec >/dev/null 2>&1; then pkexec "$@"; return $?; fi
-    if command -v sudo >/dev/null 2>&1; then sudo -n "$@"; return $?; fi
-  else
-    if command -v sudo >/dev/null 2>&1; then sudo "$@"; return $?; fi
-    if command -v pkexec >/dev/null 2>&1; then pkexec "$@"; return $?; fi
+    if [ "${XUI_ALLOW_NONINTERACTIVE_PKEXEC:-0}" = "1" ] && command -v pkexec >/dev/null 2>&1; then
+      pkexec "$@"; return $?
+    fi
+    echo "non-interactive root unavailable (no cached sudo): $*" >&2
+    return 1
+  fi
+  if command -v sudo >/dev/null 2>&1; then
+    sudo -v >/dev/null 2>&1 || true
+    if sudo -n true >/dev/null 2>&1; then
+      sudo -n "$@"; return $?
+    fi
+    sudo "$@"; return $?
+  fi
+  if command -v pkexec >/dev/null 2>&1; then
+    pkexec "$@"; return $?
   fi
   echo "root privileges unavailable: $*" >&2
   return 1
@@ -21984,12 +22163,25 @@ BASH
 set -euo pipefail
 as_root(){
   if [ "$(id -u)" -eq 0 ]; then "$@"; return $?; fi
+  if command -v sudo >/dev/null 2>&1 && sudo -n true >/dev/null 2>&1; then
+    sudo -n "$@"; return $?
+  fi
   if [ "${XUI_NONINTERACTIVE:-0}" = "1" ] || [ ! -t 0 ]; then
-    if command -v pkexec >/dev/null 2>&1; then pkexec "$@"; return $?; fi
-    if command -v sudo >/dev/null 2>&1; then sudo -n "$@"; return $?; fi
-  else
-    if command -v sudo >/dev/null 2>&1; then sudo "$@"; return $?; fi
-    if command -v pkexec >/dev/null 2>&1; then pkexec "$@"; return $?; fi
+    if [ "${XUI_ALLOW_NONINTERACTIVE_PKEXEC:-0}" = "1" ] && command -v pkexec >/dev/null 2>&1; then
+      pkexec "$@"; return $?
+    fi
+    echo "non-interactive root unavailable (no cached sudo): $*" >&2
+    return 1
+  fi
+  if command -v sudo >/dev/null 2>&1; then
+    sudo -v >/dev/null 2>&1 || true
+    if sudo -n true >/dev/null 2>&1; then
+      sudo -n "$@"; return $?
+    fi
+    sudo "$@"; return $?
+  fi
+  if command -v pkexec >/dev/null 2>&1; then
+    pkexec "$@"; return $?
   fi
   echo "root privileges unavailable: $*" >&2
   return 1
