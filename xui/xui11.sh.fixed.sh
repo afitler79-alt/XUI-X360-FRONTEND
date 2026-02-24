@@ -4685,7 +4685,7 @@ class XboxGuideMenu(QtWidgets.QDialog):
         self.setWindowFlags(QtCore.Qt.Dialog | QtCore.Qt.FramelessWindowHint)
         self.setAttribute(QtCore.Qt.WA_TranslucentBackground, True)
         self.setModal(True)
-        self.resize(1060, 560)
+        self.resize(980, 520)
         self.setStyleSheet('''
             QDialog {
                 background:rgba(8, 14, 22, 0.58);
@@ -5049,8 +5049,9 @@ class XboxGuideMenu(QtWidgets.QDialog):
         super().showEvent(e)
         parent = self.parentWidget()
         if parent is not None:
-            w = min(max(940, int(parent.width() * 0.86)), max(940, parent.width() - 34))
-            h = min(max(510, int(parent.height() * 0.72)), max(510, parent.height() - 34))
+            # Keep current guide style, but render it smaller and centered.
+            w = min(max(820, int(parent.width() * 0.74)), max(820, parent.width() - 46))
+            h = min(max(430, int(parent.height() * 0.63)), max(430, parent.height() - 46))
             self.resize(w, h)
             x = parent.x() + max(8, (parent.width() - self.width()) // 2)
             y = parent.y() + max(8, (parent.height() - self.height()) // 2)
