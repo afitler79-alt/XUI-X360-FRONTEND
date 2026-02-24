@@ -6212,6 +6212,12 @@ class Dashboard(QtWidgets.QMainWindow):
                     ('Bing Categories', 'Categories', (320, 170)),
                     ('Bing Music', 'Bing Music', (320, 205)),
                 ],
+                'center_bottom': [
+                    ('Bing Search', 'Search', (190, 114)),
+                    ('Voice Search', 'Voice', (190, 114)),
+                    ('Bing Categories', 'Categories', (190, 114)),
+                    ('Kinect Hub', 'Kinect Hub', (190, 114)),
+                ],
                 'right': [
                     ('Bing Games', 'Bing Games', (270, 130)),
                     ('Bing Apps', 'Bing Apps', (270, 130)),
@@ -6246,6 +6252,12 @@ class Dashboard(QtWidgets.QMainWindow):
                     ('Friends', 'Friends', (320, 170)),
                     ('Messages', 'Messages', (320, 170)),
                     ('LAN Chat', 'LAN Chat', (320, 205)),
+                ],
+                'center_bottom': [
+                    ('Friends', 'Friends', (190, 114)),
+                    ('Messages', 'Messages', (190, 114)),
+                    ('Party', 'Party', (190, 114)),
+                    ('LAN Chat', 'LAN Chat', (190, 114)),
                 ],
                 'right': [
                     ('Activity Feed', 'Activity Feed', (270, 130)),
@@ -6284,6 +6296,12 @@ class Dashboard(QtWidgets.QMainWindow):
                     ('Live TV', 'Live TV', (320, 170)),
                     ('System Info', 'System Info', (320, 205)),
                 ],
+                'center_bottom': [
+                    ('Media Player', 'Media Player', (190, 114)),
+                    ('Movie Trailers', 'Trailers', (190, 114)),
+                    ('Netflix', 'Netflix', (190, 114)),
+                    ('YouTube', 'YouTube', (190, 114)),
+                ],
                 'right': [
                     ('Video Marketplace', 'Video Market', (270, 130)),
                     ('Movie Trailers', 'Movie Trailers', (270, 130)),
@@ -6302,6 +6320,12 @@ class Dashboard(QtWidgets.QMainWindow):
                     ('Startup Sound', 'Startup Sound', (320, 170)),
                     ('All Audio Files', 'All Audio Files', (320, 170)),
                     ('Mute / Unmute', 'Mute / Unmute', (320, 205)),
+                ],
+                'center_bottom': [
+                    ('Music Marketplace', 'Marketplace', (190, 114)),
+                    ('Internet Radio', 'Radio', (190, 114)),
+                    ('Playlist', 'Playlist', (190, 114)),
+                    ('Visualizer', 'Visualizer', (190, 114)),
                 ],
                 'right': [
                     ('Music Marketplace', 'Music Market', (270, 130)),
@@ -6348,6 +6372,12 @@ class Dashboard(QtWidgets.QMainWindow):
                     ('Storage', 'Storage', (320, 170)),
                     ('Network Setup', 'Network Setup', (320, 170)),
                     ('Power Profile', 'Preferences', (320, 205)),
+                ],
+                'center_bottom': [
+                    ('Update Check', 'Update Check', (190, 114)),
+                    ('System Update', 'System Update', (190, 114)),
+                    ('Setup Wizard', 'Setup Wizard', (190, 114)),
+                    ('Turn Off', 'Turn Off', (190, 114)),
                 ],
                 'right': [
                     ('Account Security', 'Account', (270, 130)),
