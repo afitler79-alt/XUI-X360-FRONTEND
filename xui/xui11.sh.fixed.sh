@@ -7511,7 +7511,9 @@ class Dashboard(QtWidgets.QMainWindow):
         scr = QtWidgets.QApplication.primaryScreen()
         self._runtime_profile = detect_runtime_profile()
         self._low_power_ui = use_low_power_ui(scr)
-        self._reduced_motion = self._low_power_ui or (os.environ.get('XUI_REDUCE_MOTION', '0') == '1')
+        self._force_reduce_motion = (os.environ.get('XUI_REDUCE_MOTION', '0') == '1')
+        # Keep lightweight transitions even on low-power devices; allow hard-disable via XUI_REDUCE_MOTION=1.
+        self._reduced_motion = self._force_reduce_motion
         if scr is not None:
             g = scr.availableGeometry()
             self.resize(min(1600, g.width()), min(900, g.height()))
@@ -8011,9 +8013,11 @@ class Dashboard(QtWidgets.QMainWindow):
         from_w = self.page_stack.widget(from_idx)
         to_w = self.page_stack.widget(to_idx)
         rect = self.page_stack.rect()
-        shift = rect.width() if to_idx > from_idx else -rect.width()
-        from_end_x = -int(shift * 0.58)
-        to_start_x = int(shift * 0.42)
+        direction = 1 if to_idx > from_idx else -1
+        # Xbox-like side blade movement, but compact to keep GPU/CPU cost low.
+        travel = int(max(56, rect.width() * (0.20 if self._low_power_ui else 0.28)))
+        from_end_x = -direction * travel
+        to_start_x = direction * int(travel * (0.92 if self._low_power_ui else 1.05))
 
         for i, page in enumerate(self.pages):
             if i not in (from_idx, to_idx):
@@ -8028,19 +8032,19 @@ class Dashboard(QtWidgets.QMainWindow):
 
         self._tab_animating = True
         self._tab_anim_group = QtCore.QParallelAnimationGroup(self)
-        duration = 220 if self._low_power_ui else 320
+        duration = 155 if self._low_power_ui else 215
 
         anim_from = QtCore.QPropertyAnimation(from_w, b'pos')
         anim_from.setDuration(duration)
         anim_from.setStartValue(QtCore.QPoint(0, 0))
         anim_from.setEndValue(QtCore.QPoint(from_end_x, 0))
-        anim_from.setEasingCurve(QtCore.QEasingCurve.InOutCubic)
+        anim_from.setEasingCurve(QtCore.QEasingCurve.OutCubic)
 
         anim_to = QtCore.QPropertyAnimation(to_w, b'pos')
         anim_to.setDuration(duration)
         anim_to.setStartValue(QtCore.QPoint(to_start_x, 0))
         anim_to.setEndValue(QtCore.QPoint(0, 0))
-        anim_to.setEasingCurve(QtCore.QEasingCurve.InOutCubic)
+        anim_to.setEasingCurve(QtCore.QEasingCurve.OutCubic)
 
         self._tab_anim_group.addAnimation(anim_from)
         self._tab_anim_group.addAnimation(anim_to)
@@ -8050,19 +8054,19 @@ class Dashboard(QtWidgets.QMainWindow):
             from_fx = QtWidgets.QGraphicsOpacityEffect(from_w)
             to_fx = QtWidgets.QGraphicsOpacityEffect(to_w)
             from_fx.setOpacity(1.0)
-            to_fx.setOpacity(0.0)
+            to_fx.setOpacity(0.74)
             from_w.setGraphicsEffect(from_fx)
             to_w.setGraphicsEffect(to_fx)
 
             fade_from = QtCore.QPropertyAnimation(from_fx, b'opacity')
-            fade_from.setDuration(280)
+            fade_from.setDuration(duration)
             fade_from.setStartValue(1.0)
-            fade_from.setEndValue(0.08)
+            fade_from.setEndValue(0.84)
             fade_from.setEasingCurve(QtCore.QEasingCurve.OutCubic)
 
             fade_to = QtCore.QPropertyAnimation(to_fx, b'opacity')
-            fade_to.setDuration(300)
-            fade_to.setStartValue(0.0)
+            fade_to.setDuration(duration + 20)
+            fade_to.setStartValue(0.74)
             fade_to.setEndValue(1.0)
             fade_to.setEasingCurve(QtCore.QEasingCurve.OutCubic)
             self._tab_anim_group.addAnimation(fade_from)
@@ -8100,12 +8104,13 @@ class Dashboard(QtWidgets.QMainWindow):
             self.focus_area = 'tabs'
             self.focus_idx = 0
         if animate:
+            self.top_tabs.set_current(self.tab_idx)
             self._animate_tab_transition(old_idx, idx)
         else:
             self.page_stack.setCurrentIndex(idx)
             self._normalize_page_visibility(idx)
+            self.update_focus()
         self._play_sfx('open')
-        self.update_focus()
 
     def update_focus(self):
         self.top_tabs.set_current(self.tab_idx)
