@@ -7532,6 +7532,30 @@ exit 0
                 if isinstance(payload_after, dict):
                     if bool(payload_after.get('checked', False)) and not bool(payload_after.get('update_required', True)):
                         ok = True
+                if not ok:
+                    lower_out = out.lower()
+                    success_hits = 0
+                    for marker in (
+                        'finalizing installation',
+                        'installation complete',
+                        'attempted to enable user services',
+                        'configured passwordless sudo for xui actions',
+                    ):
+                        if marker in lower_out:
+                            success_hits += 1
+                    if success_hits >= 2:
+                        fatal_markers = (
+                            'sudo authentication failed',
+                            'cannot reach github metadata',
+                            'installer failed with code',
+                            'permission denied',
+                            'permiso denegado',
+                            'traceback (most recent call last)',
+                            'no space left on device',
+                            'command not found',
+                        )
+                        if not any(m in lower_out for m in fatal_markers):
+                            ok = True
         if ok:
             dlg = self._mandatory_update_progress
             if dlg is not None and hasattr(dlg, 'finish_ok'):
@@ -18213,6 +18237,9 @@ compute_status(){
   local checked=0 required=0 reason="unknown"
   local local_commit=""
   local_commit="$(read_state_commit)"
+  if [ -z "$local_commit" ] && [ -d "$SRC/.git" ]; then
+    local_commit="$(git -C "$SRC" rev-parse HEAD 2>/dev/null || true)"
+  fi
 
   line="$(remote_meta_line)"
   IFS=$'\t' read -r status branch remote_commit remote_date remote_url extra <<<"$line"
@@ -18220,7 +18247,7 @@ compute_status(){
     checked=0
     required=0
     reason="remote-unavailable:${extra:-unknown}"
-    branch="${branch:-main}"
+    branch="main"
     remote_commit=""
     remote_date=""
     remote_url=""
@@ -18400,36 +18427,51 @@ apply_update(){
 
   echo "step=installer-start"
   local installer_rc=0
+  local installer_log=""
+  local installer_soft_ok=0
   local installer_started_epoch
   installer_started_epoch="$(date +%s)"
+  installer_log="$(mktemp /tmp/xui-installer-log.XXXXXX 2>/dev/null || true)"
+  run_installer_once(){
+    if [ "${XUI_AUTH_MODE:-}" = "pkexec" ]; then
+      (
+        cd "$SRC"
+        if command -v timeout >/dev/null 2>&1; then
+          pkexec env AUTO_CONFIRM=1 XUI_SKIP_LAUNCH_PROMPT=1 XUI_NONINTERACTIVE=1 XUI_SYSTEMCTL_TIMEOUT_SEC="${XUI_SYSTEMCTL_TIMEOUT_SEC:-15}" \
+            timeout "${XUI_APPLY_INSTALLER_TIMEOUT_SEC:-900}" bash "$installer" --no-auto-install --skip-apt-wait
+        else
+          pkexec env AUTO_CONFIRM=1 XUI_SKIP_LAUNCH_PROMPT=1 XUI_NONINTERACTIVE=1 XUI_SYSTEMCTL_TIMEOUT_SEC="${XUI_SYSTEMCTL_TIMEOUT_SEC:-15}" \
+            bash "$installer" --no-auto-install --skip-apt-wait
+        fi
+      )
+    else
+      (
+        cd "$SRC"
+        if command -v timeout >/dev/null 2>&1; then
+          AUTO_CONFIRM=1 XUI_SKIP_LAUNCH_PROMPT=1 XUI_NONINTERACTIVE=1 XUI_SYSTEMCTL_TIMEOUT_SEC="${XUI_SYSTEMCTL_TIMEOUT_SEC:-15}" \
+            timeout "${XUI_APPLY_INSTALLER_TIMEOUT_SEC:-900}" bash "$installer" --no-auto-install --skip-apt-wait
+        else
+          AUTO_CONFIRM=1 XUI_SKIP_LAUNCH_PROMPT=1 XUI_NONINTERACTIVE=1 XUI_SYSTEMCTL_TIMEOUT_SEC="${XUI_SYSTEMCTL_TIMEOUT_SEC:-15}" \
+            bash "$installer" --no-auto-install --skip-apt-wait
+        fi
+      )
+    fi
+  }
   set +e
-  if [ "${XUI_AUTH_MODE:-}" = "pkexec" ]; then
-    (
-      cd "$SRC"
-      if command -v timeout >/dev/null 2>&1; then
-        pkexec env AUTO_CONFIRM=1 XUI_SKIP_LAUNCH_PROMPT=1 XUI_NONINTERACTIVE=1 XUI_SYSTEMCTL_TIMEOUT_SEC="${XUI_SYSTEMCTL_TIMEOUT_SEC:-15}" \
-          timeout "${XUI_APPLY_INSTALLER_TIMEOUT_SEC:-900}" bash "$installer" --no-auto-install --skip-apt-wait
-      else
-        pkexec env AUTO_CONFIRM=1 XUI_SKIP_LAUNCH_PROMPT=1 XUI_NONINTERACTIVE=1 XUI_SYSTEMCTL_TIMEOUT_SEC="${XUI_SYSTEMCTL_TIMEOUT_SEC:-15}" \
-          bash "$installer" --no-auto-install --skip-apt-wait
-      fi
-    )
-    installer_rc=$?
+  if [ -n "${installer_log:-}" ] && command -v tee >/dev/null 2>&1; then
+    run_installer_once 2>&1 | tee "$installer_log"
+    installer_rc=${PIPESTATUS[0]}
   else
-    (
-      cd "$SRC"
-      if command -v timeout >/dev/null 2>&1; then
-        AUTO_CONFIRM=1 XUI_SKIP_LAUNCH_PROMPT=1 XUI_NONINTERACTIVE=1 XUI_SYSTEMCTL_TIMEOUT_SEC="${XUI_SYSTEMCTL_TIMEOUT_SEC:-15}" \
-          timeout "${XUI_APPLY_INSTALLER_TIMEOUT_SEC:-900}" bash "$installer" --no-auto-install --skip-apt-wait
-      else
-        AUTO_CONFIRM=1 XUI_SKIP_LAUNCH_PROMPT=1 XUI_NONINTERACTIVE=1 XUI_SYSTEMCTL_TIMEOUT_SEC="${XUI_SYSTEMCTL_TIMEOUT_SEC:-15}" \
-          bash "$installer" --no-auto-install --skip-apt-wait
-      fi
-    )
+    run_installer_once
     installer_rc=$?
   fi
   set -e
   echo "step=installer-done"
+  if [ -n "${installer_log:-}" ] && [ -f "$installer_log" ]; then
+    if grep -qiE 'Finalizing installation|Installation complete|Attempted to enable user services|state-updated|step=installer-done' "$installer_log" 2>/dev/null; then
+      installer_soft_ok=1
+    fi
+  fi
   if [ "$installer_rc" -ne 0 ]; then
     echo "warning=installer-exit-$installer_rc"
     local dash_file marker_file checker_file
@@ -18441,11 +18483,17 @@ apply_update(){
     marker_mtime="$(stat -c %Y "$marker_file" 2>/dev/null || echo 0)"
     checker_mtime="$(stat -c %Y "$checker_file" 2>/dev/null || echo 0)"
     if [ "$dash_mtime" -lt "$installer_started_epoch" ] && [ "$marker_mtime" -lt "$installer_started_epoch" ] && [ "$checker_mtime" -lt "$installer_started_epoch" ]; then
-      echo "Installer failed with code $installer_rc and no updated core artifacts were detected."
-      exit "$installer_rc"
+      if [ "$installer_soft_ok" -ne 1 ]; then
+        echo "Installer failed with code $installer_rc and no updated core artifacts were detected."
+        [ -n "${installer_log:-}" ] && rm -f "$installer_log" >/dev/null 2>&1 || true
+        exit "$installer_rc"
+      fi
+      echo "warning=installer-soft-success-log-detected"
+    else
+      echo "warning=installer-soft-success-core-files-detected"
     fi
-    echo "warning=installer-soft-success-core-files-detected"
   fi
+  [ -n "${installer_log:-}" ] && rm -f "$installer_log" >/dev/null 2>&1 || true
 
   # Ensure dashboard service stays enabled after updates.
   if command -v systemctl >/dev/null 2>&1; then
@@ -18474,8 +18522,12 @@ apply_update(){
   if [ -z "$installed_commit" ]; then
     installed_commit="$remote_commit"
   fi
-  write_state "$installed_commit" "$branch" "$remote_date" "$SRC" >/dev/null
-  echo "step=state-written"
+  if write_state "$installed_commit" "$branch" "$remote_date" "$SRC" >/dev/null 2>&1; then
+    echo "step=state-written"
+  else
+    echo "warning=state-write-failed"
+    echo "step=state-write-skipped"
+  fi
   echo "update-applied"
   echo "installed_commit=$installed_commit"
   if [ "${XUI_AUTH_MODE:-}" = "sudo" ]; then
