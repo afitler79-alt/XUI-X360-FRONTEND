@@ -5519,12 +5519,14 @@ class DashboardPage(QtWidgets.QWidget):
         self.name = name
         self.spec = spec
         self.left_tiles = []
+        self.center_tiles = []
         self.right_tiles = []
         self.hero = None
         self._body_layout = None
         self.left_col = None
         self.left_layout = None
         self.center_layout = None
+        self.center_tiles_layout = None
         self.right_col = None
         self.right_layout = None
         self._build()
@@ -5586,6 +5588,7 @@ class DashboardPage(QtWidgets.QWidget):
         self.center_layout = center
         center.setContentsMargins(0, 0, 0, 0)
         center.setSpacing(6)
+        center.addStretch(1)
         hero_variant = str(self.spec.get('hero_variant', 'default')).strip().lower()
         if hero_variant == 'games':
             self.hero = GamesShowcasePanel(
@@ -5600,7 +5603,25 @@ class DashboardPage(QtWidgets.QWidget):
                 self.spec.get('hero_subtitle', 'featured'),
             )
         self.hero.clicked.connect(self.actionTriggered.emit)
-        center.addWidget(self.hero, 0, alignment=QtCore.Qt.AlignLeft | QtCore.Qt.AlignTop)
+        center.addWidget(self.hero, 0, alignment=QtCore.Qt.AlignHCenter | QtCore.Qt.AlignTop)
+
+        center_bottom_defs = self.spec.get('center_bottom', [])
+        if center_bottom_defs:
+            center_tiles_wrap = QtWidgets.QWidget()
+            center_tiles_row = QtWidgets.QHBoxLayout(center_tiles_wrap)
+            self.center_tiles_layout = center_tiles_row
+            center_tiles_row.setContentsMargins(0, 0, 0, 0)
+            center_tiles_row.setSpacing(6)
+            center_tiles_row.addStretch(1)
+            self._build_tiles(
+                center_bottom_defs,
+                self.center_tiles,
+                center_tiles_row,
+                QtCore.Qt.AlignVCenter,
+                tile_opts={'icon_scale': 0.78, 'text_scale': 0.88},
+            )
+            center_tiles_row.addStretch(1)
+            center.addWidget(center_tiles_wrap, 0, alignment=QtCore.Qt.AlignHCenter | QtCore.Qt.AlignTop)
         center.addStretch(1)
 
         right_col = QtWidgets.QWidget()
@@ -5620,9 +5641,9 @@ class DashboardPage(QtWidgets.QWidget):
         right.addStretch(1)
 
         body.addStretch(1)
-        body.addWidget(left_col, 0, alignment=QtCore.Qt.AlignTop)
-        body.addWidget(center_col, 0, alignment=QtCore.Qt.AlignTop)
-        body.addWidget(right_col, 0, alignment=QtCore.Qt.AlignTop)
+        body.addWidget(left_col, 0, alignment=QtCore.Qt.AlignVCenter)
+        body.addWidget(center_col, 0, alignment=QtCore.Qt.AlignVCenter)
+        body.addWidget(right_col, 0, alignment=QtCore.Qt.AlignVCenter)
         body.addStretch(1)
         wrap.addLayout(body, 0)
         wrap.addStretch(1)
@@ -5644,9 +5665,11 @@ class DashboardPage(QtWidgets.QWidget):
             self.left_layout.setSpacing(col_gap)
         if self.center_layout is not None:
             self.center_layout.setSpacing(col_gap)
+        if self.center_tiles_layout is not None:
+            self.center_tiles_layout.setSpacing(max(4, int(6 * s * compact_factor)))
         if self.right_layout is not None:
             self.right_layout.setSpacing(col_gap)
-        for tile in self.left_tiles + self.right_tiles:
+        for tile in self.left_tiles + self.center_tiles + self.right_tiles:
             tile.apply_scale(s, compact)
         if self.hero is not None:
             self.hero.apply_scale(s, compact)
@@ -6300,6 +6323,12 @@ class Dashboard(QtWidgets.QMainWindow):
                     ('Web Control', 'Web Control', (320, 170)),
                     ('Utilities', 'Utilities', (320, 205)),
                 ],
+                'center_bottom': [
+                    ('App Launcher', 'App Launcher', (190, 114)),
+                    ('File Manager', 'File Manager', (190, 114)),
+                    ('Terminal', 'Terminal', (190, 114)),
+                    ('Virtual Keyboard', 'Keyboard', (190, 114)),
+                ],
                 'right': [
                     ('Downloads', 'Downloads', (270, 130)),
                     ('Avatar Editor', 'Avatar Editor', (270, 130)),
@@ -6407,7 +6436,7 @@ class Dashboard(QtWidgets.QMainWindow):
             if action and action not in seen:
                 seen.add(action)
                 out.append(action)
-        for group in ('left', 'right'):
+        for group in ('left', 'center_bottom', 'right'):
             for action, _text, _size in spec.get(group, []):
                 if action and action not in seen:
                     seen.add(action)
@@ -6683,6 +6712,7 @@ class Dashboard(QtWidgets.QMainWindow):
         tab_name = self.tabs[self.tab_idx]
         page = self._current_page()
         self.desc.setText(self.page_specs.get(tab_name, {}).get('hint', f'{tab_name}: use arrows and Enter'))
+        center_count = max(1, 1 + len(page.center_tiles))
 
         if self.focus_area == 'left':
             if page.left_tiles:
@@ -6696,14 +6726,18 @@ class Dashboard(QtWidgets.QMainWindow):
             else:
                 self.focus_area = 'center'
                 self.focus_idx = 0
+        elif self.focus_area == 'center':
+            self.focus_idx = max(0, min(self.focus_idx, center_count - 1))
         else:
             self.focus_idx = 0
 
         for i, t in enumerate(page.left_tiles):
             t.set_selected(self.focus_area == 'left' and self.focus_idx == i)
+        for i, t in enumerate(page.center_tiles):
+            t.set_selected(self.focus_area == 'center' and self.focus_idx == (i + 1))
         for i, t in enumerate(page.right_tiles):
             t.set_selected(self.focus_area == 'right' and self.focus_idx == i)
-        page.hero.set_selected(self.focus_area == 'center')
+        page.hero.set_selected(self.focus_area == 'center' and self.focus_idx == 0)
 
         cur = (self.tab_idx, self.focus_area, self.focus_idx)
         if self._last_focus_state is None:
@@ -8831,6 +8865,10 @@ exit 0
                 self.update_focus()
                 return
             if self.focus_area == 'center':
+                if self.focus_idx > 0:
+                    self.focus_idx = 0
+                    self.update_focus()
+                    return
                 self.focus_area = 'tabs'
                 self.focus_idx = 0
                 self.update_focus()
@@ -8852,11 +8890,20 @@ exit 0
                 self._switch_tab(self.tab_idx - 1, animate=True, keep_tabs_focus=True)
                 return
             elif self.focus_area == 'center':
-                if page.left_tiles:
+                if self.focus_idx > 1 and page.center_tiles:
+                    self.focus_idx = max(1, self.focus_idx - 1)
+                elif self.focus_idx == 1 and page.left_tiles:
+                    self.focus_area = 'left'
+                    self.focus_idx = 0
+                elif self.focus_idx == 0 and page.left_tiles:
                     self.focus_area = 'left'
                     self.focus_idx = min(self.focus_idx, len(page.left_tiles) - 1)
             elif self.focus_area == 'right':
                 self.focus_area = 'center'
+                if page.center_tiles:
+                    self.focus_idx = len(page.center_tiles)
+                else:
+                    self.focus_idx = 0
             self.update_focus(); return
         if k == QtCore.Qt.Key_Right:
             if self.focus_area == 'tabs':
@@ -8864,20 +8911,30 @@ exit 0
                 return
             elif self.focus_area == 'left':
                 self.focus_area = 'center'
+                self.focus_idx = 1 if page.center_tiles else 0
             elif self.focus_area == 'center':
-                if page.right_tiles:
+                if self.focus_idx > 0 and self.focus_idx < len(page.center_tiles):
+                    self.focus_idx += 1
+                elif page.right_tiles:
                     self.focus_area = 'right'
-                    self.focus_idx = min(self.focus_idx, len(page.right_tiles) - 1)
+                    self.focus_idx = min(max(0, self.focus_idx - 1), len(page.right_tiles) - 1)
             self.update_focus(); return
         if k == QtCore.Qt.Key_Up:
             if self.focus_area in ('left', 'right'):
                 self.focus_idx = max(0, self.focus_idx - 1)
             elif self.focus_area == 'center':
-                self.focus_area = 'tabs'
+                if self.focus_idx > 0:
+                    self.focus_idx = 0
+                else:
+                    self.focus_area = 'tabs'
             self.update_focus(); return
         if k == QtCore.Qt.Key_Down:
             if self.focus_area == 'tabs':
                 self.focus_area = 'center'
+                self.focus_idx = 0
+            elif self.focus_area == 'center':
+                if self.focus_idx == 0 and page.center_tiles:
+                    self.focus_idx = 1
             elif self.focus_area == 'left':
                 self.focus_idx = min(len(page.left_tiles)-1, self.focus_idx + 1) if page.left_tiles else 0
             elif self.focus_area == 'right':
@@ -8901,7 +8958,11 @@ exit 0
                 self._play_sfx('select')
                 self.update_focus()
             elif self.focus_area == 'center':
-                self.handle_action(page.hero.action)
+                if self.focus_idx <= 0:
+                    self.handle_action(page.hero.action)
+                elif page.center_tiles:
+                    idx = max(0, min(self.focus_idx - 1, len(page.center_tiles) - 1))
+                    self.handle_action(page.center_tiles[idx].action)
             elif self.focus_area == 'left':
                 if page.left_tiles:
                     self.handle_action(page.left_tiles[self.focus_idx].action)
