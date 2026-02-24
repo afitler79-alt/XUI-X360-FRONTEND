@@ -2198,6 +2198,36 @@ class SocialOverlay(QtWidgets.QDialog):
         else:
             self.btn_send.setFocus(QtCore.Qt.OtherFocusReason)
 
+    def _show_notice(self, title, text):
+        host = self.parentWidget()
+        if host is not None and hasattr(host, '_msg'):
+            try:
+                host._msg(title, text)
+                return
+            except Exception:
+                pass
+        d = GuidePromptDialog(
+            str(title or 'Notice'),
+            str(text or ''),
+            ['OK'],
+            self,
+            default_choice='OK',
+            cancel_choice='OK',
+        )
+        d.exec_()
+
+    def _pick_from_menu(self, title, options, descriptions=None):
+        host = self.parentWidget()
+        if host is not None and hasattr(host, '_choose_from_menu'):
+            try:
+                return host._choose_from_menu(title, options, descriptions or {})
+            except Exception:
+                pass
+        d = QuickMenu(str(title or 'Menu'), list(options or []), descriptions or {}, self)
+        if d.exec_() == QtWidgets.QDialog.Accepted:
+            return d.selected()
+        return None
+
     def _move_in_list(self, listw, delta):
         n = int(listw.count())
         if n <= 0:
@@ -2565,7 +2595,7 @@ class SocialOverlay(QtWidgets.QDialog):
     def _send_friend_request(self):
         peer = self._selected_peer()
         if not peer or str(peer.get('source')) == 'WORLD':
-            QtWidgets.QMessageBox.information(self, 'Friend Request', 'Select a LAN/P2P peer first.')
+            self._show_notice('Friend Request', 'Select a LAN/P2P peer first.')
             return
         candidates = self._send_candidates(peer)
         err = None
@@ -2585,7 +2615,7 @@ class SocialOverlay(QtWidgets.QDialog):
 
     def _open_friend_requests(self):
         if not self.friend_requests:
-            QtWidgets.QMessageBox.information(self, 'Friend Requests', 'No pending requests.')
+            self._show_notice('Friend Requests', 'No pending requests.')
             return
         options = []
         descriptions = {}
@@ -2598,7 +2628,7 @@ class SocialOverlay(QtWidgets.QDialog):
             options.append(op)
             descriptions[op] = f'{host}:{port}' + (f' | {note}' if note else '')
         options.append('Back')
-        pick = self.parent()._choose_from_menu('Friend Requests', options, descriptions) if self.parent() else None
+        pick = self._pick_from_menu('Friend Requests', options, descriptions)
         if not pick or pick == 'Back':
             return
         try:
@@ -2608,7 +2638,7 @@ class SocialOverlay(QtWidgets.QDialog):
         if idx < 0 or idx >= len(self.friend_requests):
             return
         req = self.friend_requests[idx]
-        ask = self.parent()._choose_from_menu(
+        ask = self._pick_from_menu(
             'Friend Request',
             ['Accept', 'Reject', 'Cancel'],
             {
@@ -2616,7 +2646,7 @@ class SocialOverlay(QtWidgets.QDialog):
                 'Reject': f"Reject request from {req.get('name','Unknown')}.",
                 'Cancel': 'Go back.',
             },
-        ) if self.parent() else None
+        )
         if not ask or ask == 'Cancel':
             return
         if ask == 'Accept':
@@ -2766,7 +2796,7 @@ class SocialOverlay(QtWidgets.QDialog):
             return
         parsed = parse_peer_id(d.textValue())
         if not parsed:
-            QtWidgets.QMessageBox.warning(self, 'Invalid peer', 'Use alias@host:port or host:port')
+            self._show_notice('Invalid peer', 'Use alias@host:port or host:port')
             return
         self._upsert_peer(parsed, persist=True)
         self._append_system(f"Manual peer added: {parsed['host']}:{parsed['port']}")
@@ -2778,11 +2808,11 @@ class SocialOverlay(QtWidgets.QDialog):
             lines += ['', 'Warning: chat TCP server is not active on this dashboard.']
         if ips and all(str(ip).startswith('10.0.2.') for ip in ips):
             lines += ['', 'VirtualBox NAT detected (10.0.2.x only).', 'Use Bridged or Host-Only Adapter for VM-to-VM LAN chat.']
-        QtWidgets.QMessageBox.information(self, 'My Peer IDs', '\n'.join(lines))
+        self._show_notice('My Peer IDs', '\n'.join(lines))
 
     def _show_lan_status(self):
         out = subprocess.getoutput('ip -brief -4 addr 2>/dev/null || ip -4 addr show 2>/dev/null || true')
-        QtWidgets.QMessageBox.information(self, 'LAN Status', out or 'No network data.')
+        self._show_notice('LAN Status', out or 'No network data.')
 
     def _open_voice_call_hub(self):
         script = XUI_HOME / 'bin' / 'xui_social_chat.py'
@@ -2876,7 +2906,7 @@ class SocialOverlay(QtWidgets.QDialog):
     def _send_current(self):
         peer = self._selected_peer()
         if not peer:
-            QtWidgets.QMessageBox.information(self, 'Peer required', 'Select a peer first.')
+            self._show_notice('Peer required', 'Select a peer first.')
             return
         txt = self.input.text().strip()
         if not txt:
@@ -2986,6 +3016,11 @@ class SocialOverlay(QtWidgets.QDialog):
     def closeEvent(self, e):
         try:
             self.timer.stop()
+        except Exception:
+            pass
+        try:
+            if self._gp_timer is not None:
+                self._gp_timer.stop()
         except Exception:
             pass
         self._stop_call_session(notify=False)
@@ -3976,6 +4011,171 @@ class MandatoryUpdateDialog(QtWidgets.QDialog):
             self.reject()
             return
         if e.key() in (QtCore.Qt.Key_Return, QtCore.Qt.Key_Enter):
+            self._accept_current()
+            return
+        super().keyPressEvent(e)
+
+
+class GuidePromptDialog(QtWidgets.QDialog):
+    def __init__(self, title, text, options=None, parent=None, default_choice='', cancel_choice=''):
+        super().__init__(parent)
+        opts = [str(x).strip() for x in (options or []) if str(x).strip()]
+        if not opts:
+            opts = ['OK']
+        self._options = opts
+        self._choice = str(default_choice or opts[0]).strip() or opts[0]
+        if self._choice not in self._options:
+            self._choice = self._options[0]
+        self._cancel_choice = str(cancel_choice or '').strip()
+        if self._cancel_choice not in self._options:
+            if 'No' in self._options:
+                self._cancel_choice = 'No'
+            elif 'Cancel' in self._options:
+                self._cancel_choice = 'Cancel'
+            else:
+                self._cancel_choice = self._options[-1]
+        self._open_anim = None
+        self.setWindowTitle(str(title or 'Menu'))
+        self.setWindowFlags(QtCore.Qt.Dialog | QtCore.Qt.FramelessWindowHint)
+        self.setAttribute(QtCore.Qt.WA_TranslucentBackground, True)
+        self.setModal(True)
+        self.resize(860, 520)
+        self.setStyleSheet('''
+            QFrame#prompt_panel {
+                background:#d7dce1;
+                border:2px solid rgba(239,244,248,0.78);
+                border-radius:4px;
+            }
+            QFrame#prompt_header {
+                background:qlineargradient(x1:0,y1:0,x2:1,y2:0, stop:0 #68717a, stop:1 #505860);
+                border:none;
+            }
+            QLabel#prompt_header_title {
+                color:#edf2f6;
+                font-size:31px;
+                font-weight:800;
+            }
+            QLabel#prompt_body_txt {
+                color:#1f2730;
+                font-size:25px;
+                font-weight:650;
+            }
+            QListWidget#prompt_choices {
+                background:#e4e8ec;
+                color:#1f252c;
+                font-size:32px;
+                border:1px solid rgba(76,86,96,0.4);
+                outline:none;
+            }
+            QListWidget#prompt_choices::item {
+                padding:7px 12px;
+                margin:1px 0px;
+            }
+            QListWidget#prompt_choices::item:selected {
+                background:qlineargradient(x1:0,y1:0,x2:1,y2:0, stop:0 #5abc3e, stop:1 #3e9132);
+                color:#f4fff1;
+                border:1px solid rgba(249,255,248,0.4);
+            }
+            QLabel#prompt_hint {
+                color:#1f252c;
+                font-size:17px;
+                font-weight:800;
+            }
+        ''')
+        outer = QtWidgets.QVBoxLayout(self)
+        outer.setContentsMargins(0, 0, 0, 0)
+        panel = QtWidgets.QFrame()
+        panel.setObjectName('prompt_panel')
+        outer.addWidget(panel)
+        root = QtWidgets.QVBoxLayout(panel)
+        root.setContentsMargins(0, 0, 0, 0)
+        root.setSpacing(0)
+
+        header = QtWidgets.QFrame()
+        header.setObjectName('prompt_header')
+        h_l = QtWidgets.QHBoxLayout(header)
+        h_l.setContentsMargins(12, 9, 12, 9)
+        title_lbl = QtWidgets.QLabel(str(title or 'Menu'))
+        title_lbl.setObjectName('prompt_header_title')
+        h_l.addWidget(title_lbl, 1)
+        root.addWidget(header, 0)
+
+        body = QtWidgets.QWidget()
+        b_l = QtWidgets.QVBoxLayout(body)
+        b_l.setContentsMargins(16, 14, 16, 12)
+        b_l.setSpacing(10)
+        msg = QtWidgets.QLabel(str(text or ''))
+        msg.setObjectName('prompt_body_txt')
+        msg.setWordWrap(True)
+        b_l.addWidget(msg, 1)
+        self.choices = QtWidgets.QListWidget()
+        self.choices.setObjectName('prompt_choices')
+        self.choices.addItems(self._options)
+        idx = self._options.index(self._choice) if self._choice in self._options else 0
+        self.choices.setCurrentRow(max(0, idx))
+        self.choices.itemActivated.connect(self._accept_current)
+        b_l.addWidget(self.choices, 0)
+        hint = QtWidgets.QLabel('A/ENTER = Select | B/ESC = Back')
+        hint.setObjectName('prompt_hint')
+        b_l.addWidget(hint, 0)
+        root.addWidget(body, 1)
+
+    def selected_choice(self):
+        return str(self._choice or '')
+
+    def _accept_current(self, *_):
+        it = self.choices.currentItem()
+        if it is not None:
+            self._choice = str(it.text()).strip() or self._choice
+        self.accept()
+
+    def showEvent(self, e):
+        super().showEvent(e)
+        parent = self.parentWidget()
+        if parent is not None:
+            w = min(max(760, int(parent.width() * 0.62)), max(760, parent.width() - 110))
+            h = min(max(460, int(parent.height() * 0.62)), max(460, parent.height() - 110))
+            self.resize(w, h)
+            x = parent.x() + (parent.width() - w) // 2
+            y = parent.y() + (parent.height() - h) // 2
+            self.move(max(0, x), max(0, y))
+        self._animate_open()
+
+    def _animate_open(self):
+        effect = QtWidgets.QGraphicsOpacityEffect(self)
+        self.setGraphicsEffect(effect)
+        effect.setOpacity(0.0)
+        end_rect = self.geometry()
+        start_rect = QtCore.QRect(
+            end_rect.x() + max(18, end_rect.width() // 24),
+            end_rect.y(),
+            end_rect.width(),
+            end_rect.height(),
+        )
+        self.setGeometry(start_rect)
+        self._open_anim = QtCore.QParallelAnimationGroup(self)
+        fade = QtCore.QPropertyAnimation(effect, b'opacity', self)
+        fade.setDuration(170)
+        fade.setStartValue(0.0)
+        fade.setEndValue(1.0)
+        fade.setEasingCurve(QtCore.QEasingCurve.OutCubic)
+        slide = QtCore.QPropertyAnimation(self, b'geometry', self)
+        slide.setDuration(210)
+        slide.setStartValue(start_rect)
+        slide.setEndValue(end_rect)
+        slide.setEasingCurve(QtCore.QEasingCurve.OutCubic)
+        self._open_anim.addAnimation(fade)
+        self._open_anim.addAnimation(slide)
+        self._open_anim.finished.connect(lambda: self.setGraphicsEffect(None))
+        self._open_anim.start(QtCore.QAbstractAnimation.DeleteWhenStopped)
+
+    def keyPressEvent(self, e):
+        k = e.key()
+        if k in (QtCore.Qt.Key_Escape, QtCore.Qt.Key_Back):
+            self._choice = self._cancel_choice
+            self.reject()
+            return
+        if k in (QtCore.Qt.Key_Return, QtCore.Qt.Key_Enter):
             self._accept_current()
             return
         super().keyPressEvent(e)
@@ -6171,11 +6371,9 @@ class AchievementsHubDialog(QtWidgets.QDialog):
         score = int(row.get('score', 0) or 0)
         unlocked = bool(row.get('unlocked', False))
         state = 'Desbloqueado' if unlocked else 'Bloqueado'
-        QtWidgets.QMessageBox.information(
-            self,
-            title,
-            f'{desc}\n\nEstado: {state}\nGamerscore: {score}G'
-        )
+        detail_txt = f'{desc}\n\nEstado: {state}\nGamerscore: {score}G'
+        dlg = GuidePromptDialog(title, detail_txt, ['OK'], self, default_choice='OK', cancel_choice='OK')
+        dlg.exec_()
 
     def reload(self):
         try:
@@ -7796,21 +7994,62 @@ exit 0
         self._play_sfx('close')
 
     def _popup_message(self, title, text, icon, buttons, default_button=None):
-        box = QtWidgets.QMessageBox(self)
-        box.setWindowTitle(title)
-        box.setText(str(text))
-        box.setIcon(icon)
-        box.setStandardButtons(buttons)
-        if default_button is not None:
-            box.setDefaultButton(default_button)
-        esc_btn = (
-            box.button(QtWidgets.QMessageBox.Cancel)
-            or box.button(QtWidgets.QMessageBox.No)
-            or box.button(QtWidgets.QMessageBox.Ok)
+        flag_names = [
+            (QtWidgets.QMessageBox.Yes, 'Yes'),
+            (QtWidgets.QMessageBox.No, 'No'),
+            (QtWidgets.QMessageBox.Ok, 'OK'),
+            (QtWidgets.QMessageBox.Cancel, 'Cancel'),
+            (QtWidgets.QMessageBox.Retry, 'Retry'),
+            (QtWidgets.QMessageBox.Abort, 'Abort'),
+            (QtWidgets.QMessageBox.Ignore, 'Ignore'),
+            (QtWidgets.QMessageBox.Close, 'Close'),
+        ]
+        options = []
+        try:
+            mask = int(buttons)
+        except Exception:
+            mask = int(QtWidgets.QMessageBox.Ok)
+        for flag, label in flag_names:
+            try:
+                if mask & int(flag):
+                    options.append(label)
+            except Exception:
+                continue
+        if not options:
+            options = ['OK']
+
+        def _flag_to_label(flag):
+            for f, lbl in flag_names:
+                try:
+                    if int(flag) == int(f):
+                        return lbl
+                except Exception:
+                    continue
+            return ''
+
+        default_label = _flag_to_label(default_button) if default_button is not None else ''
+        if default_label not in options:
+            if 'No' in options:
+                default_label = 'No'
+            elif options:
+                default_label = options[0]
+            else:
+                default_label = 'OK'
+        cancel_label = 'No' if 'No' in options else ('Cancel' if 'Cancel' in options else options[-1])
+        dlg = GuidePromptDialog(
+            str(title or ''),
+            str(text or ''),
+            options,
+            self,
+            default_choice=default_label,
+            cancel_choice=cancel_label,
         )
-        if esc_btn is not None:
-            box.setEscapeButton(esc_btn)
-        return box.exec_()
+        rc = dlg.exec_()
+        choice = dlg.selected_choice()
+        if rc != QtWidgets.QDialog.Accepted and not choice:
+            choice = cancel_label
+        label_to_flag = {lbl: flag for flag, lbl in flag_names}
+        return int(label_to_flag.get(choice, QtWidgets.QMessageBox.Ok))
 
     def _ask_yes_no(self, title, text):
         self._play_sfx('open')
@@ -11084,6 +11323,14 @@ import urllib.request
 import uuid
 from pathlib import Path
 from PyQt5 import QtCore, QtGui, QtWidgets
+try:
+    from PyQt5 import QtGamepad
+except Exception:
+    QtGamepad = None
+try:
+    from PyQt5 import QtGamepad
+except Exception:
+    QtGamepad = None
 
 sys.path.insert(0, str(Path.home() / '.xui' / 'bin'))
 from xui_game_lib import get_balance, change_balance, ensure_wallet, complete_mission, unlock_for_event
@@ -12058,11 +12305,72 @@ class RunnerGame(QtWidgets.QWidget):
         if m.get('completed'):
             bal = m.get('balance', bal)
             extra = f"\nMission reward: +{float(m.get('reward', 0)):.2f}"
-        QtWidgets.QMessageBox.information(
-            self,
-            'Runner',
-            f'Game Over\nScore: {self.score}\nReward: +{reward} credits{extra}\nBalance: EUR {bal:.2f}',
+        dlg = QtWidgets.QDialog(self)
+        dlg.setWindowTitle('Runner')
+        dlg.setWindowFlags(QtCore.Qt.Dialog | QtCore.Qt.FramelessWindowHint)
+        dlg.setModal(True)
+        dlg.resize(760, 440)
+        dlg.setStyleSheet('''
+            QDialog { background:#d7dce1; border:2px solid rgba(239,244,248,0.78); }
+            QLabel#title {
+                color:#eef4f8;
+                background:qlineargradient(x1:0,y1:0,x2:1,y2:0, stop:0 #69717a, stop:1 #505860);
+                font-size:30px;
+                font-weight:800;
+                padding:8px 12px;
+            }
+            QLabel#body { color:#1f2730; font-size:23px; font-weight:650; }
+            QListWidget {
+                background:#e4e8ec;
+                color:#1f252c;
+                font-size:30px;
+                border:1px solid rgba(76,86,96,0.4);
+                outline:none;
+            }
+            QListWidget::item {
+                padding:7px 12px;
+                margin:1px 0px;
+            }
+            QListWidget::item:selected {
+                background:qlineargradient(x1:0,y1:0,x2:1,y2:0, stop:0 #5abc3e, stop:1 #3e9132);
+                color:#f4fff1;
+                border:1px solid rgba(249,255,248,0.4);
+            }
+        ''')
+        lay = QtWidgets.QVBoxLayout(dlg)
+        lay.setContentsMargins(0, 0, 0, 0)
+        lay.setSpacing(0)
+        hdr = QtWidgets.QLabel('Runner')
+        hdr.setObjectName('title')
+        lay.addWidget(hdr, 0)
+        body = QtWidgets.QWidget()
+        bl = QtWidgets.QVBoxLayout(body)
+        bl.setContentsMargins(16, 14, 16, 12)
+        bl.setSpacing(10)
+        txt = QtWidgets.QLabel(
+            f'Game Over\nScore: {self.score}\nReward: +{reward} credits{extra}\nBalance: EUR {bal:.2f}'
         )
+        txt.setObjectName('body')
+        txt.setWordWrap(True)
+        bl.addWidget(txt, 1)
+        lw = QtWidgets.QListWidget()
+        lw.addItem('OK')
+        lw.setCurrentRow(0)
+        lw.itemActivated.connect(lambda *_: dlg.accept())
+        bl.addWidget(lw, 0)
+        lay.addWidget(body, 1)
+
+        def _key(ev):
+            if ev.key() in (QtCore.Qt.Key_Return, QtCore.Qt.Key_Enter, QtCore.Qt.Key_A):
+                dlg.accept()
+                return
+            if ev.key() in (QtCore.Qt.Key_Escape, QtCore.Qt.Key_Back, QtCore.Qt.Key_B):
+                dlg.reject()
+                return
+            QtWidgets.QDialog.keyPressEvent(dlg, ev)
+
+        dlg.keyPressEvent = _key
+        dlg.exec_()
         self.close()
 
     def keyPressEvent(self, e):
@@ -12996,6 +13304,121 @@ class VirtualKeyboardDialog(QtWidgets.QDialog):
         return self.line.text().strip()
 
 
+class StoreMenuDialog(QtWidgets.QDialog):
+    def __init__(self, title, text, options=None, parent=None, default_choice='', cancel_choice=''):
+        super().__init__(parent)
+        opts = [str(x).strip() for x in (options or []) if str(x).strip()]
+        if not opts:
+            opts = ['OK']
+        self._options = opts
+        self._choice = str(default_choice or opts[0]).strip() or opts[0]
+        if self._choice not in self._options:
+            self._choice = self._options[0]
+        self._cancel_choice = str(cancel_choice or '').strip()
+        if self._cancel_choice not in self._options:
+            self._cancel_choice = 'Cancel' if 'Cancel' in self._options else self._options[-1]
+        self.setWindowTitle(str(title or 'Menu'))
+        self.setWindowFlags(QtCore.Qt.Dialog | QtCore.Qt.FramelessWindowHint)
+        self.setModal(True)
+        self.resize(860, 520)
+        self.setStyleSheet('''
+            QDialog { background:#d7dce1; border:2px solid rgba(239,244,248,0.78); }
+            QLabel#title {
+                color:#eef4f8;
+                background:qlineargradient(x1:0,y1:0,x2:1,y2:0, stop:0 #69717a, stop:1 #505860);
+                font-size:28px;
+                font-weight:800;
+                padding:8px 12px;
+            }
+            QLabel#body {
+                color:#1f2730;
+                font-size:22px;
+                font-weight:650;
+            }
+            QListWidget#choices {
+                background:#e4e8ec;
+                color:#1f252c;
+                font-size:31px;
+                border:1px solid rgba(76,86,96,0.4);
+                outline:none;
+            }
+            QListWidget#choices::item {
+                padding:7px 10px;
+                margin:1px 0px;
+            }
+            QListWidget#choices::item:selected {
+                background:qlineargradient(x1:0,y1:0,x2:1,y2:0, stop:0 #5abc3e, stop:1 #3e9132);
+                color:#f4fff1;
+                border:1px solid rgba(249,255,248,0.4);
+            }
+            QLabel#hint {
+                color:#1f252c;
+                font-size:16px;
+                font-weight:800;
+            }
+        ''')
+        root = QtWidgets.QVBoxLayout(self)
+        root.setContentsMargins(0, 0, 0, 0)
+        root.setSpacing(0)
+        lbl_title = QtWidgets.QLabel(str(title or 'Menu'))
+        lbl_title.setObjectName('title')
+        root.addWidget(lbl_title, 0)
+        body = QtWidgets.QWidget()
+        lay = QtWidgets.QVBoxLayout(body)
+        lay.setContentsMargins(16, 14, 16, 12)
+        lay.setSpacing(10)
+        self.body_lbl = QtWidgets.QLabel(str(text or ''))
+        self.body_lbl.setObjectName('body')
+        self.body_lbl.setWordWrap(True)
+        lay.addWidget(self.body_lbl, 1)
+        self.listw = QtWidgets.QListWidget()
+        self.listw.setObjectName('choices')
+        self.listw.addItems(self._options)
+        idx = self._options.index(self._choice) if self._choice in self._options else 0
+        self.listw.setCurrentRow(max(0, idx))
+        self.listw.itemActivated.connect(self._accept_current)
+        lay.addWidget(self.listw, 0)
+        hint = QtWidgets.QLabel('A/ENTER = Select | B/ESC = Back')
+        hint.setObjectName('hint')
+        lay.addWidget(hint, 0)
+        root.addWidget(body, 1)
+
+    def showEvent(self, e):
+        super().showEvent(e)
+        parent = self.parentWidget()
+        if parent is not None:
+            w = min(max(760, int(parent.width() * 0.62)), max(760, parent.width() - 120))
+            h = min(max(440, int(parent.height() * 0.62)), max(440, parent.height() - 120))
+            self.resize(w, h)
+            x = parent.x() + (parent.width() - w) // 2
+            y = parent.y() + (parent.height() - h) // 2
+            self.move(max(0, x), max(0, y))
+
+    def selected_choice(self):
+        return str(self._choice or '')
+
+    def _accept_current(self, *_):
+        it = self.listw.currentItem()
+        if it is not None:
+            self._choice = str(it.text()).strip() or self._choice
+        self.accept()
+
+    def keyPressEvent(self, e):
+        k = e.key()
+        if k in (QtCore.Qt.Key_Escape, QtCore.Qt.Key_Back):
+            self._choice = self._cancel_choice
+            self.reject()
+            return
+        if k in (QtCore.Qt.Key_Return, QtCore.Qt.Key_Enter, QtCore.Qt.Key_A):
+            self._accept_current()
+            return
+        if k in (QtCore.Qt.Key_B,):
+            self._choice = self._cancel_choice
+            self.reject()
+            return
+        super().keyPressEvent(e)
+
+
 class StoreInstallProgressDialog(QtWidgets.QDialog):
     def __init__(self, app_title='App', parent=None):
         super().__init__(parent)
@@ -13667,6 +14090,47 @@ class StoreWindow(QtWidgets.QMainWindow):
         self.search_text = str(text or '')
         self._refresh_tiles()
 
+    def _menu_notice(self, title, text):
+        d = StoreMenuDialog(
+            str(title or 'Info'),
+            str(text or ''),
+            ['OK'],
+            self,
+            default_choice='OK',
+            cancel_choice='OK',
+        )
+        d.exec_()
+
+    def _menu_pick(self, title, options, descriptions=None, default_choice=''):
+        opts = [str(x).strip() for x in (options or []) if str(x).strip()]
+        if not opts:
+            return None
+        descriptions = descriptions or {}
+        detail = str(descriptions.get(default_choice, '') or '').strip()
+        d = StoreMenuDialog(
+            str(title or 'Menu'),
+            detail or 'Select an option.',
+            opts,
+            self,
+            default_choice=str(default_choice or opts[0]),
+            cancel_choice='Close' if 'Close' in opts else opts[-1],
+        )
+        if d.exec_() == QtWidgets.QDialog.Accepted:
+            return d.selected_choice()
+        return None
+
+    def _cycle_category(self, step=1):
+        order = list(self.FILTER_MAP.keys())
+        if not order:
+            return
+        try:
+            cur = order.index(self.category)
+        except Exception:
+            cur = 0
+        nxt = (cur + int(step)) % len(order)
+        self.set_category(order[nxt])
+        self.info_lbl.setText(f'Category: {self.category}')
+
     def _search_input_active(self):
         try:
             return bool(self.search is not None and self.search.hasFocus())
@@ -13947,15 +14411,37 @@ class StoreWindow(QtWidgets.QMainWindow):
     def show_inventory(self):
         inv = self.inventory.get('items', [])
         if not inv:
-            QtWidgets.QMessageBox.information(self, 'Inventory', 'No purchased items.')
+            self._menu_notice('Inventory', 'No purchased items.')
             return
-        lines = []
+        options = []
+        descriptions = {}
         for i, x in enumerate(inv[:400], 1):
-            lines.append(
-                f"{i}. {x.get('name', 'Item')} [{x.get('category', 'Apps')}] "
-                f"(EUR {float(x.get('price', 0)):.2f})"
-            )
-        QtWidgets.QMessageBox.information(self, 'Inventory', '\n'.join(lines))
+            name = str(x.get('name', 'Item'))
+            category = str(x.get('category', 'Apps'))
+            iid = str(x.get('id', '')).strip()
+            price = float(x.get('price', 0) or 0)
+            label = f'{i:02d}. {name}'
+            options.append(label)
+            desc = f'{category} | EUR {price:.2f}'
+            if iid:
+                desc += f' | ID: {iid}'
+            descriptions[label] = desc
+        options.append('Close')
+        pick = self._menu_pick('Inventory', options, descriptions, default_choice=options[0] if options else '')
+        if not pick or pick == 'Close':
+            return
+        try:
+            idx = int(str(pick).split('.', 1)[0]) - 1
+        except Exception:
+            idx = -1
+        if idx < 0 or idx >= len(inv):
+            return
+        iid = str(inv[idx].get('id', '')).strip()
+        if not iid:
+            return
+        self.selected_item_id = iid
+        self._apply_selection()
+        self._scroll_to_selected()
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
@@ -14010,6 +14496,12 @@ class StoreWindow(QtWidgets.QMainWindow):
         k = e.key()
         if k in (QtCore.Qt.Key_Escape, QtCore.Qt.Key_Back):
             self.close()
+            return
+        if k in (QtCore.Qt.Key_PageUp, QtCore.Qt.Key_Backtab):
+            self._cycle_category(-1)
+            return
+        if k in (QtCore.Qt.Key_PageDown,):
+            self._cycle_category(1)
             return
         if k == QtCore.Qt.Key_F2:
             self.open_virtual_keyboard()
@@ -14070,7 +14562,7 @@ class StoreWindow(QtWidgets.QMainWindow):
             self._gamepad_timer = QtCore.QTimer(self)
             self._gamepad_timer.timeout.connect(self._poll_gamepad)
             self._gamepad_timer.start(70)
-            self.info_lbl.setText('Controller connected: A=Launch X=Buy Y=Inventory B=Back F2=Keyboard.')
+            self.info_lbl.setText('Controller: A=Launch X=Buy Y=Inventory B=Back LB/RB=Category START=Keyboard.')
         except Exception:
             self._gamepad = None
 
@@ -14096,11 +14588,13 @@ class StoreWindow(QtWidgets.QMainWindow):
         b = bool(self._gp_read('buttonB', False))
         x = bool(self._gp_read('buttonX', False))
         y = bool(self._gp_read('buttonY', False))
+        lb = bool(self._gp_read('buttonL1', False)) or bool(self._gp_read('buttonLeftShoulder', False))
+        rb = bool(self._gp_read('buttonR1', False)) or bool(self._gp_read('buttonRightShoulder', False))
         start = bool(self._gp_read('buttonStart', False))
 
         curr = {
             'left': left, 'right': right, 'up': up, 'down': down,
-            'a': a, 'b': b, 'x': x, 'y': y, 'start': start,
+            'a': a, 'b': b, 'x': x, 'y': y, 'lb': lb, 'rb': rb, 'start': start,
         }
 
         def pressed(key):
@@ -14123,6 +14617,10 @@ class StoreWindow(QtWidgets.QMainWindow):
             self.buy_selected()
         elif pressed('y'):
             self.show_inventory()
+        elif pressed('lb'):
+            self._cycle_category(-1)
+        elif pressed('rb'):
+            self._cycle_category(1)
         elif pressed('start'):
             self.open_virtual_keyboard()
         elif pressed('b'):
@@ -16517,13 +17015,84 @@ class XboxSetup(QtWidgets.QDialog):
         self.btn_next.setVisible(idx < last)
         self.btn_finish.setVisible(idx == last)
 
+    def _warn(self, title, text):
+        d = QtWidgets.QDialog(self)
+        d.setWindowTitle(str(title or 'Warning'))
+        d.setWindowFlags(QtCore.Qt.Dialog | QtCore.Qt.FramelessWindowHint)
+        d.setModal(True)
+        d.resize(760, 420)
+        d.setStyleSheet('''
+            QDialog { background:#d7dce1; border:2px solid rgba(239,244,248,0.78); }
+            QLabel#title {
+                color:#eef4f8;
+                background:qlineargradient(x1:0,y1:0,x2:1,y2:0, stop:0 #69717a, stop:1 #505860);
+                font-size:28px;
+                font-weight:800;
+                padding:8px 12px;
+            }
+            QLabel#body { color:#1f2730; font-size:22px; font-weight:650; }
+            QListWidget {
+                background:#e4e8ec;
+                color:#1f252c;
+                font-size:29px;
+                border:1px solid rgba(76,86,96,0.4);
+                outline:none;
+            }
+            QListWidget::item {
+                padding:7px 12px;
+                margin:1px 0px;
+            }
+            QListWidget::item:selected {
+                background:qlineargradient(x1:0,y1:0,x2:1,y2:0, stop:0 #5abc3e, stop:1 #3e9132);
+                color:#f4fff1;
+                border:1px solid rgba(249,255,248,0.4);
+            }
+            QLabel#hint { color:#1f252c; font-size:16px; font-weight:800; }
+        ''')
+        lay = QtWidgets.QVBoxLayout(d)
+        lay.setContentsMargins(0, 0, 0, 0)
+        lay.setSpacing(0)
+        hdr = QtWidgets.QLabel(str(title or 'Warning'))
+        hdr.setObjectName('title')
+        lay.addWidget(hdr, 0)
+        body = QtWidgets.QWidget()
+        bl = QtWidgets.QVBoxLayout(body)
+        bl.setContentsMargins(16, 14, 16, 12)
+        bl.setSpacing(10)
+        self.body_lbl = QtWidgets.QLabel(str(text or ''))
+        self.body_lbl.setObjectName('body')
+        self.body_lbl.setWordWrap(True)
+        bl.addWidget(self.body_lbl, 1)
+        lw = QtWidgets.QListWidget()
+        lw.addItem('OK')
+        lw.setCurrentRow(0)
+        lw.itemActivated.connect(lambda *_: d.accept())
+        bl.addWidget(lw, 0)
+        hint = QtWidgets.QLabel('A/ENTER = Select | B/ESC = Back')
+        hint.setObjectName('hint')
+        bl.addWidget(hint, 0)
+        lay.addWidget(body, 1)
+
+        def _key(ev):
+            k = ev.key()
+            if k in (QtCore.Qt.Key_Escape, QtCore.Qt.Key_Back, QtCore.Qt.Key_B):
+                d.reject()
+                return
+            if k in (QtCore.Qt.Key_Return, QtCore.Qt.Key_Enter, QtCore.Qt.Key_A):
+                d.accept()
+                return
+            QtWidgets.QDialog.keyPressEvent(d, ev)
+
+        d.keyPressEvent = _key
+        d.exec_()
+
     def _go_back(self):
         self.stack.setCurrentIndex(max(0, self.stack.currentIndex() - 1))
         self._sync_buttons()
 
     def _go_next(self):
         if self.stack.currentIndex() == 1 and not self._valid_gamertag():
-            QtWidgets.QMessageBox.warning(self, 'Gamertag', 'Use 3-15 chars: letters, numbers, space, _ or -')
+            self._warn('Gamertag', 'Use 3-15 chars: letters, numbers, space, _ or -')
             return
         self.stack.setCurrentIndex(min(self.stack.count() - 1, self.stack.currentIndex() + 1))
         self._sync_buttons()
@@ -16534,7 +17103,7 @@ class XboxSetup(QtWidgets.QDialog):
 
     def _finish(self):
         if not self._valid_gamertag():
-            QtWidgets.QMessageBox.warning(self, 'Gamertag', 'Use 3-15 chars: letters, numbers, space, _ or -')
+            self._warn('Gamertag', 'Use 3-15 chars: letters, numbers, space, _ or -')
             self.stack.setCurrentIndex(1)
             self._sync_buttons()
             return
@@ -17691,12 +18260,56 @@ apply_update(){
     exit 1
   fi
 
+  echo "step=sudo-auth"
+  if ! require_sudo_ticket; then
+    echo "sudo authentication failed or cancelled."
+    exit 1
+  fi
+  if [ "${XUI_AUTH_MODE:-}" = "sudo" ]; then
+    start_sudo_keepalive || true
+    trap stop_sudo_keepalive EXIT
+  fi
+
+  fix_src_permissions(){
+    local target="$1"
+    [ -e "$target" ] || return 0
+    if [ -w "$target" ] && { [ ! -d "$target/.git" ] || [ -w "$target/.git" ]; }; then
+      return 0
+    fi
+    echo "Fixing source permissions: $target"
+    if [ "${XUI_AUTH_MODE:-}" = "sudo" ]; then
+      sudo -n chown -R "$(id -u):$(id -g)" "$target" >/dev/null 2>&1 || true
+    elif [ "${XUI_AUTH_MODE:-}" = "pkexec" ]; then
+      pkexec /bin/sh -c 'chown -R "$1:$2" "$3"' sh "$(id -u)" "$(id -g)" "$target" >/dev/null 2>&1 || true
+    fi
+  }
+
+  remove_path_safe(){
+    local target="$1"
+    [ -e "$target" ] || return 0
+    rm -rf "$target" >/dev/null 2>&1 && return 0
+    fix_src_permissions "$target"
+    rm -rf "$target" >/dev/null 2>&1 && return 0
+    if [ "${XUI_AUTH_MODE:-}" = "sudo" ]; then
+      sudo -n rm -rf "$target" >/dev/null 2>&1 && return 0
+    elif [ "${XUI_AUTH_MODE:-}" = "pkexec" ]; then
+      pkexec /bin/sh -c 'rm -rf "$1"' sh "$target" >/dev/null 2>&1 && return 0
+    elif [ "${XUI_AUTH_MODE:-}" = "root" ]; then
+      rm -rf "$target" >/dev/null 2>&1 && return 0
+    fi
+    return 1
+  }
+
   clone_fresh_repo(){
     local tmp="${SRC}.tmp.$$"
-    rm -rf "$tmp"
+    remove_path_safe "$tmp" || true
     git clone "https://github.com/$REPO.git" "$tmp"
-    rm -rf "$SRC"
+    if ! remove_path_safe "$SRC"; then
+      echo "Cannot replace source dir due permissions: $SRC"
+      return 1
+    fi
     mv "$tmp" "$SRC"
+    fix_src_permissions "$SRC" || true
   }
 
   mkdir -p "$(dirname "$SRC")"
@@ -17770,16 +18383,6 @@ apply_update(){
   if [ -z "$installer" ]; then
     echo "Installer not found in repo: $SRC"
     exit 1
-  fi
-
-  echo "step=sudo-auth"
-  if ! require_sudo_ticket; then
-    echo "sudo authentication failed or cancelled."
-    exit 1
-  fi
-  if [ "${XUI_AUTH_MODE:-}" = "sudo" ]; then
-    start_sudo_keepalive || true
-    trap stop_sudo_keepalive EXIT
   fi
 
   echo "step=installer-start"
@@ -18337,6 +18940,81 @@ class WebHub(QtWidgets.QMainWindow):
                 out.append(f'{i:02d}. {item}')
         return '\n'.join(out)
 
+    def _menu_message(self, title, text):
+        d = QtWidgets.QDialog(self)
+        d.setWindowTitle(str(title or 'Info'))
+        d.setWindowFlags(QtCore.Qt.Dialog | QtCore.Qt.FramelessWindowHint)
+        d.setModal(True)
+        d.resize(840, 500)
+        d.setStyleSheet('''
+            QDialog { background:#d7dce1; border:2px solid rgba(239,244,248,0.78); }
+            QLabel#title {
+                color:#eef4f8;
+                background:qlineargradient(x1:0,y1:0,x2:1,y2:0, stop:0 #69717a, stop:1 #505860);
+                font-size:28px;
+                font-weight:800;
+                padding:8px 12px;
+            }
+            QLabel#body {
+                color:#1f2730;
+                font-size:22px;
+                font-weight:650;
+            }
+            QListWidget {
+                background:#e4e8ec;
+                color:#1f252c;
+                font-size:30px;
+                border:1px solid rgba(76,86,96,0.4);
+                outline:none;
+            }
+            QListWidget::item {
+                padding:7px 12px;
+                margin:1px 0px;
+            }
+            QListWidget::item:selected {
+                background:qlineargradient(x1:0,y1:0,x2:1,y2:0, stop:0 #5abc3e, stop:1 #3e9132);
+                color:#f4fff1;
+                border:1px solid rgba(249,255,248,0.4);
+            }
+            QLabel#hint { color:#1f252c; font-size:16px; font-weight:800; }
+        ''')
+        lay = QtWidgets.QVBoxLayout(d)
+        lay.setContentsMargins(0, 0, 0, 0)
+        lay.setSpacing(0)
+        hdr = QtWidgets.QLabel(str(title or 'Info'))
+        hdr.setObjectName('title')
+        lay.addWidget(hdr, 0)
+        body = QtWidgets.QWidget()
+        bl = QtWidgets.QVBoxLayout(body)
+        bl.setContentsMargins(16, 14, 16, 12)
+        bl.setSpacing(10)
+        txt = QtWidgets.QLabel(str(text or ''))
+        txt.setObjectName('body')
+        txt.setWordWrap(True)
+        bl.addWidget(txt, 1)
+        lw = QtWidgets.QListWidget()
+        lw.addItem('OK')
+        lw.setCurrentRow(0)
+        lw.itemActivated.connect(lambda *_: d.accept())
+        bl.addWidget(lw, 0)
+        hint = QtWidgets.QLabel('A/ENTER = Select | B/ESC = Back')
+        hint.setObjectName('hint')
+        bl.addWidget(hint, 0)
+        lay.addWidget(body, 1)
+
+        def _key(ev):
+            k = ev.key()
+            if k in (QtCore.Qt.Key_Escape, QtCore.Qt.Key_Back, QtCore.Qt.Key_B):
+                d.reject()
+                return
+            if k in (QtCore.Qt.Key_Return, QtCore.Qt.Key_Enter, QtCore.Qt.Key_A):
+                d.accept()
+                return
+            QtWidgets.QDialog.keyPressEvent(d, ev)
+
+        d.keyPressEvent = _key
+        d.exec_()
+
     def _show_guide(self):
         opts = [
             'Recent Messages',
@@ -18369,13 +19047,13 @@ class WebHub(QtWidgets.QMainWindow):
         elif choice == 'Virtual Keyboard':
             self._open_virtual_keyboard_contextual()
         elif choice == 'Recent Messages':
-            QtWidgets.QMessageBox.information(self, 'Recent Messages', self._recent_messages_text())
+            self._menu_message('Recent Messages', self._recent_messages_text())
         elif choice == 'Recent Web':
             rec = safe_read(RECENT_FILE, [])
             if not isinstance(rec, list) or not rec:
-                QtWidgets.QMessageBox.information(self, 'Recent Web', 'No recent web activity.')
+                self._menu_message('Recent Web', 'No recent web activity.')
             else:
-                QtWidgets.QMessageBox.information(self, 'Recent Web', '\n'.join(str(x) for x in rec[:20]))
+                self._menu_message('Recent Web', '\n'.join(str(x) for x in rec[:20]))
 
     def _setup_gamepad(self):
         if QtGamepad is None:
@@ -19049,10 +19727,109 @@ def _downloads_text():
     return 'No se detectan descargas activas.'
 
 
+class TextPromptDialog(QtWidgets.QDialog):
+    def __init__(self, title, label, text='', parent=None):
+        super().__init__(parent)
+        self._accepted = False
+        self.setWindowTitle(str(title or 'Input'))
+        self.setWindowFlags(QtCore.Qt.Dialog | QtCore.Qt.FramelessWindowHint)
+        self.setModal(True)
+        self.resize(860, 460)
+        self.setStyleSheet('''
+            QDialog { background:#d7dce1; border:2px solid rgba(239,244,248,0.78); }
+            QLabel#title {
+                color:#eef4f8;
+                background:qlineargradient(x1:0,y1:0,x2:1,y2:0, stop:0 #69717a, stop:1 #505860);
+                font-size:30px;
+                font-weight:800;
+                padding:8px 12px;
+            }
+            QLabel#label { color:#1f2730; font-size:22px; font-weight:650; }
+            QLineEdit {
+                background:#ffffff;
+                border:1px solid #8ea2b6;
+                color:#1f2730;
+                font-size:22px;
+                font-weight:700;
+                padding:8px;
+            }
+            QListWidget {
+                background:#e4e8ec;
+                color:#1f252c;
+                font-size:29px;
+                border:1px solid rgba(76,86,96,0.4);
+                outline:none;
+            }
+            QListWidget::item {
+                padding:7px 12px;
+                margin:1px 0px;
+            }
+            QListWidget::item:selected {
+                background:qlineargradient(x1:0,y1:0,x2:1,y2:0, stop:0 #5abc3e, stop:1 #3e9132);
+                color:#f4fff1;
+                border:1px solid rgba(249,255,248,0.4);
+            }
+            QLabel#hint { color:#1f252c; font-size:16px; font-weight:800; }
+        ''')
+        root = QtWidgets.QVBoxLayout(self)
+        root.setContentsMargins(0, 0, 0, 0)
+        root.setSpacing(0)
+        hdr = QtWidgets.QLabel(str(title or 'Input'))
+        hdr.setObjectName('title')
+        root.addWidget(hdr, 0)
+        body = QtWidgets.QWidget()
+        bl = QtWidgets.QVBoxLayout(body)
+        bl.setContentsMargins(16, 14, 16, 12)
+        bl.setSpacing(10)
+        lbl = QtWidgets.QLabel(str(label or 'Value:'))
+        lbl.setObjectName('label')
+        bl.addWidget(lbl, 0)
+        self.edit = QtWidgets.QLineEdit(str(text or ''))
+        self.edit.setFocus(QtCore.Qt.OtherFocusReason)
+        bl.addWidget(self.edit, 0)
+        self.listw = QtWidgets.QListWidget()
+        self.listw.addItems(['OK', 'Cancel'])
+        self.listw.setCurrentRow(0)
+        self.listw.itemActivated.connect(self._activate_current)
+        bl.addWidget(self.listw, 0)
+        hint = QtWidgets.QLabel('A/ENTER = Select | B/ESC = Back')
+        hint.setObjectName('hint')
+        bl.addWidget(hint, 0)
+        root.addWidget(body, 1)
+
+    def _activate_current(self, *_):
+        it = self.listw.currentItem()
+        choice = str(it.text()).strip().lower() if it is not None else 'cancel'
+        if choice == 'ok':
+            self._accepted = True
+            self.accept()
+            return
+        self._accepted = False
+        self.reject()
+
+    def value(self):
+        return str(self.edit.text() or '')
+
+    def accepted_value(self):
+        return bool(self._accepted)
+
+    def keyPressEvent(self, e):
+        k = e.key()
+        if k in (QtCore.Qt.Key_Escape, QtCore.Qt.Key_Back, QtCore.Qt.Key_B):
+            self._accepted = False
+            self.reject()
+            return
+        if k in (QtCore.Qt.Key_Return, QtCore.Qt.Key_Enter, QtCore.Qt.Key_A):
+            self._activate_current()
+            return
+        super().keyPressEvent(e)
+
+
 def _redeem_code(parent):
-    code, ok = QtWidgets.QInputDialog.getText(parent, 'Canjear codigo', 'Introduce tu codigo:')
-    if not ok:
+    d = TextPromptDialog('Canjear codigo', 'Introduce tu codigo:', '', parent)
+    if d.exec_() != QtWidgets.QDialog.Accepted or not d.accepted_value():
         return None
+    code = d.value()
     code = ''.join(ch for ch in str(code).upper() if ch.isalnum() or ch == '-')
     if not code:
         return 'Codigo no valido.'
@@ -19364,7 +20141,79 @@ class Guide(QtWidgets.QDialog):
 
 
 def _msg(parent, title, text):
-    QtWidgets.QMessageBox.information(parent, str(title), str(text))
+    d = QtWidgets.QDialog(parent)
+    d.setWindowTitle(str(title or 'Info'))
+    d.setWindowFlags(QtCore.Qt.Dialog | QtCore.Qt.FramelessWindowHint)
+    d.setModal(True)
+    d.resize(900, 520)
+    d.setStyleSheet('''
+        QDialog { background:#d7dce1; border:2px solid rgba(239,244,248,0.78); }
+        QLabel#title {
+            color:#eef4f8;
+            background:qlineargradient(x1:0,y1:0,x2:1,y2:0, stop:0 #69717a, stop:1 #505860);
+            font-size:30px;
+            font-weight:800;
+            padding:8px 12px;
+        }
+        QLabel#body {
+            color:#1f2730;
+            font-size:24px;
+            font-weight:650;
+        }
+        QListWidget {
+            background:#e4e8ec;
+            color:#1f252c;
+            font-size:31px;
+            border:1px solid rgba(76,86,96,0.4);
+            outline:none;
+        }
+        QListWidget::item {
+            padding:7px 12px;
+            margin:1px 0px;
+        }
+        QListWidget::item:selected {
+            background:qlineargradient(x1:0,y1:0,x2:1,y2:0, stop:0 #5abc3e, stop:1 #3e9132);
+            color:#f4fff1;
+            border:1px solid rgba(249,255,248,0.4);
+        }
+        QLabel#hint { color:#1f252c; font-size:16px; font-weight:800; }
+    ''')
+    lay = QtWidgets.QVBoxLayout(d)
+    lay.setContentsMargins(0, 0, 0, 0)
+    lay.setSpacing(0)
+    hdr = QtWidgets.QLabel(str(title or 'Info'))
+    hdr.setObjectName('title')
+    lay.addWidget(hdr, 0)
+    body = QtWidgets.QWidget()
+    bl = QtWidgets.QVBoxLayout(body)
+    bl.setContentsMargins(16, 14, 16, 12)
+    bl.setSpacing(10)
+    txt = QtWidgets.QLabel(str(text or ''))
+    txt.setObjectName('body')
+    txt.setWordWrap(True)
+    bl.addWidget(txt, 1)
+    lw = QtWidgets.QListWidget()
+    lw.addItem('OK')
+    lw.setCurrentRow(0)
+    lw.itemActivated.connect(lambda *_: d.accept())
+    bl.addWidget(lw, 0)
+    hint = QtWidgets.QLabel('A/ENTER = Select | B/ESC = Back')
+    hint.setObjectName('hint')
+    bl.addWidget(hint, 0)
+    lay.addWidget(body, 1)
+
+    def _key(ev):
+        k = ev.key()
+        if k in (QtCore.Qt.Key_Escape, QtCore.Qt.Key_Back, QtCore.Qt.Key_B):
+            d.reject()
+            return
+        if k in (QtCore.Qt.Key_Return, QtCore.Qt.Key_Enter, QtCore.Qt.Key_A):
+            d.accept()
+            return
+        QtWidgets.QDialog.keyPressEvent(d, ev)
+
+    d.keyPressEvent = _key
+    d.exec_()
 
 
 def _launch_social_global(parent):
@@ -19565,6 +20414,10 @@ import urllib.request
 import uuid
 from pathlib import Path
 from PyQt5 import QtCore, QtGui, QtWidgets
+try:
+    from PyQt5 import QtGamepad
+except Exception:
+    QtGamepad = None
 
 XUI_HOME = Path.home() / '.xui'
 DATA_HOME = XUI_HOME / 'data'
@@ -20273,6 +21126,116 @@ class VirtualKeyboardDialog(QtWidgets.QDialog):
         super().keyPressEvent(e)
 
 
+class SocialMenuDialog(QtWidgets.QDialog):
+    def __init__(self, title, text, options=None, parent=None, default_choice='', cancel_choice=''):
+        super().__init__(parent)
+        opts = [str(x).strip() for x in (options or []) if str(x).strip()]
+        if not opts:
+            opts = ['OK']
+        self._options = opts
+        self._choice = str(default_choice or opts[0]).strip() or opts[0]
+        if self._choice not in self._options:
+            self._choice = self._options[0]
+        self._cancel_choice = str(cancel_choice or '').strip()
+        if self._cancel_choice not in self._options:
+            self._cancel_choice = 'Cancel' if 'Cancel' in self._options else self._options[-1]
+        self.setWindowTitle(str(title or 'Menu'))
+        self.setWindowFlags(QtCore.Qt.Dialog | QtCore.Qt.FramelessWindowHint)
+        self.setModal(True)
+        self.resize(860, 520)
+        self.setStyleSheet('''
+            QDialog { background:#d7dce1; border:2px solid rgba(239,244,248,0.78); }
+            QLabel#title {
+                color:#eef4f8;
+                background:qlineargradient(x1:0,y1:0,x2:1,y2:0, stop:0 #69717a, stop:1 #505860);
+                font-size:28px;
+                font-weight:800;
+                padding:8px 12px;
+            }
+            QLabel#body {
+                color:#1f2730;
+                font-size:22px;
+                font-weight:650;
+            }
+            QListWidget {
+                background:#e4e8ec;
+                color:#1f252c;
+                font-size:31px;
+                border:1px solid rgba(76,86,96,0.4);
+                outline:none;
+            }
+            QListWidget::item {
+                padding:7px 10px;
+                margin:1px 0px;
+            }
+            QListWidget::item:selected {
+                background:qlineargradient(x1:0,y1:0,x2:1,y2:0, stop:0 #5abc3e, stop:1 #3e9132);
+                color:#f4fff1;
+                border:1px solid rgba(249,255,248,0.4);
+            }
+            QLabel#hint {
+                color:#1f252c;
+                font-size:16px;
+                font-weight:800;
+            }
+        ''')
+        root = QtWidgets.QVBoxLayout(self)
+        root.setContentsMargins(0, 0, 0, 0)
+        root.setSpacing(0)
+        hdr = QtWidgets.QLabel(str(title or 'Menu'))
+        hdr.setObjectName('title')
+        root.addWidget(hdr, 0)
+        body = QtWidgets.QWidget()
+        bl = QtWidgets.QVBoxLayout(body)
+        bl.setContentsMargins(16, 14, 16, 12)
+        bl.setSpacing(10)
+        msg = QtWidgets.QLabel(str(text or ''))
+        msg.setObjectName('body')
+        msg.setWordWrap(True)
+        bl.addWidget(msg, 1)
+        self.listw = QtWidgets.QListWidget()
+        self.listw.addItems(self._options)
+        idx = self._options.index(self._choice) if self._choice in self._options else 0
+        self.listw.setCurrentRow(max(0, idx))
+        self.listw.itemActivated.connect(self._accept_current)
+        bl.addWidget(self.listw, 0)
+        hint = QtWidgets.QLabel('A/ENTER = Select | B/ESC = Back')
+        hint.setObjectName('hint')
+        bl.addWidget(hint, 0)
+        root.addWidget(body, 1)
+
+    def selected_choice(self):
+        return str(self._choice or '')
+
+    def _accept_current(self, *_):
+        it = self.listw.currentItem()
+        if it is not None:
+            self._choice = str(it.text()).strip() or self._choice
+        self.accept()
+
+    def showEvent(self, e):
+        super().showEvent(e)
+        parent = self.parentWidget()
+        if parent is not None:
+            w = min(max(760, int(parent.width() * 0.62)), max(760, parent.width() - 120))
+            h = min(max(440, int(parent.height() * 0.62)), max(440, parent.height() - 120))
+            self.resize(w, h)
+            x = parent.x() + (parent.width() - w) // 2
+            y = parent.y() + (parent.height() - h) // 2
+            self.move(max(0, x), max(0, y))
+
+    def keyPressEvent(self, e):
+        k = e.key()
+        if k in (QtCore.Qt.Key_Escape, QtCore.Qt.Key_Back, QtCore.Qt.Key_B):
+            self._choice = self._cancel_choice
+            self.reject()
+            return
+        if k in (QtCore.Qt.Key_Return, QtCore.Qt.Key_Enter, QtCore.Qt.Key_A):
+            self._accept_current()
+            return
+        super().keyPressEvent(e)
+
+
 class SocialChatWindow(QtWidgets.QWidget):
     def __init__(self):
         super().__init__()
@@ -20290,6 +21253,9 @@ class SocialChatWindow(QtWidgets.QWidget):
         self.call_active = False
         self._vk_opening = False
         self._vk_last_close = 0.0
+        self._gp = None
+        self._gp_prev = {}
+        self._gp_timer = None
         self._action_items = {}
         self._community_mode = 'messages'
         self._focus_zone = 0
@@ -20301,6 +21267,7 @@ class SocialChatWindow(QtWidgets.QWidget):
         self.timer = QtCore.QTimer(self)
         self.timer.timeout.connect(self._poll_events)
         self.timer.start(120)
+        self._setup_gamepad()
         self._append_system('LAN autodiscovery enabled (broadcast + probe). Add manual peer for Internet P2P.')
         self._append_system(f"World chat ready via relay ({self.engine.world_relay}) room: {self.engine.world_topic}")
 
@@ -20653,6 +21620,50 @@ class SocialChatWindow(QtWidgets.QWidget):
         row = max(0, min(n - 1, row + int(delta)))
         listw.setCurrentRow(row)
 
+    def _menu_notice(self, title, text):
+        d = SocialMenuDialog(
+            str(title or 'Info'),
+            str(text or ''),
+            ['OK'],
+            self,
+            default_choice='OK',
+            cancel_choice='OK',
+        )
+        d.exec_()
+
+    def _menu_pick(self, title, options, descriptions=None, default_choice=''):
+        opts = [str(x).strip() for x in (options or []) if str(x).strip()]
+        if not opts:
+            return None
+        desc_map = descriptions or {}
+        body = str(desc_map.get(default_choice, '') or '').strip()
+        d = SocialMenuDialog(
+            str(title or 'Menu'),
+            body or 'Select an option.',
+            opts,
+            self,
+            default_choice=str(default_choice or opts[0]),
+            cancel_choice='Cancel' if 'Cancel' in opts else ('Close' if 'Close' in opts else opts[-1]),
+        )
+        if desc_map:
+            def _upd(txt):
+                t = str(desc_map.get(str(txt or ''), '') or '').strip()
+                if t:
+                    d.body_lbl.setText(t)
+            d.listw.currentTextChanged.connect(_upd)
+            _upd(d.selected_choice())
+        if d.exec_() == QtWidgets.QDialog.Accepted:
+            return d.selected_choice()
+        return None
+
+    def _menu_input_text(self, title, label, text=''):
+        d = VirtualKeyboardDialog(str(text or ''), self)
+        d.setWindowTitle(str(title or 'Input'))
+        if d.exec_() == QtWidgets.QDialog.Accepted:
+            val = str(d.text() or '').strip()
+            return val, True
+        return str(text or ''), False
+
     def _select_message_peer(self, host='', port=0, name=''):
         host = str(host or '').strip().lower()
         try:
@@ -20765,8 +21776,120 @@ class SocialChatWindow(QtWidgets.QWidget):
                     QtCore.QTimer.singleShot(0, self._open_chat_keyboard)
         return super().eventFilter(obj, event)
 
+    def _setup_gamepad(self):
+        if QtGamepad is None:
+            return
+        try:
+            mgr = QtGamepad.QGamepadManager.instance()
+            ids = list(mgr.connectedGamepads())
+            if not ids:
+                return
+            self._gp = QtGamepad.QGamepad(ids[0], self)
+            self._gp_timer = QtCore.QTimer(self)
+            self._gp_timer.timeout.connect(self._poll_gamepad)
+            self._gp_timer.start(75)
+            self.status.setText('Controller: A select/send | B back | X quick action | Y tabs | LB/RB tabs')
+        except Exception:
+            self._gp = None
+
+    def _gpv(self, name, default=0.0):
+        gp = self._gp
+        if gp is None:
+            return default
+        v = getattr(gp, name, None)
+        try:
+            return v() if callable(v) else v
+        except Exception:
+            return default
+
+    def _send_key_focus(self, key):
+        w = QtWidgets.QApplication.activeModalWidget() or QtWidgets.QApplication.focusWidget() or self
+        press = QtGui.QKeyEvent(QtCore.QEvent.KeyPress, int(key), QtCore.Qt.NoModifier)
+        rel = QtGui.QKeyEvent(QtCore.QEvent.KeyRelease, int(key), QtCore.Qt.NoModifier)
+        QtWidgets.QApplication.postEvent(w, press)
+        QtWidgets.QApplication.postEvent(w, rel)
+
+    def _active_virtual_keyboard(self):
+        w = QtWidgets.QApplication.activeModalWidget()
+        if isinstance(w, VirtualKeyboardDialog) and bool(w.isVisible()):
+            return w
+        for tw in QtWidgets.QApplication.topLevelWidgets():
+            if isinstance(tw, VirtualKeyboardDialog) and bool(tw.isVisible()):
+                return tw
+        return None
+
+    def _poll_gamepad(self):
+        gp = self._gp
+        if gp is None:
+            return
+        cur = {
+            'left': bool(self._gpv('buttonLeft', False)) or float(self._gpv('axisLeftX', 0.0)) < -0.6,
+            'right': bool(self._gpv('buttonRight', False)) or float(self._gpv('axisLeftX', 0.0)) > 0.6,
+            'up': bool(self._gpv('buttonUp', False)) or float(self._gpv('axisLeftY', 0.0)) < -0.6,
+            'down': bool(self._gpv('buttonDown', False)) or float(self._gpv('axisLeftY', 0.0)) > 0.6,
+            'a': bool(self._gpv('buttonA', False)),
+            'b': bool(self._gpv('buttonB', False)),
+            'x': bool(self._gpv('buttonX', False)),
+            'y': bool(self._gpv('buttonY', False)),
+            'lb': bool(self._gpv('buttonL1', False)) or bool(self._gpv('buttonLeftShoulder', False)),
+            'rb': bool(self._gpv('buttonR1', False)) or bool(self._gpv('buttonRightShoulder', False)),
+            'start': bool(self._gpv('buttonStart', False)),
+        }
+
+        def pressed(name):
+            return cur.get(name, False) and not self._gp_prev.get(name, False)
+
+        vk = self._active_virtual_keyboard()
+        if vk is not None:
+            if pressed('b'):
+                self._send_key_focus(QtCore.Qt.Key_Escape)
+            elif pressed('a'):
+                self._send_key_focus(QtCore.Qt.Key_Return)
+            elif pressed('x'):
+                self._send_key_focus(QtCore.Qt.Key_Backspace)
+            elif pressed('y'):
+                self._send_key_focus(QtCore.Qt.Key_Space)
+            elif pressed('left'):
+                self._send_key_focus(QtCore.Qt.Key_Left)
+            elif pressed('right'):
+                self._send_key_focus(QtCore.Qt.Key_Right)
+            elif pressed('up'):
+                self._send_key_focus(QtCore.Qt.Key_Up)
+            elif pressed('down'):
+                self._send_key_focus(QtCore.Qt.Key_Down)
+            self._gp_prev = cur
+            return
+
+        if pressed('a'):
+            self._send_key_focus(QtCore.Qt.Key_Return)
+        elif pressed('b'):
+            self._send_key_focus(QtCore.Qt.Key_Escape)
+        elif pressed('x'):
+            self._send_key_focus(QtCore.Qt.Key_X)
+        elif pressed('y'):
+            self._send_key_focus(QtCore.Qt.Key_Y)
+        elif pressed('left'):
+            self._send_key_focus(QtCore.Qt.Key_Left)
+        elif pressed('right'):
+            self._send_key_focus(QtCore.Qt.Key_Right)
+        elif pressed('up'):
+            self._send_key_focus(QtCore.Qt.Key_Up)
+        elif pressed('down'):
+            self._send_key_focus(QtCore.Qt.Key_Down)
+        elif pressed('lb'):
+            self._send_key_focus(QtCore.Qt.Key_PageUp)
+        elif pressed('rb'):
+            self._send_key_focus(QtCore.Qt.Key_PageDown)
+        elif pressed('start'):
+            self._send_key_focus(QtCore.Qt.Key_Tab)
+        self._gp_prev = cur
+
     def keyPressEvent(self, e):
         k = e.key()
+        if k == QtCore.Qt.Key_A:
+            k = QtCore.Qt.Key_Return
+        elif k == QtCore.Qt.Key_B:
+            k = QtCore.Qt.Key_Escape
         if k in (QtCore.Qt.Key_Escape, QtCore.Qt.Key_Back):
             self.close()
             return
@@ -20981,11 +22104,10 @@ class SocialChatWindow(QtWidgets.QWidget):
         self._save_world_settings()
 
     def _change_world_room(self):
-        txt, ok = QtWidgets.QInputDialog.getText(
-            self,
+        txt, ok = self._menu_input_text(
             'World Chat Room',
             'Room/topic name (letters, numbers, -, _, .)',
-            text=self.engine.world_topic,
+            self.engine.world_topic,
         )
         if not ok:
             return
@@ -21045,7 +22167,7 @@ class SocialChatWindow(QtWidgets.QWidget):
     def _send_current(self):
         peer = self._current_peer()
         if not peer:
-            QtWidgets.QMessageBox.information(self, 'Peer required', 'Select a peer first.')
+            self._menu_notice('Peer required', 'Select a peer first.')
             return
         text = self.msg.text().strip()
         if not text:
@@ -21086,26 +22208,24 @@ class SocialChatWindow(QtWidgets.QWidget):
             return
         err = str(last_err) if last_err is not None else 'No reachable peer endpoint.'
         self.status.setText(f'Cannot send: {err}')
-        QtWidgets.QMessageBox.warning(
-            self,
+        self._menu_notice(
             'Send failed',
-            f'Could not connect to selected peer candidates.\n\n'
+            'Could not connect to selected peer candidates.\n\n'
             'If peer is on Internet, use Tailscale/ZeroTier or forward TCP 38600.\n'
-            f'Error: {err}'
+            f'Error: {err}',
         )
 
     def _add_peer_dialog(self):
-        txt, ok = QtWidgets.QInputDialog.getText(
-            self,
+        txt, ok = self._menu_input_text(
             'Add P2P peer',
             'Format: alias@host:port or host:port',
-            text=''
+            '',
         )
         if not ok:
             return
         parsed = parse_peer_input(txt)
         if not parsed:
-            QtWidgets.QMessageBox.warning(self, 'Invalid format', 'Use alias@host:port or host:port')
+            self._menu_notice('Invalid format', 'Use alias@host:port or host:port')
             return
         self._upsert_peer(parsed['name'], parsed['host'], parsed['port'], 'manual', persist=True)
         self._append_system(f'Manual peer added: {parsed["host"]}:{parsed["port"]}')
@@ -21125,11 +22245,11 @@ class SocialChatWindow(QtWidgets.QWidget):
         lines += [f'Call audio UDP port (default): {DEFAULT_CALL_AUDIO_PORT}']
         lines += [f'Call screen UDP port (default): {DEFAULT_CALL_VIDEO_PORT}']
         lines += ['', 'Tip: for Internet P2P use Tailscale/ZeroTier or router port-forward TCP 38600.']
-        QtWidgets.QMessageBox.information(self, 'My Peer IDs', '\n'.join(lines))
+        self._menu_notice('My Peer IDs', '\n'.join(lines))
 
     def _show_lan_status(self):
         out = subprocess.getoutput('/bin/sh -c "$HOME/.xui/bin/xui_lan_status.sh"')
-        QtWidgets.QMessageBox.information(self, 'LAN Status', out or 'No network data.')
+        self._menu_notice('LAN Status', out or 'No network data.')
 
     def _record_voice_clip(self, duration_sec):
         secs = max(1, min(int(duration_sec), 25))
@@ -21212,38 +22332,54 @@ class SocialChatWindow(QtWidgets.QWidget):
 
     def _open_voice_inbox(self):
         if not self.voice_inbox:
-            QtWidgets.QMessageBox.information(self, 'Voice Inbox', 'No voice messages yet.')
+            self._menu_notice('Voice Inbox', 'No voice messages yet.')
             return
-        lines = []
+        options = []
+        descriptions = {}
         for i, msg in enumerate(self.voice_inbox[:30], 1):
             hh = time.strftime('%H:%M:%S', time.localtime(int(msg.get('ts') or time.time())))
             who = str(msg.get('sender') or 'Unknown')
             dur = float(msg.get('duration') or 0.0)
-            lines.append(f'{i}. {who} ({dur:.0f}s) [{hh}]')
-        idx, ok = QtWidgets.QInputDialog.getInt(
-            self,
+            label = f'{i:02d}. {who} ({dur:.0f}s) [{hh}]'
+            options.append(label)
+            descriptions[label] = f'MIME: {msg.get("mime", "audio")} | Duration: {dur:.0f}s'
+        options.append('Cancel')
+        pick = self._menu_pick(
             'Voice Inbox',
-            'Select voice message number to play:\n\n' + '\n'.join(lines),
-            1,
-            1,
-            len(lines),
-            1,
+            options,
+            descriptions,
+            default_choice=options[0] if options else '',
         )
-        if not ok:
+        if not pick or pick == 'Cancel':
             return
-        sel = self.voice_inbox[int(idx) - 1]
+        try:
+            idx = int(str(pick).split('.', 1)[0]) - 1
+        except Exception:
+            return
+        if idx < 0 or idx >= len(self.voice_inbox):
+            return
+        sel = self.voice_inbox[idx]
         self._play_voice_file(sel.get('path'))
         self.status.setText(f"Playing voice from {sel.get('sender', 'Unknown')}")
 
     def _send_voice_message(self):
         peer = self._current_peer()
         if not peer or str(peer.get('source')) == 'WORLD':
-            QtWidgets.QMessageBox.information(self, 'Voice Message', 'Select a LAN/P2P peer first.')
+            self._menu_notice('Voice Message', 'Select a LAN/P2P peer first.')
             return
-        seconds, ok = QtWidgets.QInputDialog.getInt(
-            self, 'Voice Message', 'Duration seconds:', 6, 2, 20, 1
+        duration_opts = [str(v) for v in range(2, 21)]
+        duration_desc = {str(v): f'Record and send a {v}s voice clip.' for v in range(2, 21)}
+        pick = self._menu_pick(
+            'Voice Message',
+            duration_opts + ['Cancel'],
+            duration_desc,
+            default_choice='6',
         )
-        if not ok:
+        if not pick or pick == 'Cancel':
+            return
+        try:
+            seconds = int(str(pick).strip())
+        except Exception:
             return
         self.status.setText(f'Recording voice message ({seconds}s)...')
         QtWidgets.QApplication.processEvents()
@@ -21338,7 +22474,7 @@ class SocialChatWindow(QtWidgets.QWidget):
     def _start_p2p_call(self, with_screen=False):
         peer = self._current_peer()
         if not peer or str(peer.get('source')) == 'WORLD':
-            QtWidgets.QMessageBox.information(self, 'P2P Call', 'Select a LAN/P2P peer first.')
+            self._menu_notice('P2P Call', 'Select a LAN/P2P peer first.')
             return
         host = str(peer.get('host') or '').strip()
         if not host:
@@ -21367,7 +22503,7 @@ class SocialChatWindow(QtWidgets.QWidget):
     def _join_last_call_invite(self):
         inv = self.last_call_invite
         if not inv:
-            QtWidgets.QMessageBox.information(self, 'Join Call', 'No incoming call invite yet.')
+            self._menu_notice('Join Call', 'No incoming call invite yet.')
             return
         host = str(inv.get('host') or '').strip()
         if not host:
