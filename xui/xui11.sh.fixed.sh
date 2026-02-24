@@ -1132,6 +1132,7 @@ import hashlib
 import shlex
 import base64
 import tempfile
+import gc
 import queue
 import socket
 import threading
@@ -1165,6 +1166,8 @@ SOCIAL_PROFILE_FILE = DATA_HOME / 'social_profile.json'
 PARTY_STATE_FILE = DATA_HOME / 'party_state.json'
 VOICE_INBOX_FILE = DATA_HOME / 'voice_inbox.json'
 VOICE_DIR = DATA_HOME / 'voice'
+_SOUND_LOOKUP_CACHE = {}
+_TILE_ICON_CACHE = {}
 
 sys.path.insert(0, str(XUI_HOME / 'bin'))
 try:
@@ -1181,8 +1184,20 @@ def play_media(path, video=False, blocking=False):
     p = Path(path)
     if not p.exists():
         return False
+    probes = getattr(play_media, '_probes', None)
+    if probes is None:
+        probes = {
+            'mpv': bool(shutil.which('mpv')),
+            'ffplay': bool(shutil.which('ffplay')),
+            'gst_play': bool(shutil.which('gst-play-1.0')),
+            'cvlc': bool(shutil.which('cvlc')),
+            'vlc': bool(shutil.which('vlc')),
+            'paplay': bool(shutil.which('paplay')),
+            'aplay': bool(shutil.which('aplay')),
+        }
+        play_media._probes = probes
     try:
-        if shutil.which('mpv'):
+        if probes.get('mpv'):
             cmd = ['mpv', '--really-quiet', '--no-terminal']
             if video:
                 cmd.extend(['--fullscreen', '--ontop'])
@@ -1198,13 +1213,13 @@ def play_media(path, video=False, blocking=False):
         pass
     if video:
         video_cmds = []
-        if shutil.which('ffplay'):
+        if probes.get('ffplay'):
             video_cmds.append(['ffplay', '-autoexit', '-fs', '-loglevel', 'quiet', str(p)])
-        if shutil.which('gst-play-1.0'):
+        if probes.get('gst_play'):
             video_cmds.append(['gst-play-1.0', '--no-interactive', str(p)])
-        if shutil.which('cvlc'):
+        if probes.get('cvlc'):
             video_cmds.append(['cvlc', '--play-and-exit', '--fullscreen', '--quiet', str(p)])
-        elif shutil.which('vlc'):
+        elif probes.get('vlc'):
             video_cmds.append(['vlc', '--play-and-exit', '--fullscreen', '--quiet', str(p)])
         for cmd in video_cmds:
             try:
@@ -1217,11 +1232,11 @@ def play_media(path, video=False, blocking=False):
                 continue
         return False
     fallback_cmds = []
-    if shutil.which('ffplay'):
+    if probes.get('ffplay'):
         fallback_cmds.append(['ffplay', '-nodisp', '-autoexit', '-loglevel', 'quiet', str(p)])
-    if shutil.which('paplay'):
+    if probes.get('paplay'):
         fallback_cmds.append(['paplay', str(p)])
-    if shutil.which('aplay'):
+    if probes.get('aplay'):
         fallback_cmds.append(['aplay', '-q', str(p)])
     for cmd in fallback_cmds:
         try:
@@ -1241,6 +1256,11 @@ def ensure_audio_output_ready(min_volume=35):
     except Exception:
         v = 35
     v = max(1, min(120, v))
+    now = time.monotonic()
+    last_ts = float(getattr(ensure_audio_output_ready, '_last_ts', 0.0))
+    last_vol = int(getattr(ensure_audio_output_ready, '_last_vol', 0))
+    if (now - last_ts) < 6.0 and v <= last_vol:
+        return
     cmds = [
         f'pactl set-sink-mute @DEFAULT_SINK@ 0 || true; pactl set-sink-volume @DEFAULT_SINK@ {v}% || true',
         f'wpctl set-mute @DEFAULT_AUDIO_SINK@ 0 || true; wpctl set-volume @DEFAULT_AUDIO_SINK@ {v}% || true',
@@ -1252,6 +1272,8 @@ def ensure_audio_output_ready(min_volume=35):
             subprocess.run(['/bin/sh', '-c', cmd], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False)
         except Exception:
             pass
+    ensure_audio_output_ready._last_ts = now
+    ensure_audio_output_ready._last_vol = v
 
 
 def play_startup_video():
@@ -1315,6 +1337,42 @@ def detect_runtime_profile():
     return 'pc'
 
 
+def detect_total_ram_mb():
+    forced = str(os.environ.get('XUI_RAM_MB', '')).strip()
+    if forced:
+        try:
+            return max(0, int(float(forced)))
+        except Exception:
+            pass
+    try:
+        for raw in Path('/proc/meminfo').read_text(encoding='utf-8', errors='ignore').splitlines():
+            line = str(raw).strip()
+            if not line.lower().startswith('memtotal:'):
+                continue
+            parts = line.split()
+            if len(parts) >= 2:
+                kb = int(parts[1])
+                return max(0, kb // 1024)
+    except Exception:
+        pass
+    return 0
+
+
+def ultra_low_ram_mode(screen=None):
+    mode = str(os.environ.get('XUI_RAM_MODE', 'auto')).strip().lower()
+    if mode in ('1', 'true', 'on', 'yes', '2g', '2gb', 'ultra', 'low'):
+        return True
+    if mode in ('0', 'false', 'off', 'no', 'full', 'normal'):
+        return False
+    mb = int(detect_total_ram_mb() or 0)
+    profile = detect_runtime_profile()
+    if profile == 'switch':
+        if mb <= 0:
+            return True
+        return mb <= 3072
+    return bool(mb and mb <= 2304)
+
+
 def use_low_power_ui(screen=None):
     mode = str(os.environ.get('XUI_UI_PERF', 'auto')).strip().lower()
     if mode in ('1', 'true', 'on', 'yes', 'low', 'eco', 'battery'):
@@ -1338,6 +1396,13 @@ def use_low_power_ui(screen=None):
 def pick_existing_sound(candidates):
     if not candidates:
         return None
+    key = tuple(str(fn) for fn in candidates if fn)
+    if key:
+        cached = _SOUND_LOOKUP_CACHE.get(key)
+        if cached:
+            cp = Path(cached)
+            if cp.exists():
+                return cp
     search_dirs = [
         ASSETS / 'SONIDOS',
         ASSETS / 'sonidos',
@@ -1352,6 +1417,8 @@ def pick_existing_sound(candidates):
         for d in search_dirs:
             p = d / fn
             if p.exists():
+                if key:
+                    _SOUND_LOOKUP_CACHE[key] = str(p)
                 return p
     return None
 
@@ -4027,6 +4094,8 @@ class TopTabs(QtWidgets.QWidget):
         self.names = list(names)
         self.labels = []
         self.current = 0
+        self._active_px = None
+        self._idle_px = None
         self._scale = 1.0
         self._compact = False
         h = QtWidgets.QHBoxLayout(self)
@@ -4052,24 +4121,49 @@ class TopTabs(QtWidgets.QWidget):
         self.set_current(self.current)
 
     def set_current(self, idx):
-        self.current = max(0, min(idx, len(self.labels)-1))
+        new_idx = max(0, min(idx, len(self.labels) - 1))
         active_px = max(16, int((30 if not self._compact else 24) * self._scale))
         idle_px = max(12, int((24 if not self._compact else 19) * self._scale))
-        for i, lbl in enumerate(self.labels):
-            if i == self.current:
-                lbl.setStyleSheet(
-                    f'color:#f4f6f8; font-size:{active_px}px; font-weight:700; '
-                    'font-family:"Segoe UI","Noto Sans",sans-serif;'
-                )
-            else:
-                lbl.setStyleSheet(
-                    f'color:rgba(210,217,224,0.82); font-size:{idle_px}px; font-weight:600; '
-                    'font-family:"Segoe UI","Noto Sans",sans-serif;'
-                )
+        old_idx = int(self.current)
+        sizes_changed = (active_px != self._active_px) or (idle_px != self._idle_px)
+        self._active_px = active_px
+        self._idle_px = idle_px
+        self.current = new_idx
+
+        if sizes_changed:
+            for i, lbl in enumerate(self.labels):
+                if i == self.current:
+                    lbl.setStyleSheet(
+                        f'color:#f4f6f8; font-size:{active_px}px; font-weight:700; '
+                        'font-family:"Segoe UI","Noto Sans",sans-serif;'
+                    )
+                else:
+                    lbl.setStyleSheet(
+                        f'color:rgba(210,217,224,0.82); font-size:{idle_px}px; font-weight:600; '
+                        'font-family:"Segoe UI","Noto Sans",sans-serif;'
+                    )
+            return
+
+        if old_idx == self.current:
+            return
+
+        if 0 <= old_idx < len(self.labels):
+            self.labels[old_idx].setStyleSheet(
+                f'color:rgba(210,217,224,0.82); font-size:{idle_px}px; font-weight:600; '
+                'font-family:"Segoe UI","Noto Sans",sans-serif;'
+            )
+        if 0 <= self.current < len(self.labels):
+            self.labels[self.current].setStyleSheet(
+                f'color:#f4f6f8; font-size:{active_px}px; font-weight:700; '
+                'font-family:"Segoe UI","Noto Sans",sans-serif;'
+            )
 
 
 def tile_icon(action, text=''):
     key = f'{action} {text}'.lower()
+    cached = _TILE_ICON_CACHE.get(key)
+    if cached is not None and not cached.isNull():
+        return cached
     style = QtWidgets.QApplication.style()
 
     def themed(names, fallback):
@@ -4080,22 +4174,25 @@ def tile_icon(action, text=''):
         return style.standardIcon(fallback)
 
     if any(token in key for token in ('steam', 'retroarch', 'lutris', 'heroic', 'runner', 'casino', 'mission', 'game')):
-        return themed(['steam', 'applications-games', 'input-gaming'], QtWidgets.QStyle.SP_MediaPlay)
-    if any(token in key for token in ('store', 'avatar')):
-        return themed(['folder-downloads', 'applications-other'], QtWidgets.QStyle.SP_DirIcon)
-    if any(token in key for token in ('music', 'audio', 'playlist', 'visualizer', 'startup sound')):
-        return themed(['audio-x-generic', 'multimedia-volume-control'], QtWidgets.QStyle.SP_MediaVolume)
-    if any(token in key for token in ('tv', 'movie', 'media', 'youtube', 'netflix', 'kodi', 'video')):
-        return themed(['video-x-generic', 'applications-multimedia'], QtWidgets.QStyle.SP_MediaPlay)
-    if any(token in key for token in ('social', 'friend', 'message', 'party', 'gamer')):
-        return themed(['user-available', 'im-user-online'], QtWidgets.QStyle.SP_DirHomeIcon)
-    if any(token in key for token in ('settings', 'system', 'service', 'developer', 'battery', 'power', 'profile')):
-        return themed(['preferences-system', 'applications-system'], QtWidgets.QStyle.SP_ComputerIcon)
-    if any(token in key for token in ('web', 'browser', 'network', 'lan')):
-        return themed(['internet-web-browser', 'network-workgroup'], QtWidgets.QStyle.SP_DriveNetIcon)
-    if any(token in key for token in ('turn off', 'exit', 'shutdown')):
-        return themed(['system-shutdown', 'application-exit'], QtWidgets.QStyle.SP_TitleBarCloseButton)
-    return themed(['applications-other'], QtWidgets.QStyle.SP_FileIcon)
+        icon = themed(['steam', 'applications-games', 'input-gaming'], QtWidgets.QStyle.SP_MediaPlay)
+    elif any(token in key for token in ('store', 'avatar')):
+        icon = themed(['folder-downloads', 'applications-other'], QtWidgets.QStyle.SP_DirIcon)
+    elif any(token in key for token in ('music', 'audio', 'playlist', 'visualizer', 'startup sound')):
+        icon = themed(['audio-x-generic', 'multimedia-volume-control'], QtWidgets.QStyle.SP_MediaVolume)
+    elif any(token in key for token in ('tv', 'movie', 'media', 'youtube', 'netflix', 'kodi', 'video')):
+        icon = themed(['video-x-generic', 'applications-multimedia'], QtWidgets.QStyle.SP_MediaPlay)
+    elif any(token in key for token in ('social', 'friend', 'message', 'party', 'gamer')):
+        icon = themed(['user-available', 'im-user-online'], QtWidgets.QStyle.SP_DirHomeIcon)
+    elif any(token in key for token in ('settings', 'system', 'service', 'developer', 'battery', 'power', 'profile')):
+        icon = themed(['preferences-system', 'applications-system'], QtWidgets.QStyle.SP_ComputerIcon)
+    elif any(token in key for token in ('web', 'browser', 'network', 'lan')):
+        icon = themed(['internet-web-browser', 'network-workgroup'], QtWidgets.QStyle.SP_DriveNetIcon)
+    elif any(token in key for token in ('turn off', 'exit', 'shutdown')):
+        icon = themed(['system-shutdown', 'application-exit'], QtWidgets.QStyle.SP_TitleBarCloseButton)
+    else:
+        icon = themed(['applications-other'], QtWidgets.QStyle.SP_FileIcon)
+    _TILE_ICON_CACHE[key] = icon
+    return icon
 
 
 class GreenTile(QtWidgets.QFrame):
@@ -4110,6 +4207,9 @@ class GreenTile(QtWidgets.QFrame):
         self.text_scale = max(0.65, float(text_scale))
         self.dense = bool(dense)
         self._selected = None
+        self._scale_key = None
+        self._last_icon_px = None
+        self._last_label_px = None
         self.setObjectName('green_tile')
         self.setFocusPolicy(QtCore.Qt.StrongFocus)
         v = QtWidgets.QVBoxLayout(self)
@@ -4141,20 +4241,38 @@ class GreenTile(QtWidgets.QFrame):
             compact_factor *= 0.93
         w = max(120, int(self.base_size[0] * s * compact_factor))
         h = max(72, int(self.base_size[1] * s * compact_factor))
-        self.setFixedSize(w, h)
         pad_x = max(6, int((9 if self.dense else 12) * s * compact_factor))
         pad_y = max(4, int((5 if self.dense else 8) * s * compact_factor))
-        self._layout.setContentsMargins(pad_x, pad_y, pad_x, pad_y)
         icon_sz = max(16, int(30 * s * compact_factor * self.icon_scale))
         pix_sz = max(12, int(18 * s * compact_factor * self.icon_scale))
-        self.icon.setFixedSize(icon_sz, icon_sz)
-        icon = tile_icon(self.action, self.text)
-        self.icon.setPixmap(icon.pixmap(pix_sz, pix_sz))
         font_px = max(10, int(17 * s * compact_factor * self.text_scale))
-        self.lbl.setStyleSheet(
-            f'color:#f4fff3; font-size:{font_px}px; font-weight:700; '
-            'font-family:"Segoe UI","Noto Sans",sans-serif;'
-        )
+        scale_key = (w, h, pad_x, pad_y, icon_sz, pix_sz, font_px)
+        if scale_key == self._scale_key:
+            return
+        self._scale_key = scale_key
+
+        if self.size() != QtCore.QSize(w, h):
+            self.setFixedSize(w, h)
+        margins = self._layout.contentsMargins()
+        if (
+            margins.left() != pad_x
+            or margins.top() != pad_y
+            or margins.right() != pad_x
+            or margins.bottom() != pad_y
+        ):
+            self._layout.setContentsMargins(pad_x, pad_y, pad_x, pad_y)
+        if self.icon.width() != icon_sz or self.icon.height() != icon_sz:
+            self.icon.setFixedSize(icon_sz, icon_sz)
+        if self._last_icon_px != pix_sz:
+            self._last_icon_px = pix_sz
+            icon = tile_icon(self.action, self.text)
+            self.icon.setPixmap(icon.pixmap(pix_sz, pix_sz))
+        if self._last_label_px != font_px:
+            self._last_label_px = font_px
+            self.lbl.setStyleSheet(
+                f'color:#f4fff3; font-size:{font_px}px; font-weight:700; '
+                'font-family:"Segoe UI","Noto Sans",sans-serif;'
+            )
 
     def set_selected(self, on):
         on = bool(on)
@@ -4193,6 +4311,7 @@ class HeroPanel(QtWidgets.QFrame):
         self.subtitle = subtitle
         self.base_size = (780, 320)
         self._selected = None
+        self._scale_key = None
         self.setObjectName('hero_panel')
         v = QtWidgets.QVBoxLayout(self)
         self._layout = v
@@ -4217,14 +4336,27 @@ class HeroPanel(QtWidgets.QFrame):
         compact_factor = 0.96 if compact else 1.0
         w = max(460, int(self.base_size[0] * s * compact_factor))
         h = max(220, int(self.base_size[1] * s * compact_factor))
-        self.setFixedSize(w, h)
         mx = max(10, int(16 * s * compact_factor))
         my = max(8, int(14 * s * compact_factor))
         mb = max(8, int(11 * s * compact_factor))
-        self._layout.setContentsMargins(mx, my, mx, mb)
         top_fs = max(12, int(18 * s * compact_factor))
         logo_fs = max(18, int(44 * s * compact_factor))
         sub_fs = max(10, int(14 * s * compact_factor))
+        scale_key = (w, h, mx, my, mb, top_fs, logo_fs, sub_fs)
+        if scale_key == self._scale_key:
+            return
+        self._scale_key = scale_key
+
+        if self.size() != QtCore.QSize(w, h):
+            self.setFixedSize(w, h)
+        margins = self._layout.contentsMargins()
+        if (
+            margins.left() != mx
+            or margins.top() != my
+            or margins.right() != mx
+            or margins.bottom() != mb
+        ):
+            self._layout.setContentsMargins(mx, my, mx, mb)
         self.top_label.setStyleSheet(
             f'color:rgba(238,244,247,0.92); font-size:{top_fs}px; font-weight:600; '
             'font-family:"Segoe UI","Noto Sans",sans-serif;'
@@ -4268,6 +4400,7 @@ class GamesShowcasePanel(QtWidgets.QFrame):
         self.subtitle = subtitle
         self.base_size = (820, 338)
         self._selected = None
+        self._scale_key = None
         self.setObjectName('games_showcase_panel')
         self.setFocusPolicy(QtCore.Qt.StrongFocus)
         self._blade_buttons = []
@@ -4357,16 +4490,33 @@ class GamesShowcasePanel(QtWidgets.QFrame):
         compact_factor = 0.96 if compact else 1.0
         w = max(500, int(self.base_size[0] * s * compact_factor))
         h = max(240, int(self.base_size[1] * s * compact_factor))
-        self.setFixedSize(w, h)
-
         mx = max(8, int(12 * s * compact_factor))
         my = max(6, int(8 * s * compact_factor))
-        self._layout.setContentsMargins(mx, my, mx, max(6, int(8 * s * compact_factor)))
-        self._layout.setSpacing(max(4, int(6 * s * compact_factor)))
+        mb = max(6, int(8 * s * compact_factor))
+        layout_spacing = max(4, int(6 * s * compact_factor))
 
         title_fs = max(14, int(22 * s * compact_factor))
         sub_fs = max(9, int(12 * s * compact_factor))
         blade_fs = max(10, int(14 * s * compact_factor))
+        blade_h = max(30, int(46 * s * compact_factor))
+        cover_fs = max(9, int(12 * s * compact_factor))
+        scale_key = (w, h, mx, my, mb, layout_spacing, title_fs, sub_fs, blade_fs, blade_h, cover_fs)
+        if scale_key == self._scale_key:
+            return
+        self._scale_key = scale_key
+
+        if self.size() != QtCore.QSize(w, h):
+            self.setFixedSize(w, h)
+        margins = self._layout.contentsMargins()
+        if (
+            margins.left() != mx
+            or margins.top() != my
+            or margins.right() != mx
+            or margins.bottom() != mb
+        ):
+            self._layout.setContentsMargins(mx, my, mx, mb)
+        if self._layout.spacing() != layout_spacing:
+            self._layout.setSpacing(layout_spacing)
         self.top_label.setStyleSheet(
             f'color:rgba(240,246,249,0.93); font-size:{title_fs}px; font-weight:700; '
             'font-family:"Segoe UI","Noto Sans",sans-serif;'
@@ -4376,7 +4526,6 @@ class GamesShowcasePanel(QtWidgets.QFrame):
             'font-family:"Segoe UI","Noto Sans",sans-serif;'
         )
 
-        blade_h = max(30, int(46 * s * compact_factor))
         for b in self._blade_buttons:
             b.setMinimumHeight(blade_h)
             b.setStyleSheet(
@@ -4389,7 +4538,6 @@ class GamesShowcasePanel(QtWidgets.QFrame):
                 'QPushButton#games_blade_btn:hover { background:#45d75d; }'
             )
 
-        cover_fs = max(9, int(12 * s * compact_factor))
         for b in self._cover_buttons:
             ga = str(b.property('ga') or '#4f5962')
             gb = str(b.property('gb') or '#3b444d')
@@ -6581,13 +6729,16 @@ class WebKioskWindow(QtWidgets.QMainWindow):
     def __init__(self, url, parent=None, sfx_cb=None):
         super().__init__(parent)
         self._play_sfx = sfx_cb
+        self._ultra_low_ram = ultra_low_ram_mode()
         self._gp = None
         self._gp_prev = {}
         self._gp_timer = None
         self.setWindowTitle(url)
+        self.setAttribute(QtCore.Qt.WA_DeleteOnClose, True)
         self.resize(1280, 720)
         self.setStyleSheet('background:#000;')
         self.view = QtWebEngineWidgets.QWebEngineView(self)
+        self._configure_web_runtime()
         self.setCentralWidget(self.view)
         self.view.load(QtCore.QUrl(url))
         self._esc = QtWidgets.QShortcut(QtGui.QKeySequence(QtCore.Qt.Key_Escape), self)
@@ -6602,7 +6753,63 @@ class WebKioskWindow(QtWidgets.QMainWindow):
         self._guide.activated.connect(self._show_guide)
         self._guide2 = QtWidgets.QShortcut(QtGui.QKeySequence(QtCore.Qt.Key_Home), self)
         self._guide2.activated.connect(self._show_guide)
+        self._guide_keys = {QtCore.Qt.Key_F1, QtCore.Qt.Key_Home, QtCore.Qt.Key_Meta}
+        key_super_l = getattr(QtCore.Qt, 'Key_Super_L', None)
+        key_super_r = getattr(QtCore.Qt, 'Key_Super_R', None)
+        if key_super_l is not None:
+            self._guide_keys.add(key_super_l)
+        if key_super_r is not None:
+            self._guide_keys.add(key_super_r)
         self._setup_gamepad()
+
+    def _configure_web_runtime(self):
+        if QtWebEngineWidgets is None or self.view is None:
+            return
+        try:
+            page = self.view.page()
+        except Exception:
+            page = None
+        if page is None:
+            return
+        try:
+            settings = page.settings()
+            attrs = (
+                ('JavascriptEnabled', True),
+                ('LocalStorageEnabled', True),
+                ('PluginsEnabled', True),
+                ('FullScreenSupportEnabled', True),
+                ('PlaybackRequiresUserGesture', False),
+                ('WebGLEnabled', True),
+                ('Accelerated2dCanvasEnabled', True),
+            )
+            for name, value in attrs:
+                attr = getattr(QtWebEngineWidgets.QWebEngineSettings, name, None)
+                if attr is not None:
+                    settings.setAttribute(attr, bool(value))
+        except Exception:
+            pass
+        try:
+            profile = page.profile()
+        except Exception:
+            profile = None
+        if profile is None:
+            return
+        try:
+            cache_dir = DATA_HOME / 'webengine-cache'
+            storage_dir = DATA_HOME / 'webengine-profile'
+            cache_dir.mkdir(parents=True, exist_ok=True)
+            storage_dir.mkdir(parents=True, exist_ok=True)
+            profile.setCachePath(str(cache_dir))
+            profile.setPersistentStoragePath(str(storage_dir))
+            profile.setHttpCacheType(QtWebEngineWidgets.QWebEngineProfile.DiskHttpCache)
+            if self._ultra_low_ram:
+                try:
+                    profile.setHttpCacheMaximumSize(16 * 1024 * 1024)
+                except Exception:
+                    pass
+            profile.setPersistentCookiesPolicy(QtWebEngineWidgets.QWebEngineProfile.ForcePersistentCookies)
+        except Exception:
+            pass
 
     def _sfx(self, name='select'):
         if callable(self._play_sfx):
@@ -6706,7 +6913,7 @@ class WebKioskWindow(QtWidgets.QMainWindow):
             self._gp = QtGamepad.QGamepad(ids[0], self)
             self._gp_timer = QtCore.QTimer(self)
             self._gp_timer.timeout.connect(self._poll_gamepad)
-            self._gp_timer.start(75)
+            self._gp_timer.start(95 if self._ultra_low_ram else 75)
         except Exception:
             self._gp = None
 
@@ -6781,20 +6988,26 @@ class WebKioskWindow(QtWidgets.QMainWindow):
         if k in (QtCore.Qt.Key_Escape, QtCore.Qt.Key_Back):
             self.close()
             return
-        guide_keys = {QtCore.Qt.Key_F1, QtCore.Qt.Key_Home, QtCore.Qt.Key_Meta}
-        key_super_l = getattr(QtCore.Qt, 'Key_Super_L', None)
-        key_super_r = getattr(QtCore.Qt, 'Key_Super_R', None)
-        if key_super_l is not None:
-            guide_keys.add(key_super_l)
-        if key_super_r is not None:
-            guide_keys.add(key_super_r)
-        if k in guide_keys:
+        if k in self._guide_keys:
             self._show_guide()
             return
         if k in (QtCore.Qt.Key_Return, QtCore.Qt.Key_Enter):
             self._open_keyboard_if_editable()
             return
         super().keyPressEvent(e)
+
+    def closeEvent(self, e):
+        try:
+            if self._gp_timer is not None:
+                self._gp_timer.stop()
+        except Exception:
+            pass
+        try:
+            if self.view is not None:
+                self.view.stop()
+        except Exception:
+            pass
+        super().closeEvent(e)
 
 
 class DashboardPage(QtWidgets.QWidget):
@@ -6816,6 +7029,7 @@ class DashboardPage(QtWidgets.QWidget):
         self.center_tiles_layout = None
         self.right_col = None
         self.right_layout = None
+        self._last_apply_key = None
         self._build()
 
     def _build_tiles(self, defs, target, layout, alignment=QtCore.Qt.AlignLeft, tile_opts=None):
@@ -6957,8 +7171,9 @@ class DashboardPage(QtWidgets.QWidget):
             self.center_tiles_layout.setSpacing(max(3, int(6 * s * compact_factor)))
         if self.right_layout is not None:
             self.right_layout.setSpacing(col_gap)
-        for tile in self.left_tiles + self.center_tiles + self.right_tiles:
-            tile.apply_scale(s, compact)
+        for group in (self.left_tiles, self.center_tiles, self.right_tiles):
+            for tile in group:
+                tile.apply_scale(s, compact)
         if self.hero is not None:
             self.hero.apply_scale(s, compact)
 
@@ -6977,6 +7192,9 @@ class DashboardPage(QtWidgets.QWidget):
 
     def apply_scale(self, scale=1.0, compact=False):
         base = max(0.58, float(scale))
+        apply_key = (round(base, 4), bool(compact), int(self.width()), int(self.height()))
+        if apply_key == self._last_apply_key:
+            return
         fitted = base
         for _ in range(10):
             self._apply_scale_once(fitted, compact)
@@ -6990,6 +7208,7 @@ class DashboardPage(QtWidgets.QWidget):
             if abs(nxt - fitted) < 0.002:
                 break
             fitted = nxt
+        self._last_apply_key = apply_key
 
 
 class AchievementToast(QtWidgets.QFrame):
@@ -7510,6 +7729,8 @@ class Dashboard(QtWidgets.QMainWindow):
         self.setWindowTitle('XUI - Xbox 360 Style')
         scr = QtWidgets.QApplication.primaryScreen()
         self._runtime_profile = detect_runtime_profile()
+        self._total_ram_mb = detect_total_ram_mb()
+        self._ultra_low_ram = ultra_low_ram_mode(scr)
         self._low_power_ui = use_low_power_ui(scr)
         self._force_reduce_motion = (os.environ.get('XUI_REDUCE_MOTION', '0') == '1')
         # Keep lightweight transitions even on low-power devices; allow hard-disable via XUI_REDUCE_MOTION=1.
@@ -7722,6 +7943,8 @@ class Dashboard(QtWidgets.QMainWindow):
         self._last_hover_at = 0.0
         self._tab_animating = False
         self._tab_anim_group = None
+        self._visible_page_idx = 0
+        self._last_responsive_key = None
         self._web_windows = []
         self._fullscreen_enforced = False
         self._ui_scale = 1.0
@@ -7739,6 +7962,9 @@ class Dashboard(QtWidgets.QMainWindow):
         self._mandatory_update_progress = None
         self._mandatory_update_output = ''
         self._mandatory_update_retry_scheduled = False
+        self._mandatory_payload_cache = None
+        self._mandatory_payload_checked_at = 0.0
+        self._mandatory_payload_proc = None
         self._install_task_proc = None
         self._install_task_progress = None
         self._install_task_output = ''
@@ -7753,6 +7979,26 @@ class Dashboard(QtWidgets.QMainWindow):
         self._gp_axis_last_dir = {}
         self._gp_axis_deadzone = 0.40
         self._gp_axis_release_zone = 0.22
+        self._last_audio_ready_at = 0.0
+        self._sfx_path_cache = {}
+        self._guide_keys = {QtCore.Qt.Key_F1, QtCore.Qt.Key_Home, QtCore.Qt.Key_Meta}
+        key_super_l = getattr(QtCore.Qt, 'Key_Super_L', None)
+        key_super_r = getattr(QtCore.Qt, 'Key_Super_R', None)
+        if key_super_l is not None:
+            self._guide_keys.add(key_super_l)
+        if key_super_r is not None:
+            self._guide_keys.add(key_super_r)
+        self._gc_timer = None
+        if self._ultra_low_ram:
+            try:
+                gc.enable()
+                gc.set_threshold(450, 8, 8)
+                self._gc_timer = QtCore.QTimer(self)
+                self._gc_timer.setInterval(45000)
+                self._gc_timer.timeout.connect(lambda: gc.collect(1))
+                self._gc_timer.start()
+            except Exception:
+                self._gc_timer = None
         self.sfx = {
             'hover': 'hover.mp3',
             'open': 'open.mp3',
@@ -7893,6 +8139,11 @@ class Dashboard(QtWidgets.QMainWindow):
 
     def _apply_responsive_layout(self):
         scale, compact = self._compute_ui_metrics()
+        layout_key = (round(float(scale), 4), bool(compact), int(self.width()), int(self.height()))
+        if layout_key == self._last_responsive_key:
+            self._layout_overlays()
+            return
+        self._last_responsive_key = layout_key
         self._ui_scale = scale
         self._compact_ui = compact
         compact_factor = 0.80 if compact else 1.0
@@ -7933,7 +8184,9 @@ class Dashboard(QtWidgets.QMainWindow):
         h = max(520, ph - top - bottom_margin)
         x = margin_x
         y = top
-        self._games_inline.setGeometry(x, y, w, h)
+        new_rect = QtCore.QRect(x, y, w, h)
+        if self._games_inline.geometry() != new_rect:
+            self._games_inline.setGeometry(new_rect)
 
     def showEvent(self, e):
         super().showEvent(e)
@@ -7941,6 +8194,7 @@ class Dashboard(QtWidgets.QMainWindow):
         QtCore.QTimer.singleShot(0, self._apply_responsive_layout)
         if not self._startup_update_checked:
             self._startup_update_checked = True
+            self._request_mandatory_update_payload(force=True)
             # Startup burst: detect mandatory updates immediately after dashboard appears.
             for delay in (120, 420, 900, 1700):
                 QtCore.QTimer.singleShot(delay, self._check_mandatory_update_gate)
@@ -7950,7 +8204,7 @@ class Dashboard(QtWidgets.QMainWindow):
         if self._mandatory_update_timer is not None:
             return
         t = QtCore.QTimer(self)
-        t.setInterval(30000)
+        t.setInterval(45000 if self._ultra_low_ram else 30000)
         t.timeout.connect(self._check_mandatory_update_gate)
         t.start()
         self._mandatory_update_timer = t
@@ -7994,9 +8248,16 @@ class Dashboard(QtWidgets.QMainWindow):
     def _normalize_page_visibility(self, idx=None):
         if idx is None:
             idx = self.page_stack.currentIndex()
+        idx = max(0, min(int(idx), len(self.pages) - 1))
+        if (not self._tab_animating) and int(getattr(self, '_visible_page_idx', -1)) == idx:
+            page = self.pages[idx]
+            if page.pos() != QtCore.QPoint(0, 0):
+                page.move(0, 0)
+            return
         for i, page in enumerate(self.pages):
             page.move(0, 0)
             page.setVisible(i == idx)
+        self._visible_page_idx = idx
 
     def _animate_tab_transition(self, from_idx, to_idx):
         if from_idx == to_idx:
@@ -8372,19 +8633,86 @@ class Dashboard(QtWidgets.QMainWindow):
         except Exception:
             return None
 
-    def _mandatory_update_payload(self):
+    def _request_mandatory_update_payload(self, force=False):
+        checker = XUI_HOME / 'bin' / 'xui_update_check.sh'
+        if not checker.exists():
+            return False
+        proc = self._mandatory_payload_proc
+        if proc is not None and proc.state() != QtCore.QProcess.NotRunning:
+            return True
+        now = time.monotonic()
+        ttl = 25.0 if self._ultra_low_ram else 15.0
+        if (not force) and isinstance(self._mandatory_payload_cache, dict):
+            if (now - float(self._mandatory_payload_checked_at)) <= ttl:
+                return False
+        p = QtCore.QProcess(self)
+        p.setProgram('/bin/sh')
+        p.setArguments(['-lc', f'"{checker}" mandatory --json'])
+        p.setProcessChannelMode(QtCore.QProcess.MergedChannels)
+
+        def finished(_code, _status):
+            try:
+                out = bytes(p.readAllStandardOutput()).decode('utf-8', errors='ignore')
+            except Exception:
+                out = ''
+            payload = self._extract_json_blob(out)
+            if isinstance(payload, dict):
+                self._mandatory_payload_cache = payload
+            else:
+                self._mandatory_payload_cache = {'checked': False, 'update_required': False}
+            self._mandatory_payload_checked_at = time.monotonic()
+            self._mandatory_payload_proc = None
+            try:
+                p.deleteLater()
+            except Exception:
+                pass
+            if self.isVisible():
+                QtCore.QTimer.singleShot(0, self._check_mandatory_update_gate)
+
+        def errored(_err):
+            self._mandatory_payload_cache = {'checked': False, 'update_required': False}
+            self._mandatory_payload_checked_at = time.monotonic()
+            self._mandatory_payload_proc = None
+            try:
+                p.deleteLater()
+            except Exception:
+                pass
+
+        p.finished.connect(finished)
+        p.errorOccurred.connect(errored)
+        self._mandatory_payload_proc = p
+        p.start()
+        return True
+
+    def _mandatory_update_payload(self, force=False):
         checker = XUI_HOME / 'bin' / 'xui_update_check.sh'
         if not checker.exists():
             return None
-        cmd = f'/bin/sh -c "{checker} mandatory --json"'
-        out = subprocess.getoutput(cmd)
-        return self._extract_json_blob(out)
+        now = time.monotonic()
+        ttl = 25.0 if self._ultra_low_ram else 15.0
+        if force:
+            self._request_mandatory_update_payload(force=True)
+        if isinstance(self._mandatory_payload_cache, dict):
+            if (now - float(self._mandatory_payload_checked_at)) <= ttl:
+                return dict(self._mandatory_payload_cache)
+        self._request_mandatory_update_payload(force=False)
+        if isinstance(self._mandatory_payload_cache, dict):
+            return dict(self._mandatory_payload_cache)
+        return None
 
     def _launch_mandatory_updater_and_quit(self):
         checker = XUI_HOME / 'bin' / 'xui_update_check.sh'
         if not checker.exists():
             QtWidgets.QApplication.quit()
             return
+        try:
+            if self._mandatory_payload_proc is not None:
+                if self._mandatory_payload_proc.state() != QtCore.QProcess.NotRunning:
+                    self._mandatory_payload_proc.kill()
+                self._mandatory_payload_proc.deleteLater()
+                self._mandatory_payload_proc = None
+        except Exception:
+            pass
         if self._mandatory_update_proc is not None:
             if self._mandatory_update_proc.state() != QtCore.QProcess.NotRunning:
                 return
@@ -8712,18 +9040,33 @@ exit 0
             pass
 
     def _play_sfx(self, name):
-        if name == 'hover':
-            now = time.monotonic()
+        key = str(name or '').strip()
+        if not key:
+            return
+        now = time.monotonic()
+        if key == 'hover':
             if (now - self._last_hover_at) < 0.08:
                 return
             self._last_hover_at = now
-        ensure_audio_output_ready(35)
+        if (now - float(self._last_audio_ready_at)) > 8.0:
+            ensure_audio_output_ready(35)
+            self._last_audio_ready_at = now
         candidates = []
-        base = self.sfx.get(name)
+        base = self.sfx.get(key)
         if base:
             candidates.append(base)
-        candidates.extend(self.sfx_aliases.get(name, []))
-        snd = pick_existing_sound(candidates)
+        candidates.extend(self.sfx_aliases.get(key, []))
+        cache_key = (key, tuple(candidates))
+        snd = None
+        cached = self._sfx_path_cache.get(cache_key)
+        if cached:
+            cp = Path(cached)
+            if cp.exists():
+                snd = cp
+        if snd is None:
+            snd = pick_existing_sound(candidates)
+            if snd is not None:
+                self._sfx_path_cache[cache_key] = str(snd)
         if snd is None:
             return
         play_media(snd, video=False, blocking=False)
@@ -8989,9 +9332,12 @@ exit 0
         proc.start()
 
     def _open_url(self, url):
+        self._prune_web_windows()
         if QtWebEngineWidgets is not None:
             try:
                 w = WebKioskWindow(url, self, sfx_cb=self._play_sfx)
+                w.setAttribute(QtCore.Qt.WA_DeleteOnClose, True)
+                w.destroyed.connect(self._on_web_window_destroyed)
                 self._web_windows.append(w)
                 w.showFullScreen()
                 self._play_sfx('open')
@@ -9006,6 +9352,21 @@ exit 0
             self._run('/bin/sh', ['-c', f'xdg-open "{url}"'])
             return
         self._msg('Browser', f'No browser launcher available.\n{url}')
+
+    def _on_web_window_destroyed(self, _obj=None):
+        self._prune_web_windows()
+
+    def _prune_web_windows(self):
+        alive = []
+        for w in list(self._web_windows):
+            if w is None:
+                continue
+            try:
+                _ = w.windowTitle()
+            except Exception:
+                continue
+            alive.append(w)
+        self._web_windows = alive
 
     def _open_url_external(self, url, normal_mode=True):
         u = str(url or '').strip()
@@ -10208,7 +10569,7 @@ exit 0
         elif action == 'Battery Saver':
             self._run('/bin/sh', ['-c', f'{xui}/bin/xui_battery_saver.sh toggle'])
         elif action == 'Update Check':
-            payload = self._mandatory_update_payload()
+            payload = self._mandatory_update_payload(force=True)
             if isinstance(payload, dict) and bool(payload.get('checked', False)):
                 if bool(payload.get('update_required', False)):
                     repo = str(payload.get('repo', 'afitler79-alt/XUI-X360-FRONTEND'))
@@ -10218,7 +10579,7 @@ exit 0
                 else:
                     self._msg('Update', 'System is up to date.')
             else:
-                self._msg('Update', subprocess.getoutput(f'/bin/sh -c "{xui}/bin/xui_update_check.sh mandatory"'))
+                self._msg('Update', 'Checking updates in background...\nTry again in a moment.')
         elif action == 'System Update':
             self._run_terminal(f'"{xui}/bin/xui_update_system.sh"')
         elif action == 'Family':
@@ -10345,6 +10706,58 @@ exit 0
         except Exception:
             pass
 
+    def closeEvent(self, e):
+        try:
+            if self._mandatory_update_timer is not None:
+                self._mandatory_update_timer.stop()
+        except Exception:
+            pass
+        try:
+            if self._mandatory_payload_proc is not None:
+                if self._mandatory_payload_proc.state() != QtCore.QProcess.NotRunning:
+                    self._mandatory_payload_proc.kill()
+                self._mandatory_payload_proc.deleteLater()
+                self._mandatory_payload_proc = None
+        except Exception:
+            pass
+        try:
+            if self._mandatory_update_proc is not None:
+                if self._mandatory_update_proc.state() != QtCore.QProcess.NotRunning:
+                    self._mandatory_update_proc.kill()
+                self._mandatory_update_proc.deleteLater()
+                self._mandatory_update_proc = None
+        except Exception:
+            pass
+        try:
+            if self._install_task_proc is not None:
+                if self._install_task_proc.state() != QtCore.QProcess.NotRunning:
+                    self._install_task_proc.kill()
+                self._install_task_proc.deleteLater()
+                self._install_task_proc = None
+        except Exception:
+            pass
+        for did in list(self._qgamepads.keys()):
+            gp = self._qgamepads.pop(did, None)
+            if gp is not None:
+                try:
+                    gp.deleteLater()
+                except Exception:
+                    pass
+        for w in list(self._web_windows):
+            if w is None:
+                continue
+            try:
+                w.close()
+            except Exception:
+                pass
+        self._web_windows = []
+        try:
+            if self._gc_timer is not None:
+                self._gc_timer.stop()
+        except Exception:
+            pass
+        super().closeEvent(e)
+
     def keyPressEvent(self, e):
         k = self._canonical_gamepad_key(e.key())
         if self._games_inline is not None and self._games_inline.isVisible():
@@ -10464,22 +10877,27 @@ exit 0
                 if page.right_tiles:
                     self.handle_action(page.right_tiles[self.focus_idx].action)
             return
-        guide_keys = {QtCore.Qt.Key_F1, QtCore.Qt.Key_Home, QtCore.Qt.Key_Meta}
-        key_super_l = getattr(QtCore.Qt, 'Key_Super_L', None)
-        key_super_r = getattr(QtCore.Qt, 'Key_Super_R', None)
-        if key_super_l is not None:
-            guide_keys.add(key_super_l)
-        if key_super_r is not None:
-            guide_keys.add(key_super_r)
-        if k in guide_keys:
+        if k in self._guide_keys:
             self._show_xbox_guide()
             return
         super().keyPressEvent(e)
 
 
 def main():
+    ultra_low_ram = ultra_low_ram_mode()
+    attr = getattr(QtCore.Qt, 'AA_CompressHighFrequencyEvents', None)
+    if attr is not None:
+        try:
+            QtCore.QCoreApplication.setAttribute(attr, True)
+        except Exception:
+            pass
     app = QtWidgets.QApplication(sys.argv)
     app.setApplicationName('XUI Xbox Style')
+    if ultra_low_ram:
+        try:
+            QtGui.QPixmapCache.setCacheLimit(6144)
+        except Exception:
+            pass
     f = app.font()
     scr = app.primaryScreen()
     low_ui = use_low_power_ui(scr)
@@ -19943,6 +20361,36 @@ def normalize_url(text):
     return raw
 
 
+def detect_total_ram_mb():
+    forced = str(os.environ.get('XUI_RAM_MB', '')).strip()
+    if forced:
+        try:
+            return max(0, int(float(forced)))
+        except Exception:
+            pass
+    try:
+        for raw in Path('/proc/meminfo').read_text(encoding='utf-8', errors='ignore').splitlines():
+            line = str(raw).strip()
+            if not line.lower().startswith('memtotal:'):
+                continue
+            parts = line.split()
+            if len(parts) >= 2:
+                return max(0, int(parts[1]) // 1024)
+    except Exception:
+        pass
+    return 0
+
+
+def ultra_low_ram_mode():
+    mode = str(os.environ.get('XUI_RAM_MODE', 'auto')).strip().lower()
+    if mode in ('1', 'true', 'on', 'yes', '2g', '2gb', 'ultra', 'low'):
+        return True
+    if mode in ('0', 'false', 'off', 'no', 'normal', 'full'):
+        return False
+    mb = int(detect_total_ram_mb() or 0)
+    return bool(mb and mb <= 2304)
+
+
 def unwrap_supported_browser_redirect(url_text):
     raw = normalize_url(url_text)
     try:
@@ -20126,6 +20574,7 @@ class WebHub(QtWidgets.QMainWindow):
     def __init__(self, url='https://www.xbox.com', kiosk=False):
         super().__init__()
         self.kiosk = bool(kiosk)
+        self._ultra_low_ram = ultra_low_ram_mode()
         self.pending_url = normalize_url(url)
         self._kbd_opening = False
         self._kbd_last_close = 0.0
@@ -20305,6 +20754,11 @@ class WebHub(QtWidgets.QMainWindow):
                 profile.setHttpCacheType(QtWebEngineWidgets.QWebEngineProfile.DiskHttpCache)
             except Exception:
                 pass
+            if self._ultra_low_ram:
+                try:
+                    profile.setHttpCacheMaximumSize(16 * 1024 * 1024)
+                except Exception:
+                    pass
         try:
             settings = self.web.settings()
             attrs = (
@@ -20462,7 +20916,7 @@ class WebHub(QtWidgets.QMainWindow):
             self._gp = QtGamepad.QGamepad(ids[0], self)
             self._gp_timer = QtCore.QTimer(self)
             self._gp_timer.timeout.connect(self._poll_gamepad)
-            self._gp_timer.start(75)
+            self._gp_timer.start(95 if self._ultra_low_ram else 75)
         except Exception:
             self._gp = None
 
@@ -20925,13 +21379,38 @@ class WebHub(QtWidgets.QMainWindow):
             except Exception:
                 pass
 
+    def closeEvent(self, e):
+        try:
+            if self._gp_timer is not None:
+                self._gp_timer.stop()
+        except Exception:
+            pass
+        try:
+            if self.web is not None:
+                self.web.stop()
+        except Exception:
+            pass
+        super().closeEvent(e)
+
 
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--mode', choices=['hub', 'kiosk', 'normal'], default='hub')
     parser.add_argument('url', nargs='?', default='https://www.xbox.com')
     args = parser.parse_args()
+    ultra_low_ram = ultra_low_ram_mode()
+    attr = getattr(QtCore.Qt, 'AA_CompressHighFrequencyEvents', None)
+    if attr is not None:
+        try:
+            QtCore.QCoreApplication.setAttribute(attr, True)
+        except Exception:
+            pass
     app = QtWidgets.QApplication(sys.argv)
+    if ultra_low_ram:
+        try:
+            QtGui.QPixmapCache.setCacheLimit(4096)
+        except Exception:
+            pass
     fullscreen_mode = args.mode in ('hub', 'kiosk')
     w = WebHub(url=args.url, kiosk=fullscreen_mode)
     if fullscreen_mode:
@@ -21381,6 +21860,14 @@ def _close_session():
 def _pick_existing_sound(candidates):
     if not candidates:
         return None
+    key = tuple(str(fn) for fn in candidates if fn)
+    cache = getattr(_pick_existing_sound, '_cache', {})
+    if key:
+        cached = cache.get(key)
+        if cached:
+            cp = Path(cached)
+            if cp.exists():
+                return cp
     search_dirs = [
         ASSETS_DIR / 'SONIDOS',
         ASSETS_DIR / 'sonidos',
@@ -21395,6 +21882,9 @@ def _pick_existing_sound(candidates):
         for d in search_dirs:
             p = d / str(fn)
             if p.exists():
+                if key:
+                    cache[key] = str(p)
+                    _pick_existing_sound._cache = cache
                 return p
     return None
 
@@ -21419,14 +21909,22 @@ def _play_sfx(name):
     if snd is None:
         return
 
-    for cmd in (
-        ['mpv', '--really-quiet', '--no-terminal', '--no-video', str(snd)],
-        ['ffplay', '-nodisp', '-autoexit', '-loglevel', 'quiet', str(snd)],
-        ['paplay', str(snd)],
-        ['aplay', '-q', str(snd)],
-    ):
+    players = getattr(_play_sfx, '_players', None)
+    if players is None:
+        players = []
+        if shutil.which('mpv'):
+            players.append(('mpv', ['--really-quiet', '--no-terminal', '--no-video']))
+        if shutil.which('ffplay'):
+            players.append(('ffplay', ['-nodisp', '-autoexit', '-loglevel', 'quiet']))
+        if shutil.which('paplay'):
+            players.append(('paplay', []))
+        if shutil.which('aplay'):
+            players.append(('aplay', ['-q']))
+        _play_sfx._players = players
+
+    for bin_name, args in players:
         try:
-            subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            subprocess.Popen([bin_name, *args, str(snd)], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
             return
         except Exception:
             continue
