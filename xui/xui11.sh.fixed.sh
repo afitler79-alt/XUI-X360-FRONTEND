@@ -5674,6 +5674,7 @@ class XboxGuideMenu(QtWidgets.QDialog):
         self._open_anim = None
         self._page_anim = None
         self._blade_anim = None
+        self._shortcuts = []
         self._last_row = 0
         self._section_idx = 0
         self._sections = self._build_sections()
@@ -5806,9 +5807,9 @@ class XboxGuideMenu(QtWidgets.QDialog):
         root.addLayout(body, 1)
 
         if self.mode == 'app':
-            hint_text = '<font color="#49b93e">A Select</font> <font color="#cf2d2d">B Back</font> <font color="#2b7fd8">X Sign Out</font> <font color="#ddb126">Y Xbox Home</font>'
+            hint_text = '<font color="#49b93e">A Select</font> <font color="#cf2d2d">B Back</font> <font color="#2b7fd8">X Sign Out</font> <font color="#ddb126">Y Xbox Home</font> <font color="#e7eff6">LB/RB Page</font>'
         else:
-            hint_text = '<font color="#49b93e">A Select</font> <font color="#cf2d2d">B Back</font> <font color="#2b7fd8">X Cerrar sesion</font> <font color="#ddb126">Y Inicio de Xbox</font>'
+            hint_text = '<font color="#49b93e">A Select</font> <font color="#cf2d2d">B Back</font> <font color="#2b7fd8">X Cerrar sesion</font> <font color="#ddb126">Y Inicio de Xbox</font> <font color="#e7eff6">LB/RB Pagina</font>'
         hint = QtWidgets.QLabel(hint_text)
         hint.setObjectName('xguide_hint')
         root.addWidget(hint, 0, QtCore.Qt.AlignLeft)
@@ -5817,6 +5818,7 @@ class XboxGuideMenu(QtWidgets.QDialog):
         self._clock.timeout.connect(self._refresh_meta)
         self._clock.start(1000)
         self._refresh_meta()
+        self._setup_shortcuts()
         self._switch_section(0, animate=False)
 
     def _build_sections(self):
@@ -5845,8 +5847,34 @@ class XboxGuideMenu(QtWidgets.QDialog):
             except Exception:
                 pass
 
+    def _setup_shortcuts(self):
+        def add_sc(key, cb):
+            sc = QtWidgets.QShortcut(QtGui.QKeySequence(int(key)), self)
+            sc.setContext(QtCore.Qt.WidgetWithChildrenShortcut)
+            sc.activated.connect(cb)
+            self._shortcuts.append(sc)
+
+        add_sc(QtCore.Qt.Key_Escape, self.reject)
+        add_sc(QtCore.Qt.Key_Back, self.reject)
+        add_sc(QtCore.Qt.Key_B, self.reject)
+        add_sc(QtCore.Qt.Key_Return, self._accept_current)
+        add_sc(QtCore.Qt.Key_Enter, self._accept_current)
+        add_sc(QtCore.Qt.Key_PageUp, lambda: self._cycle_section(-1))
+        add_sc(QtCore.Qt.Key_PageDown, lambda: self._cycle_section(1))
+        # Switch-style shoulder layout fallbacks.
+        add_sc(QtCore.Qt.Key_BracketLeft, lambda: self._cycle_section(-1))
+        add_sc(QtCore.Qt.Key_BracketRight, lambda: self._cycle_section(1))
+        add_sc(QtCore.Qt.Key_Y, self._go_home)
+        add_sc(QtCore.Qt.Key_Tab, self._go_home)
+        add_sc(QtCore.Qt.Key_X, self._sign_out)
+        add_sc(QtCore.Qt.Key_Space, self._sign_out)
+
     def _switch_section_from_blade(self, section_idx):
         self._switch_section(section_idx, animate=True)
+
+    def _cycle_section(self, delta):
+        total = max(1, len(self._sections))
+        self._switch_section((int(self._section_idx) + int(delta)) % total, animate=True)
 
     def _refresh_side_blades(self):
         n = max(1, len(self._sections))
@@ -6033,6 +6061,16 @@ class XboxGuideMenu(QtWidgets.QDialog):
         self._sfx('select')
         self.accept()
 
+    def _go_home(self):
+        self._selection = 'Xbox Home' if self.mode == 'app' else 'Inicio de Xbox'
+        self._sfx('select')
+        self.accept()
+
+    def _sign_out(self):
+        self._selection = 'Sign Out' if self.mode == 'app' else 'Cerrar sesion'
+        self._sfx('select')
+        self.accept()
+
     def selected(self):
         if self._selection:
             return self._selection
@@ -6055,6 +6093,7 @@ class XboxGuideMenu(QtWidgets.QDialog):
             self.move(max(0, x), max(0, y))
         self._refresh_meta()
         self._refresh_side_blades()
+        self._sfx('open')
         self._animate_open()
         cur = self._current_list()
         if cur is not None:
@@ -6091,40 +6130,28 @@ class XboxGuideMenu(QtWidgets.QDialog):
     def keyPressEvent(self, e):
         k = e.key()
         if k in (QtCore.Qt.Key_Y, QtCore.Qt.Key_Tab):
-            self._selection = 'Xbox Home' if self.mode == 'app' else 'Inicio de Xbox'
-            self._sfx('select')
-            self.accept()
+            self._go_home()
             return
         if k in (QtCore.Qt.Key_X, QtCore.Qt.Key_Space):
-            self._selection = 'Sign Out' if self.mode == 'app' else 'Cerrar sesion'
-            self._sfx('select')
-            self.accept()
+            self._sign_out()
             return
-        if k in (QtCore.Qt.Key_Left,):
-            self._switch_section((int(self._section_idx) - 1) % max(1, len(self._sections)), animate=True)
+        if k in (QtCore.Qt.Key_Prior, QtCore.Qt.Key_PageUp, QtCore.Qt.Key_BracketLeft):
+            self._cycle_section(-1)
             return
-        if k in (QtCore.Qt.Key_Right,):
-            self._switch_section((int(self._section_idx) + 1) % max(1, len(self._sections)), animate=True)
+        if k in (QtCore.Qt.Key_Next, QtCore.Qt.Key_PageDown, QtCore.Qt.Key_BracketRight):
+            self._cycle_section(1)
             return
-        if k in (QtCore.Qt.Key_Prior, QtCore.Qt.Key_Next):
-            lw = self._current_list()
-            if lw is not None:
-                n = int(lw.count())
-                if n > 0:
-                    step = -5 if k == QtCore.Qt.Key_Prior else 5
-                    row = int(lw.currentRow())
-                    if row < 0:
-                        row = 0
-                    row = max(0, min(n - 1, row + step))
-                    lw.setCurrentRow(row)
-            return
-        if k in (QtCore.Qt.Key_Escape, QtCore.Qt.Key_Back):
+        if k in (QtCore.Qt.Key_Escape, QtCore.Qt.Key_Back, QtCore.Qt.Key_B):
             self.reject()
             return
         if k in (QtCore.Qt.Key_Return, QtCore.Qt.Key_Enter):
             self._accept_current()
             return
         super().keyPressEvent(e)
+
+    def reject(self):
+        self._sfx('back')
+        super().reject()
 
 
 class GamesInlineOverlay(QtWidgets.QFrame):
