@@ -18813,9 +18813,11 @@ BASH
 #!/usr/bin/env python3
 import argparse
 import json
+import os
 import sys
 import time
 from pathlib import Path
+from urllib.parse import parse_qs, unquote, urlparse
 from PyQt5 import QtCore, QtGui, QtWidgets
 try:
     from PyQt5 import QtWebEngineWidgets
@@ -18831,6 +18833,10 @@ RECENT_FILE = DATA_HOME / 'webhub_recent.json'
 FAV_FILE = DATA_HOME / 'webhub_favorites.json'
 SOCIAL_MESSAGES_FILE = DATA_HOME / 'social_messages_recent.json'
 MAX_RECENT = 24
+MODERN_USER_AGENT = os.environ.get(
+    'XUI_WEBHUB_USER_AGENT',
+    'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36'
+)
 
 
 def safe_read(path, default):
@@ -18852,6 +18858,44 @@ def normalize_url(text):
         return 'https://www.xbox.com'
     if '://' not in raw and not raw.startswith('about:'):
         raw = 'https://' + raw
+    return raw
+
+
+def unwrap_supported_browser_redirect(url_text):
+    raw = normalize_url(url_text)
+    try:
+        parsed = urlparse(raw)
+    except Exception:
+        return raw
+    host = str(parsed.netloc or '').lower()
+    path = str(parsed.path or '')
+    if 'youtube.' not in host:
+        return raw
+    if not path.startswith('/supported_browsers'):
+        return raw
+    try:
+        qs = parse_qs(str(parsed.query or ''), keep_blank_values=False)
+    except Exception:
+        qs = {}
+    next_url = ''
+    for key in ('next_url', 'url', 'continue'):
+        vals = qs.get(key) or []
+        if vals and str(vals[0]).strip():
+            next_url = str(vals[0]).strip()
+            break
+    if not next_url:
+        return raw
+    try:
+        next_url = unquote(next_url).strip()
+    except Exception:
+        next_url = str(next_url).strip()
+    if next_url.startswith('//'):
+        next_url = 'https:' + next_url
+    elif next_url.startswith('/'):
+        next_url = 'https://www.youtube.com' + next_url
+    next_url = normalize_url(next_url)
+    if next_url and next_url != raw:
+        return next_url
     return raw
 
 
@@ -19114,6 +19158,7 @@ class WebHub(QtWidgets.QMainWindow):
         else:
             self.web = QtWebEngineWidgets.QWebEngineView()
             self.web.installEventFilter(self)
+            self._configure_webengine_runtime()
             self.stack.addWidget(self.web)
         self.hub = self._build_hub_widget()
         self.stack.addWidget(self.hub)
@@ -19141,6 +19186,60 @@ class WebHub(QtWidgets.QMainWindow):
         QtWidgets.QShortcut(QtGui.QKeySequence(QtCore.Qt.Key_Home), self, activated=self._show_guide)
         QtWidgets.QShortcut(QtGui.QKeySequence(QtCore.Qt.Key_F2), self, activated=self._open_virtual_keyboard_contextual)
         QtWidgets.QShortcut(QtGui.QKeySequence('Ctrl+K'), self, activated=self._open_virtual_keyboard_contextual)
+
+    def _configure_webengine_runtime(self):
+        if self.web is None or QtWebEngineWidgets is None:
+            return
+        profile = None
+        try:
+            profile = self.web.page().profile()
+        except Exception:
+            profile = None
+        if profile is not None:
+            try:
+                DATA_HOME.mkdir(parents=True, exist_ok=True)
+                cache_dir = DATA_HOME / 'webengine-cache'
+                storage_dir = DATA_HOME / 'webengine-profile'
+                cache_dir.mkdir(parents=True, exist_ok=True)
+                storage_dir.mkdir(parents=True, exist_ok=True)
+                profile.setCachePath(str(cache_dir))
+                profile.setPersistentStoragePath(str(storage_dir))
+            except Exception:
+                pass
+            try:
+                profile.setHttpAcceptLanguage('es-ES,es;q=0.9,en-US;q=0.8,en;q=0.7')
+            except Exception:
+                pass
+            try:
+                profile.setHttpUserAgent(MODERN_USER_AGENT)
+            except Exception:
+                pass
+            try:
+                profile.setPersistentCookiesPolicy(QtWebEngineWidgets.QWebEngineProfile.ForcePersistentCookies)
+            except Exception:
+                pass
+            try:
+                profile.setHttpCacheType(QtWebEngineWidgets.QWebEngineProfile.DiskHttpCache)
+            except Exception:
+                pass
+        try:
+            settings = self.web.settings()
+            attrs = (
+                ('JavascriptEnabled', True),
+                ('LocalStorageEnabled', True),
+                ('PluginsEnabled', True),
+                ('FullScreenSupportEnabled', True),
+                ('ScreenCaptureEnabled', True),
+                ('WebGLEnabled', True),
+                ('Accelerated2dCanvasEnabled', True),
+                ('PlaybackRequiresUserGesture', False),
+            )
+            for name, value in attrs:
+                attr = getattr(QtWebEngineWidgets.QWebEngineSettings, name, None)
+                if attr is not None:
+                    settings.setAttribute(attr, bool(value))
+        except Exception:
+            pass
 
     def _recent_messages_text(self):
         arr = safe_read(SOCIAL_MESSAGES_FILE, [])
@@ -19586,6 +19685,7 @@ class WebHub(QtWidgets.QMainWindow):
 
     def open_url(self, raw):
         url = normalize_url(raw)
+        url = unwrap_supported_browser_redirect(url)
         self.addr.setText(url)
         if self.web is None:
             return
@@ -19594,11 +19694,16 @@ class WebHub(QtWidgets.QMainWindow):
 
     def _on_url_changed(self, qurl):
         s = qurl.toString()
-        self.addr.setText(s)
+        self.addr.setText(unwrap_supported_browser_redirect(s))
 
     def _on_loaded(self, ok):
         if ok and self.web is not None:
-            self._remember_recent(self.web.url().toString())
+            current = self.web.url().toString()
+            fixed = unwrap_supported_browser_redirect(current)
+            if fixed and fixed != current:
+                self.open_url(fixed)
+                return
+            self._remember_recent(current)
 
     def _go_back(self):
         if self.web is not None:
