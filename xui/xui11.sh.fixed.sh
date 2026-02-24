@@ -7519,6 +7519,19 @@ exit 0
             proc.deleteLater()
         self._mandatory_update_in_progress = False
         ok = (status == QtCore.QProcess.NormalExit and int(code) == 0)
+        if not ok:
+            # Soft-success fallback: updater can return non-zero even when files/state are already updated.
+            out = str(self._mandatory_update_output or '')
+            if ('update-applied' in out) or ('step=state-written' in out):
+                ok = True
+            else:
+                try:
+                    payload_after = self._mandatory_update_payload()
+                except Exception:
+                    payload_after = {}
+                if isinstance(payload_after, dict):
+                    if bool(payload_after.get('checked', False)) and not bool(payload_after.get('update_required', True)):
+                        ok = True
         if ok:
             dlg = self._mandatory_update_progress
             if dlg is not None and hasattr(dlg, 'finish_ok'):
@@ -18386,6 +18399,10 @@ apply_update(){
   fi
 
   echo "step=installer-start"
+  local installer_rc=0
+  local installer_started_epoch
+  installer_started_epoch="$(date +%s)"
+  set +e
   if [ "${XUI_AUTH_MODE:-}" = "pkexec" ]; then
     (
       cd "$SRC"
@@ -18397,6 +18414,7 @@ apply_update(){
           bash "$installer" --no-auto-install --skip-apt-wait
       fi
     )
+    installer_rc=$?
   else
     (
       cd "$SRC"
@@ -18408,8 +18426,26 @@ apply_update(){
           bash "$installer" --no-auto-install --skip-apt-wait
       fi
     )
+    installer_rc=$?
   fi
+  set -e
   echo "step=installer-done"
+  if [ "$installer_rc" -ne 0 ]; then
+    echo "warning=installer-exit-$installer_rc"
+    local dash_file marker_file checker_file
+    local dash_mtime marker_mtime checker_mtime
+    dash_file="$HOME/.xui/dashboard/pyqt_dashboard_improved.py"
+    marker_file="$HOME/.xui/.xui_4_0xv_setup_done"
+    checker_file="$HOME/.xui/bin/xui_update_check.sh"
+    dash_mtime="$(stat -c %Y "$dash_file" 2>/dev/null || echo 0)"
+    marker_mtime="$(stat -c %Y "$marker_file" 2>/dev/null || echo 0)"
+    checker_mtime="$(stat -c %Y "$checker_file" 2>/dev/null || echo 0)"
+    if [ "$dash_mtime" -lt "$installer_started_epoch" ] && [ "$marker_mtime" -lt "$installer_started_epoch" ] && [ "$checker_mtime" -lt "$installer_started_epoch" ]; then
+      echo "Installer failed with code $installer_rc and no updated core artifacts were detected."
+      exit "$installer_rc"
+    fi
+    echo "warning=installer-soft-success-core-files-detected"
+  fi
 
   # Ensure dashboard service stays enabled after updates.
   if command -v systemctl >/dev/null 2>&1; then
@@ -24272,10 +24308,12 @@ configure_dashboard_passwordless_sudo(){
 finish_setup(){
   info "Finalizing installation"
   run_user_systemctl(){
-    local rc
+    local rc=0
+    set +e
     if command -v timeout >/dev/null 2>&1; then
       timeout "${XUI_SYSTEMCTL_TIMEOUT_SEC:-15}" systemctl --user "$@" >/dev/null 2>&1
       rc=$?
+      set -e
       if [ "$rc" -eq 124 ]; then
         warn "systemctl --user $* timed out after ${XUI_SYSTEMCTL_TIMEOUT_SEC:-15}s"
         return 1
@@ -24283,6 +24321,9 @@ finish_setup(){
       return "$rc"
     fi
     systemctl --user "$@" >/dev/null 2>&1
+    rc=$?
+    set -e
+    return "$rc"
   }
   # make sure everything is executable
   chmod -R a+x "$BIN_DIR" || true
@@ -24320,9 +24361,9 @@ finish_setup(){
   fi
   if [ -x "$BIN_DIR/xui_install_fnae_deps.sh" ]; then
     if command -v timeout >/dev/null 2>&1; then
-      XUI_NONINTERACTIVE=1 timeout "${XUI_FNAE_DEPS_TIMEOUT_SEC:-120}" "$BIN_DIR/xui_install_fnae_deps.sh" || true
+      XUI_NONINTERACTIVE=1 timeout "${XUI_FNAE_DEPS_TIMEOUT_SEC:-120}" "$BIN_DIR/xui_install_fnae_deps.sh" >/dev/null 2>&1 || true
     else
-      XUI_NONINTERACTIVE=1 "$BIN_DIR/xui_install_fnae_deps.sh" || true
+      XUI_NONINTERACTIVE=1 "$BIN_DIR/xui_install_fnae_deps.sh" >/dev/null 2>&1 || true
     fi
   fi
   info "Installation complete."
