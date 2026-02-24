@@ -1130,6 +1130,8 @@ import time
 import re
 import hashlib
 import shlex
+import base64
+import tempfile
 import queue
 import socket
 import threading
@@ -1159,6 +1161,10 @@ WORLD_CHAT_FILE = DATA_HOME / 'world_chat.json'
 SOCIAL_MESSAGES_FILE = DATA_HOME / 'social_messages_recent.json'
 FRIEND_REQUESTS_FILE = DATA_HOME / 'friend_requests.json'
 BEACONS_FILE = DATA_HOME / 'beacons.json'
+SOCIAL_PROFILE_FILE = DATA_HOME / 'social_profile.json'
+PARTY_STATE_FILE = DATA_HOME / 'party_state.json'
+VOICE_INBOX_FILE = DATA_HOME / 'voice_inbox.json'
+VOICE_DIR = DATA_HOME / 'voice'
 
 sys.path.insert(0, str(XUI_HOME / 'bin'))
 try:
@@ -1259,6 +1265,7 @@ def play_startup_video():
 
 def ensure_data():
     DATA_HOME.mkdir(parents=True, exist_ok=True)
+    VOICE_DIR.mkdir(parents=True, exist_ok=True)
     if not RECENT_FILE.exists():
         RECENT_FILE.write_text('[]')
     if not FRIENDS_FILE.exists():
@@ -1272,6 +1279,60 @@ def ensure_data():
         FRIEND_REQUESTS_FILE.write_text('[]')
     if not BEACONS_FILE.exists():
         BEACONS_FILE.write_text('[]')
+    if not SOCIAL_PROFILE_FILE.exists():
+        SOCIAL_PROFILE_FILE.write_text('{}')
+    if not PARTY_STATE_FILE.exists():
+        PARTY_STATE_FILE.write_text('{}')
+    if not VOICE_INBOX_FILE.exists():
+        VOICE_INBOX_FILE.write_text('[]')
+
+
+def _safe_read_text(path, limit=4096):
+    try:
+        txt = Path(path).read_text(encoding='utf-8', errors='ignore')
+    except Exception:
+        return ''
+    if limit and len(txt) > int(limit):
+        return txt[: int(limit)]
+    return txt
+
+
+def detect_runtime_profile():
+    forced = str(os.environ.get('XUI_DEVICE_PROFILE', '')).strip().lower()
+    if forced:
+        return forced
+    marker = (
+        _safe_read_text('/proc/device-tree/model', 512)
+        + ' '
+        + _safe_read_text('/sys/firmware/devicetree/base/model', 512)
+        + ' '
+        + _safe_read_text('/proc/cpuinfo', 8192)
+    ).lower()
+    if any(token in marker for token in ('nintendo', 'switch', 'tegra', 'l4t')):
+        return 'switch'
+    if any(token in marker for token in ('steam deck', 'neptune', 'jupiter')):
+        return 'steamdeck'
+    return 'pc'
+
+
+def use_low_power_ui(screen=None):
+    mode = str(os.environ.get('XUI_UI_PERF', 'auto')).strip().lower()
+    if mode in ('1', 'true', 'on', 'yes', 'low', 'eco', 'battery'):
+        return True
+    if mode in ('0', 'false', 'off', 'no', 'high', 'full'):
+        return False
+    profile = detect_runtime_profile()
+    if profile in ('switch', 'steamdeck'):
+        return True
+    if screen is not None:
+        try:
+            g = screen.availableGeometry()
+            if g.width() <= 1366 or g.height() <= 768:
+                return True
+        except Exception:
+            pass
+    c = os.cpu_count() or 0
+    return bool(c and c <= 4)
 
 
 def pick_existing_sound(candidates):
@@ -1377,8 +1438,11 @@ def parse_peer_id(text):
 
 
 class InlineSocialEngine:
-    def __init__(self, nickname, chat_base=38600, discovery_port=38655):
+    def __init__(self, nickname, user_id='', chat_base=38600, discovery_port=38655):
         self.nickname = nickname
+        raw_uid = str(user_id or '').strip()
+        raw_uid = ''.join(ch for ch in raw_uid if ch.isalnum() or ch in ('-', '_'))
+        self.user_id = raw_uid[:40] if raw_uid else uuid.uuid4().hex[:16]
         self.node_id = uuid.uuid4().hex[:12]
         self.chat_port = self._find_open_port(chat_base, 24)
         self.discovery_port = int(discovery_port)
@@ -1394,6 +1458,7 @@ class InlineSocialEngine:
         self.lock = threading.Lock()
         self.local_ips = set(local_ipv4_addresses())
         self._seen_world_ids = set()
+        self._presence_tick = 0
 
     def _sanitize_topic(self, text):
         raw = ''.join(ch.lower() if ch.isalnum() or ch in ('-', '_', '.') else '-' for ch in str(text or '').strip())
@@ -1440,6 +1505,7 @@ class InlineSocialEngine:
             self._udp_discovery_sender,
             self._peer_gc_loop,
             self._world_recv_loop,
+            self._world_presence_loop,
         ):
             t = threading.Thread(target=fn, daemon=True)
             self.threads.append(t)
@@ -1464,6 +1530,7 @@ class InlineSocialEngine:
         payload = {
             'type': 'chat',
             'node_id': self.node_id,
+            'user_id': self.user_id,
             'from': self.nickname,
             'text': str(text),
             'ts': time.time(),
@@ -1475,6 +1542,7 @@ class InlineSocialEngine:
         payload = {
             'type': 'private_message',
             'node_id': self.node_id,
+            'user_id': self.user_id,
             'from': self.nickname,
             'text': str(text),
             'ts': time.time(),
@@ -1486,8 +1554,23 @@ class InlineSocialEngine:
         payload = {
             'type': 'friend_request',
             'node_id': self.node_id,
+            'user_id': self.user_id,
             'from': self.nickname,
             'note': str(note or 'XUI friend request'),
+            'ts': time.time(),
+            'reply_port': int(self.chat_port or 0),
+        }
+        self._send_packet(host, port, payload)
+
+    def send_voice_message(self, host, port, mime, duration, encoded_audio):
+        payload = {
+            'type': 'voice_message',
+            'node_id': self.node_id,
+            'user_id': self.user_id,
+            'from': self.nickname,
+            'mime': str(mime or 'audio/ogg'),
+            'duration': float(duration or 0.0),
+            'audio': str(encoded_audio or ''),
             'ts': time.time(),
             'reply_port': int(self.chat_port or 0),
         }
@@ -1497,16 +1580,8 @@ class InlineSocialEngine:
         topic = urllib.parse.quote(self.world_topic, safe='')
         return f'{self.world_relay}/{topic}{suffix}'
 
-    def send_world_chat(self, text):
-        msg = {
-            'kind': 'xui_world_chat',
-            'node_id': self.node_id,
-            'from': self.nickname,
-            'text': str(text or ''),
-            'room': self.world_topic,
-            'ts': time.time(),
-        }
-        data = json.dumps(msg, ensure_ascii=False).encode('utf-8', errors='ignore')
+    def _post_world_payload(self, payload):
+        data = json.dumps(payload, ensure_ascii=False).encode('utf-8', errors='ignore')
         req = urllib.request.Request(
             self._world_url(''),
             data=data,
@@ -1514,11 +1589,102 @@ class InlineSocialEngine:
             headers={
                 'Content-Type': 'text/plain; charset=utf-8',
                 'User-Agent': 'xui-dashboard-world-chat',
-                'X-Title': f'XUI:{self.nickname}',
+                'X-Title': f'XUI:{self.nickname}:{self.user_id}',
             },
         )
         with urllib.request.urlopen(req, timeout=8) as r:
             _ = r.read(256)
+
+    def send_world_event(self, kind, **extra):
+        payload = {
+            'kind': str(kind or ''),
+            'node_id': self.node_id,
+            'user_id': self.user_id,
+            'from': self.nickname,
+            'room': self.world_topic,
+            'ts': time.time(),
+        }
+        payload.update(extra or {})
+        self._post_world_payload(payload)
+
+    def send_world_chat(self, text):
+        self.send_world_event('xui_world_chat', text=str(text or ''))
+
+    def send_world_private_message(self, to_user_id, text):
+        to_uid = str(to_user_id or '').strip()
+        if not to_uid:
+            raise RuntimeError('missing target user id')
+        self.send_world_event(
+            'xui_world_pm',
+            to_user_id=to_uid,
+            text=str(text or ''),
+        )
+
+    def send_world_friend_request(self, to_user_id, note=''):
+        to_uid = str(to_user_id or '').strip()
+        if not to_uid:
+            raise RuntimeError('missing target user id')
+        self.send_world_event(
+            'xui_friend_request',
+            to_user_id=to_uid,
+            note=str(note or 'XUI friend request'),
+        )
+
+    def send_world_friend_accept(self, to_user_id):
+        to_uid = str(to_user_id or '').strip()
+        if not to_uid:
+            raise RuntimeError('missing target user id')
+        self.send_world_event('xui_friend_accept', to_user_id=to_uid)
+
+    def send_world_party_invite(self, to_user_id, party_id, party_name=''):
+        to_uid = str(to_user_id or '').strip()
+        pid = str(party_id or '').strip()
+        if not to_uid or not pid:
+            raise RuntimeError('missing party invite data')
+        self.send_world_event(
+            'xui_party_invite',
+            to_user_id=to_uid,
+            party_id=pid,
+            party_name=str(party_name or ''),
+        )
+
+    def send_world_party_state(self, party_id, state='join'):
+        pid = str(party_id or '').strip()
+        if not pid:
+            return
+        self.send_world_event(
+            'xui_party_state',
+            party_id=pid,
+            state=str(state or 'join'),
+        )
+
+    def send_world_voice_message(self, to_user_id, mime, duration, encoded_audio, party_id=''):
+        to_uid = str(to_user_id or '').strip()
+        pid = str(party_id or '').strip()
+        if not to_uid and not pid:
+            raise RuntimeError('missing voice target')
+        self.send_world_event(
+            'xui_voice_msg',
+            to_user_id=to_uid,
+            party_id=pid,
+            mime=str(mime or 'audio/ogg'),
+            duration=float(duration or 0.0),
+            audio=str(encoded_audio or ''),
+        )
+
+    def _world_presence_loop(self):
+        while self.running:
+            if self.world_enabled:
+                self._presence_tick += 1
+                try:
+                    self.send_world_event(
+                        'xui_presence',
+                        chat_port=int(self.chat_port or 0),
+                        tick=int(self._presence_tick),
+                    )
+                except Exception:
+                    pass
+            time.sleep(12.0)
 
     def _peer_key(self, host, port):
         return f'{host}:{int(port)}'
@@ -1706,12 +1872,19 @@ class InlineSocialEngine:
                 except Exception:
                     continue
                 mtype = str(msg.get('type') or '')
-                if mtype not in ('chat', 'private_message', 'friend_request'):
+                if mtype not in ('chat', 'private_message', 'friend_request', 'voice_message'):
                     continue
                 sender = str(msg.get('from') or host)
                 text = str(msg.get('text') or '').strip()
                 note = str(msg.get('note') or '').strip()
                 sender_node = str(msg.get('node_id') or '')
+                sender_user_id = str(msg.get('user_id') or '').strip()
+                mime = str(msg.get('mime') or 'audio/ogg')
+                voice_blob = str(msg.get('audio') or '').strip()
+                try:
+                    voice_dur = float(msg.get('duration') or 0.0)
+                except Exception:
+                    voice_dur = 0.0
                 try:
                     reply_port = int(msg.get('reply_port') or 0)
                 except Exception:
@@ -1719,7 +1892,11 @@ class InlineSocialEngine:
                 if reply_port > 0:
                     self._upsert_peer(sender, host, reply_port, 'LAN', sender_node)
                 if mtype == 'friend_request':
-                    self.events.put(('friend_request', sender, host, int(reply_port or 0), note))
+                    self.events.put(('friend_request', sender, host, int(reply_port or 0), note, sender_user_id))
+                    continue
+                if mtype == 'voice_message':
+                    if voice_blob:
+                        self.events.put(('voice_message', sender, host, int(reply_port or 0), mime, voice_dur, voice_blob, sender_user_id))
                     continue
                 if text and mtype == 'private_message':
                     self.events.put(('private_message', sender, text))
@@ -1780,16 +1957,92 @@ class InlineSocialEngine:
                                 'room': self.world_topic,
                                 'ts': evt.get('time', time.time()),
                             }
-                        if str(payload.get('kind') or '') != 'xui_world_chat':
-                            continue
+                        kind = str(payload.get('kind') or 'xui_world_chat')
                         if str(payload.get('room') or self.world_topic) != self.world_topic:
                             continue
                         if str(payload.get('node_id') or '') == self.node_id:
                             continue
+                        from_user_id = str(payload.get('user_id') or '').strip()
+                        if from_user_id and from_user_id == self.user_id:
+                            continue
                         who = str(payload.get('from') or 'WORLD')
                         txt = str(payload.get('text') or '').strip()
-                        if txt:
-                            self.events.put(('world_chat', who, txt))
+
+                        if kind == 'xui_world_chat':
+                            if txt:
+                                self.events.put(('world_chat', who, txt))
+                            continue
+                        if kind == 'xui_presence':
+                            try:
+                                chat_port = int(payload.get('chat_port') or 0)
+                            except Exception:
+                                chat_port = 0
+                            self.events.put((
+                                'world_presence',
+                                {
+                                    'name': who,
+                                    'user_id': from_user_id,
+                                    'node_id': str(payload.get('node_id') or ''),
+                                    'chat_port': chat_port,
+                                    'ts': float(payload.get('ts') or time.time()),
+                                },
+                            ))
+                            continue
+                        if kind == 'xui_world_pm':
+                            to_user = str(payload.get('to_user_id') or '').strip()
+                            if to_user and to_user == self.user_id and txt:
+                                self.events.put(('world_private_message', who, from_user_id, txt))
+                            continue
+                        if kind == 'xui_friend_request':
+                            to_user = str(payload.get('to_user_id') or '').strip()
+                            if to_user and to_user == self.user_id:
+                                note = str(payload.get('note') or '').strip()
+                                self.events.put(('global_friend_request', who, from_user_id, note))
+                            continue
+                        if kind == 'xui_friend_accept':
+                            to_user = str(payload.get('to_user_id') or '').strip()
+                            if to_user and to_user == self.user_id:
+                                self.events.put(('global_friend_accept', who, from_user_id))
+                            continue
+                        if kind == 'xui_party_invite':
+                            to_user = str(payload.get('to_user_id') or '').strip()
+                            if to_user and to_user == self.user_id:
+                                self.events.put((
+                                    'party_invite',
+                                    {
+                                        'from': who,
+                                        'from_user_id': from_user_id,
+                                        'party_id': str(payload.get('party_id') or '').strip(),
+                                        'party_name': str(payload.get('party_name') or '').strip(),
+                                        'ts': int(time.time()),
+                                    },
+                                ))
+                            continue
+                        if kind == 'xui_party_state':
+                            self.events.put((
+                                'party_state',
+                                {
+                                    'from': who,
+                                    'from_user_id': from_user_id,
+                                    'party_id': str(payload.get('party_id') or '').strip(),
+                                    'state': str(payload.get('state') or '').strip(),
+                                    'ts': int(time.time()),
+                                },
+                            ))
+                            continue
+                        if kind == 'xui_voice_msg':
+                            to_user = str(payload.get('to_user_id') or '').strip()
+                            party_id = str(payload.get('party_id') or '').strip()
+                            if (to_user and to_user == self.user_id) or party_id:
+                                mime = str(payload.get('mime') or 'audio/ogg')
+                                audio = str(payload.get('audio') or '').strip()
+                                try:
+                                    duration = float(payload.get('duration') or 0.0)
+                                except Exception:
+                                    duration = 0.0
+                                if audio:
+                                    self.events.put(('world_voice_message', who, from_user_id, party_id, mime, duration, audio))
+                            continue
             except Exception as exc:
                 self.events.put(('status', f'World relay reconnecting: {exc}'))
                 time.sleep(min(8.0, backoff))
@@ -1800,11 +2053,21 @@ class SocialOverlay(QtWidgets.QDialog):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.nickname = current_gamertag()
-        self.engine = InlineSocialEngine(self.nickname)
+        self.social_profile = self._load_social_profile()
+        self.user_id = str(self.social_profile.get('user_id') or uuid.uuid4().hex[:16])
+        self.engine = InlineSocialEngine(self.nickname, self.user_id)
         self.peer_items = {}
         self.peer_data = {}
+        self.global_players = {}
         self.friends = []
         self.friend_requests = []
+        self.voice_inbox = []
+        self.last_party_invite = None
+        self.party_state = {
+            'party_id': '',
+            'party_name': '',
+            'members': {},
+        }
         self._community_mode = 'messages'
         self._focus_zone = 0
         self.setModal(True)
@@ -1813,15 +2076,27 @@ class SocialOverlay(QtWidgets.QDialog):
         self._build()
         self._load_friends()
         self._load_friend_requests()
+        self._load_voice_inbox()
+        self._load_party_state()
         self._load_manual_peers()
         self._load_world_settings()
         self.engine.start()
+        try:
+            self.engine.send_world_event('xui_presence', chat_port=int(self.engine.chat_port or 0), tick=0)
+        except Exception:
+            pass
+        if str(self.party_state.get('party_id') or '').strip():
+            try:
+                self.engine.send_world_party_state(str(self.party_state.get('party_id')), state='join')
+            except Exception:
+                pass
         self._refresh_world_peer()
         self.timer = QtCore.QTimer(self)
         self.timer.timeout.connect(self._poll_events)
         self.timer.start(120)
-        self._append_system('LAN autodiscovery enabled (broadcast + probe). Add peer for Internet P2P.')
+        self._append_system('LAN autodiscovery enabled (broadcast + probe).')
         self._append_system(f"World chat ready via relay ({self.engine.world_relay}) room: {self.engine.world_topic}")
+        self._append_system(f'Global social ID: {self.user_id}')
 
     def _build(self):
         self._vk_opening = False
@@ -1829,22 +2104,27 @@ class SocialOverlay(QtWidgets.QDialog):
         self._action_items = {}
         self.setStyleSheet('''
             QFrame#social_panel {
-                background:qlineargradient(x1:0,y1:0,x2:1,y2:1, stop:0 #313740, stop:1 #1a2028);
-                border:2px solid rgba(214,223,235,0.52);
-                border-radius:7px;
+                background:#d2d7dc;
+                border:2px solid rgba(239,244,248,0.78);
+                border-radius:0px;
+            }
+            QFrame#social_header {
+                background:qlineargradient(x1:0,y1:0,x2:1,y2:0, stop:0 #1a2028, stop:1 #0f141b);
+                border:none;
             }
             QFrame#social_col {
-                background:rgba(52,61,72,0.92);
-                border:1px solid rgba(196,208,222,0.32);
+                background:#cad0d6;
+                border:1px solid rgba(111,120,129,0.46);
             }
-            QLabel#social_title { color:#f3f7f7; font-size:28px; font-weight:800; }
-            QLabel#social_hint { color:rgba(237,243,247,0.82); font-size:15px; }
-            QLabel#social_col_title { color:#ecf3f8; font-size:20px; font-weight:800; }
+            QLabel#social_title { color:#f4f8fb; font-size:40px; font-weight:900; }
+            QLabel#social_hint { color:#23303d; font-size:16px; font-weight:700; }
+            QLabel#social_col_title { color:#1f2a35; font-size:20px; font-weight:900; }
             QListWidget {
-                background:rgba(236,239,242,0.92);
+                background:#d7dde2;
                 color:#20252b;
-                border:1px solid rgba(0,0,0,0.26);
-                font-size:24px;
+                border:1px solid rgba(0,0,0,0.30);
+                font-size:21px;
+                font-weight:700;
                 outline:none;
             }
             QListWidget::item {
@@ -1854,31 +2134,32 @@ class SocialOverlay(QtWidgets.QDialog):
             QListWidget::item:selected {
                 color:#f3fff2;
                 background:qlineargradient(x1:0,y1:0,x2:1,y2:0, stop:0 #4ea93f, stop:1 #2f8832);
-                border:1px solid rgba(255,255,255,0.25);
+                border:1px solid rgba(255,255,255,0.35);
             }
             QPlainTextEdit {
-                background:rgba(228,233,238,0.96);
-                border:1px solid rgba(32,39,48,0.28);
+                background:#dce2e7;
+                border:1px solid rgba(32,39,48,0.35);
                 color:#17202a;
-                font-size:18px;
+                font-size:16px;
+                font-weight:700;
             }
             QLineEdit {
-                background:#eef2f6;
-                border:1px solid #8fa0b1;
+                background:#e8edf2;
+                border:1px solid #7f8f9f;
                 color:#17202a;
-                font-size:21px;
+                font-size:20px;
                 font-weight:700;
                 padding:8px;
             }
             QPushButton {
-                background:qlineargradient(x1:0,y1:0,x2:1,y2:0, stop:0 #4ea93f, stop:1 #2f8832);
-                color:#efffee;
-                border:1px solid rgba(255,255,255,0.2);
-                font-size:17px;
+                background:qlineargradient(x1:0,y1:0,x2:0,y2:1, stop:0 #58d53e, stop:1 #34af2e);
+                color:#f6fff3;
+                border:1px solid rgba(250,255,248,0.42);
+                font-size:18px;
                 font-weight:700;
                 padding:8px 12px;
             }
-            QPushButton:hover { background:#58b449; }
+            QPushButton:hover { background:qlineargradient(x1:0,y1:0,x2:0,y2:1, stop:0 #66df4b, stop:1 #3dba35); }
         ''')
         outer = QtWidgets.QVBoxLayout(self)
         outer.setContentsMargins(0, 0, 0, 0)
@@ -1889,7 +2170,10 @@ class SocialOverlay(QtWidgets.QDialog):
         root.setContentsMargins(16, 14, 16, 12)
         root.setSpacing(10)
 
-        top = QtWidgets.QHBoxLayout()
+        header = QtWidgets.QFrame()
+        header.setObjectName('social_header')
+        top = QtWidgets.QHBoxLayout(header)
+        top.setContentsMargins(14, 8, 14, 8)
         self.title_lbl = QtWidgets.QLabel('community / messages')
         self.title_lbl.setObjectName('social_title')
         hint = QtWidgets.QLabel(f'gamertag: {self.nickname}')
@@ -1901,7 +2185,7 @@ class SocialOverlay(QtWidgets.QDialog):
         top.addWidget(hint)
         top.addSpacing(14)
         top.addWidget(btn_close)
-        root.addLayout(top)
+        root.addWidget(header, 0)
 
         tabs_row = QtWidgets.QHBoxLayout()
         tabs_row.setSpacing(8)
@@ -1983,8 +2267,10 @@ class SocialOverlay(QtWidgets.QDialog):
         self._add_action_item('friend_request', 'Send Friend Request')
         self._add_action_item('friend_requests', 'Friend Requests')
         self._add_action_item('friends', 'Friends List')
-        self._add_action_item('voice_call_hub', 'Voice/Call Hub')
-        self._add_action_item('add_peer', 'Add Peer ID')
+        self._add_action_item('party_hub', 'Party Hub')
+        self._add_action_item('voice_hub', 'Voice/Call Hub')
+        self._add_action_item('players_hub', 'Global Players')
+        self._add_action_item('add_peer', 'Add Peer ID (Advanced)')
         self._add_action_item('peer_ids', 'My Peer IDs')
         self._add_action_item('lan_status', 'LAN Status')
         self._add_action_item('world_toggle', 'World Chat: ON')
@@ -2045,9 +2331,10 @@ class SocialOverlay(QtWidgets.QDialog):
 
     def _refresh_community_tabs(self):
         friends_n = len(self.friends)
-        party_n = len([f for f in self.friends if bool(f.get('online'))])
+        party_rows = self._party_member_rows()
+        party_n = len(party_rows) if party_rows else len([f for f in self.friends if bool(f.get('online'))])
         messages_n = len([p for p in self.peer_data.values() if str(p.get('source')) != 'WORLD'])
-        players_n = len(self._recent_players())
+        players_n = len(self.global_players) if self.global_players else len(self._recent_players())
         counts = {
             'friends': friends_n,
             'party': party_n,
@@ -2117,6 +2404,7 @@ class SocialOverlay(QtWidgets.QDialog):
         ):
             rows.append({
                 'name': str(f.get('name') or 'Friend'),
+                'user_id': str(f.get('user_id') or ''),
                 'host': str(f.get('host') or ''),
                 'port': int(f.get('port') or 0),
                 'source': 'FRIEND',
@@ -2126,26 +2414,46 @@ class SocialOverlay(QtWidgets.QDialog):
         return rows
 
     def _community_party_rows(self):
-        rows = []
+        rows = self._party_member_rows()
+        if rows:
+            return rows
+        fallback = []
         for f in self._community_friends_rows():
             if bool(f.get('online')):
-                rows.append(dict(f))
-        if not rows:
-            rows = self._community_friends_rows()[:12]
-        return rows
+                fallback.append(dict(f))
+        if not fallback:
+            fallback = self._community_friends_rows()[:12]
+        return fallback
 
     def _community_players_rows(self):
+        rows = []
+        for uid, p in sorted(self.global_players.items(), key=lambda kv: str(kv[1].get('name') or '').lower()):
+            if not str(uid or '').strip():
+                continue
+            rows.append({
+                'name': str(p.get('name') or 'Player'),
+                'user_id': str(uid),
+                'host': '',
+                'port': 0,
+                'source': 'GLOBAL',
+                'online': bool(p.get('online', True)),
+                'last_seen': int(p.get('last_seen') or int(time.time())),
+                'last': str(p.get('status') or 'online'),
+            })
+        if rows:
+            return rows
         return self._recent_players()
 
     def _community_row_text(self, row):
         name = str(row.get('name') or 'Player')
         src = str(row.get('source') or '')
-        if src in ('FRIEND', 'PARTY'):
+        if src in ('FRIEND', 'PARTY', 'GLOBAL'):
             status = 'Online' if bool(row.get('online')) else 'Offline'
             host = str(row.get('host') or '')
             port = int(row.get('port') or 0)
             endpoint = f' [{host}:{port}]' if host and port > 0 else ''
-            return f'{name}  -  {status}{endpoint}'
+            tag = 'GLOBAL' if src == 'GLOBAL' else src
+            return f'{name}  -  {status}{endpoint} ({tag})'
         if src == 'RECENT':
             last = str(row.get('last') or '').strip()
             return f'{name}  -  {last}' if last else name
@@ -2177,7 +2485,11 @@ class SocialOverlay(QtWidgets.QDialog):
         self.peer_items = {}
         ordered = sorted(
             self.peer_data.items(),
-            key=lambda kv: (0 if str(kv[1].get('source')) == 'WORLD' else 1, str(kv[1].get('name') or '').lower()),
+            key=lambda kv: (
+                0 if str(kv[1].get('source')) == 'WORLD'
+                else (1 if str(kv[1].get('source')) == 'GLOBAL' else 2),
+                str(kv[1].get('name') or '').lower(),
+            ),
         )
         for key, row in ordered:
             it = QtWidgets.QListWidgetItem(self._peer_row(row))
@@ -2199,13 +2511,6 @@ class SocialOverlay(QtWidgets.QDialog):
             self.btn_send.setFocus(QtCore.Qt.OtherFocusReason)
 
     def _show_notice(self, title, text):
-        host = self.parentWidget()
-        if host is not None and hasattr(host, '_msg'):
-            try:
-                host._msg(title, text)
-                return
-            except Exception:
-                pass
         d = GuidePromptDialog(
             str(title or 'Notice'),
             str(text or ''),
@@ -2217,15 +2522,26 @@ class SocialOverlay(QtWidgets.QDialog):
         d.exec_()
 
     def _pick_from_menu(self, title, options, descriptions=None):
-        host = self.parentWidget()
-        if host is not None and hasattr(host, '_choose_from_menu'):
-            try:
-                return host._choose_from_menu(title, options, descriptions or {})
-            except Exception:
-                pass
-        d = QuickMenu(str(title or 'Menu'), list(options or []), descriptions or {}, self)
+        opts = [str(x).strip() for x in (options or []) if str(x).strip()]
+        if not opts:
+            return None
+        desc = descriptions or {}
+        detail_lines = []
+        for k in opts[:8]:
+            v = str(desc.get(k, '')).strip()
+            if v:
+                detail_lines.append(f'{k}: {v}')
+        body = '\n'.join(detail_lines) if detail_lines else 'Select an option.'
+        d = GuidePromptDialog(
+            str(title or 'Menu'),
+            body,
+            opts,
+            self,
+            default_choice=opts[0],
+            cancel_choice='Cancel' if 'Cancel' in opts else ('Back' if 'Back' in opts else opts[-1]),
+        )
         if d.exec_() == QtWidgets.QDialog.Accepted:
-            return d.selected()
+            return d.selected_choice()
         return None
 
     def _move_in_list(self, listw, delta):
@@ -2282,8 +2598,14 @@ class SocialOverlay(QtWidgets.QDialog):
         if key == 'friends':
             self._show_friends()
             return
-        if key == 'voice_call_hub':
-            self._open_voice_call_hub()
+        if key == 'party_hub':
+            self._open_party_hub()
+            return
+        if key == 'voice_hub':
+            self._open_voice_hub()
+            return
+        if key == 'players_hub':
+            self._set_community_mode('players')
             return
         if key == 'add_peer':
             self._add_peer()
@@ -2307,7 +2629,7 @@ class SocialOverlay(QtWidgets.QDialog):
             self.peer_meta.setText('Select a peer to chat.')
             return
         src = str(peer.get('source') or '').upper()
-        if src in ('FRIEND', 'PARTY', 'RECENT'):
+        if src in ('FRIEND', 'PARTY', 'RECENT', 'GLOBAL'):
             name = str(peer.get('name') or 'Player')
             online = bool(peer.get('online', False))
             host = str(peer.get('host') or '')
@@ -2316,6 +2638,9 @@ class SocialOverlay(QtWidgets.QDialog):
             if src == 'RECENT':
                 last = str(peer.get('last') or '').strip()
                 self.peer_meta.setText(f'{name}{endpoint}  (RECENT){(" - " + last) if last else ""}')
+            elif src == 'GLOBAL':
+                uid = str(peer.get('user_id') or '').strip()
+                self.peer_meta.setText(f'{name}  (GLOBAL)  {"Online" if online else "Offline"}  id:{uid or "-"}')
             else:
                 self.peer_meta.setText(f'{name}{endpoint}  ({src})  {"Online" if online else "Offline"}')
             return
@@ -2458,6 +2783,420 @@ class SocialOverlay(QtWidgets.QDialog):
         arr.insert(0, {'ts': int(time.time()), 'from': who_txt[:48], 'text': body[:320]})
         safe_json_write(SOCIAL_MESSAGES_FILE, arr[:80])
 
+    def _load_social_profile(self):
+        data = safe_json_read(SOCIAL_PROFILE_FILE, {})
+        if not isinstance(data, dict):
+            data = {}
+        uid = ''.join(ch for ch in str(data.get('user_id') or '').strip() if ch.isalnum() or ch in ('-', '_'))
+        if not uid:
+            uid = uuid.uuid4().hex[:16]
+        data['user_id'] = uid[:40]
+        data['gamertag'] = str(self.nickname or 'Player1').strip() or 'Player1'
+        safe_json_write(SOCIAL_PROFILE_FILE, data)
+        return data
+
+    def _load_party_state(self):
+        raw = safe_json_read(PARTY_STATE_FILE, {})
+        if not isinstance(raw, dict):
+            raw = {}
+        pid = str(raw.get('party_id') or '').strip()
+        pname = str(raw.get('party_name') or '').strip()
+        members = raw.get('members') if isinstance(raw.get('members'), dict) else {}
+        norm = {}
+        for uid, row in members.items():
+            k = str(uid or '').strip()
+            if not k:
+                continue
+            if isinstance(row, dict):
+                norm[k] = {
+                    'name': str(row.get('name') or 'Player'),
+                    'online': bool(row.get('online', False)),
+                    'last_seen': int(row.get('last_seen') or int(time.time())),
+                }
+        if self.user_id not in norm:
+            norm[self.user_id] = {
+                'name': self.nickname,
+                'online': True,
+                'last_seen': int(time.time()),
+            }
+        self.party_state = {
+            'party_id': pid,
+            'party_name': pname or (f'{self.nickname} Party' if pid else ''),
+            'members': norm,
+        }
+
+    def _save_party_state(self):
+        safe_json_write(PARTY_STATE_FILE, self.party_state)
+
+    def _load_voice_inbox(self):
+        arr = safe_json_read(VOICE_INBOX_FILE, [])
+        if not isinstance(arr, list):
+            arr = []
+        out = []
+        for raw in arr:
+            if not isinstance(raw, dict):
+                continue
+            path = str(raw.get('path') or '').strip()
+            if path and not Path(path).exists():
+                continue
+            out.append({
+                'sender': str(raw.get('sender') or 'Unknown'),
+                'sender_user_id': str(raw.get('sender_user_id') or ''),
+                'mime': str(raw.get('mime') or 'audio/ogg'),
+                'duration': float(raw.get('duration') or 0.0),
+                'path': path,
+                'ts': int(raw.get('ts') or int(time.time())),
+                'party_id': str(raw.get('party_id') or ''),
+            })
+        self.voice_inbox = out[:120]
+
+    def _save_voice_inbox(self):
+        safe_json_write(VOICE_INBOX_FILE, self.voice_inbox[:120])
+
+    def _voice_file_suffix(self, mime):
+        m = str(mime or '').lower()
+        if 'wav' in m:
+            return '.wav'
+        if 'ogg' in m or 'opus' in m:
+            return '.ogg'
+        return '.bin'
+
+    def _save_voice_blob(self, sender, sender_user_id, mime, duration, blob_bytes, party_id=''):
+        try:
+            data = bytes(blob_bytes or b'')
+        except Exception:
+            data = b''
+        if not data:
+            return None
+        safe_sender = ''.join(ch if ch.isalnum() or ch in ('-', '_') else '_' for ch in str(sender or 'peer'))[:28]
+        p = VOICE_DIR / f'voice_{int(time.time())}_{safe_sender}{self._voice_file_suffix(mime)}'
+        try:
+            p.write_bytes(data)
+        except Exception:
+            return None
+        item = {
+            'sender': str(sender or 'Unknown'),
+            'sender_user_id': str(sender_user_id or ''),
+            'mime': str(mime or 'audio/ogg'),
+            'duration': float(duration or 0.0),
+            'path': str(p),
+            'ts': int(time.time()),
+            'party_id': str(party_id or ''),
+        }
+        self.voice_inbox.insert(0, item)
+        self.voice_inbox = self.voice_inbox[:120]
+        self._save_voice_inbox()
+        return item
+
+    def _play_voice_file(self, path):
+        p = str(path or '').strip()
+        if not p or not Path(p).exists():
+            self.status.setText('Voice file not found.')
+            return
+        if shutil.which('mpv'):
+            subprocess.Popen(['mpv', '--really-quiet', '--no-terminal', p], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            return
+        if shutil.which('ffplay'):
+            subprocess.Popen(['ffplay', '-nodisp', '-autoexit', '-loglevel', 'quiet', p], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            return
+        if shutil.which('aplay'):
+            subprocess.Popen(['aplay', p], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            return
+        self.status.setText('No audio player found (mpv/ffplay/aplay).')
+
+    def _record_voice_clip(self, duration_sec):
+        secs = max(1, min(int(duration_sec), 6))
+        tmp_ogg = Path(tempfile.mktemp(prefix='xui_voice_', suffix='.ogg'))
+        tmp_wav = Path(tempfile.mktemp(prefix='xui_voice_', suffix='.wav'))
+        try:
+            if shutil.which('ffmpeg'):
+                cmds = [
+                    ['ffmpeg', '-hide_banner', '-loglevel', 'error', '-y', '-f', 'pulse', '-i', 'default',
+                     '-t', str(secs), '-ac', '1', '-ar', '12000', '-c:a', 'libopus', '-b:a', '12k', str(tmp_ogg)],
+                    ['ffmpeg', '-hide_banner', '-loglevel', 'error', '-y', '-f', 'alsa', '-i', 'default',
+                     '-t', str(secs), '-ac', '1', '-ar', '12000', '-c:a', 'libopus', '-b:a', '12k', str(tmp_ogg)],
+                ]
+                for cmd in cmds:
+                    rc = subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode
+                    if rc == 0 and tmp_ogg.exists() and tmp_ogg.stat().st_size > 256:
+                        return (tmp_ogg.read_bytes(), 'audio/ogg', float(secs), '')
+            if shutil.which('arecord'):
+                cmd = ['arecord', '-q', '-d', str(secs), '-f', 'S16_LE', '-r', '8000', '-c', '1', str(tmp_wav)]
+                rc = subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode
+                if rc == 0 and tmp_wav.exists() and tmp_wav.stat().st_size > 1024:
+                    return (tmp_wav.read_bytes(), 'audio/wav', float(secs), '')
+            return (b'', '', 0.0, 'No recording backend (ffmpeg/arecord).')
+        except Exception as exc:
+            return (b'', '', 0.0, str(exc))
+        finally:
+            try:
+                tmp_ogg.unlink(missing_ok=True)
+            except Exception:
+                pass
+            try:
+                tmp_wav.unlink(missing_ok=True)
+            except Exception:
+                pass
+
+    def _open_voice_inbox(self):
+        if not self.voice_inbox:
+            self._show_notice('Voice Inbox', 'No voice messages yet.')
+            return
+        options = []
+        desc = {}
+        for i, msg in enumerate(self.voice_inbox[:40], 1):
+            hh = time.strftime('%H:%M:%S', time.localtime(int(msg.get('ts') or time.time())))
+            who = str(msg.get('sender') or 'Unknown')
+            dur = float(msg.get('duration') or 0.0)
+            party_id = str(msg.get('party_id') or '').strip()
+            label = f'{i:02d}. {who} ({dur:.0f}s) [{hh}]'
+            options.append(label)
+            info = f'MIME: {msg.get("mime", "audio")} | Duration: {dur:.0f}s'
+            if party_id:
+                info += f' | Party: {party_id}'
+            desc[label] = info
+        options.append('Cancel')
+        pick = self._pick_from_menu('Voice Inbox', options, desc)
+        if not pick or pick == 'Cancel':
+            return
+        try:
+            idx = int(str(pick).split('.', 1)[0]) - 1
+        except Exception:
+            return
+        if idx < 0 or idx >= len(self.voice_inbox):
+            return
+        sel = self.voice_inbox[idx]
+        self._play_voice_file(sel.get('path'))
+        self.status.setText(f"Playing voice from {sel.get('sender', 'Unknown')}")
+
+    def _send_voice_message(self, peer=None, to_party=False):
+        target = dict(peer or (self._selected_peer() or {}))
+        if to_party:
+            if not str(self.party_state.get('party_id') or '').strip():
+                self.status.setText('No active party.')
+                return
+        else:
+            if not target:
+                self._show_notice('Voice Message', 'Select a user first.')
+                return
+            if str(target.get('source') or '').upper() == 'WORLD':
+                self._show_notice('Voice Message', 'Select a player/friend, not WORLD room.')
+                return
+
+        pick = self._pick_from_menu(
+            'Voice Message',
+            ['2', '3', '4', '5', '6', 'Cancel'],
+            {'2': 'Record 2s', '3': 'Record 3s', '4': 'Record 4s', '5': 'Record 5s', '6': 'Record 6s'},
+        )
+        if not pick or pick == 'Cancel':
+            return
+        try:
+            seconds = int(str(pick).strip())
+        except Exception:
+            return
+
+        self.status.setText(f'Recording voice message ({seconds}s)...')
+        QtWidgets.QApplication.processEvents()
+        blob, mime, duration, err = self._record_voice_clip(seconds)
+        if not blob:
+            self.status.setText(f'Voice record failed: {err}')
+            return
+        b64 = base64.b64encode(blob).decode('ascii', errors='ignore')
+
+        if to_party:
+            party_id = str(self.party_state.get('party_id') or '').strip()
+            if len(b64) > 3200:
+                self.status.setText('Party voice too large for relay. Try 2s.')
+                return
+            try:
+                self.engine.send_world_voice_message('', mime, duration, b64, party_id=party_id)
+                self._append_line(f"[{time.strftime('%H:%M:%S')}] You -> PARTY [{duration:.0f}s]")
+                self.status.setText('Party voice message sent.')
+            except Exception as exc:
+                self.status.setText(f'Party voice send failed: {exc}')
+            return
+
+        source = str(target.get('source') or '').upper()
+        user_id = str(target.get('user_id') or '').strip()
+        if not user_id:
+            low_name = str(target.get('name') or '').strip().lower()
+            for uid, row in self.global_players.items():
+                if str(row.get('name') or '').strip().lower() == low_name:
+                    user_id = str(uid)
+                    break
+        if user_id and source in ('GLOBAL', 'FRIEND', 'PARTY', 'RECENT'):
+            if len(b64) > 3200:
+                self.status.setText('Voice clip too large for global relay. Try 2s.')
+                return
+            try:
+                self.engine.send_world_voice_message(user_id, mime, duration, b64, party_id='')
+                self._append_line(f"[{time.strftime('%H:%M:%S')}] You -> {target.get('name','User')} [VOICE {duration:.0f}s]")
+                self.status.setText(f"Voice sent to {target.get('name', 'user')}")
+                return
+            except Exception as exc:
+                self.status.setText(f'Global voice send failed: {exc}')
+                return
+
+        candidates = self._send_candidates(target)
+        last_err = None
+        for host, port, _key in candidates:
+            try:
+                self.engine.send_voice_message(host, port, mime, duration, b64)
+                self._append_line(f"[{time.strftime('%H:%M:%S')}] You -> {target.get('name','peer')} [VOICE {duration:.0f}s]")
+                self.status.setText(f'Voice sent to {host}:{port}')
+                return
+            except Exception as exc:
+                last_err = exc
+        self.status.setText(f'Voice send failed: {last_err or "no route"}')
+
+    def _open_voice_hub(self):
+        options = [
+            'Send Voice Message',
+            'Voice Inbox',
+            'Send Party Voice',
+            'Open Party Hub',
+            'Cancel',
+        ]
+        desc = {
+            'Send Voice Message': 'Send global voice message to selected user (no IP manual).',
+            'Voice Inbox': 'Play received voice messages.',
+            'Send Party Voice': 'Send voice note to current party room.',
+            'Open Party Hub': 'Open party controls and invites.',
+            'Cancel': 'Back.',
+        }
+        pick = self._pick_from_menu('Voice/Call Hub', options, desc)
+        if not pick or pick == 'Cancel':
+            return
+        if pick == 'Send Voice Message':
+            self._send_voice_message()
+        elif pick == 'Voice Inbox':
+            self._open_voice_inbox()
+        elif pick == 'Send Party Voice':
+            self._send_voice_message(to_party=True)
+        elif pick == 'Open Party Hub':
+            self._open_party_hub()
+
+    def _party_member_rows(self):
+        members = self.party_state.get('members') if isinstance(self.party_state, dict) else {}
+        if not isinstance(members, dict):
+            members = {}
+        rows = []
+        for uid, row in members.items():
+            if not isinstance(row, dict):
+                continue
+            gp = self.global_players.get(str(uid), {})
+            online = bool(row.get('online', False))
+            if isinstance(gp, dict) and gp:
+                online = bool(gp.get('online', online))
+            rows.append({
+                'name': str(row.get('name') or 'Player'),
+                'user_id': str(uid or ''),
+                'source': 'PARTY',
+                'online': online,
+                'host': '',
+                'port': 0,
+                'last_seen': int(row.get('last_seen') or int(time.time())),
+            })
+        rows.sort(key=lambda x: (0 if x.get('online') else 1, str(x.get('name') or '').lower()))
+        return rows
+
+    def _open_party_hub(self):
+        pid = str(self.party_state.get('party_id') or '').strip()
+        options = ['Create Party', 'Invite Selected User', 'Party Members', 'Join Last Invite', 'Leave Party', 'Cancel']
+        desc = {
+            'Create Party': 'Create/refresh a global party room.',
+            'Invite Selected User': 'Invite selected global player or friend.',
+            'Party Members': 'Show current party roster.',
+            'Join Last Invite': 'Join latest incoming party invite.',
+            'Leave Party': 'Leave current party room.',
+            'Cancel': 'Back.',
+        }
+        pick = self._pick_from_menu('Party Hub', options, desc)
+        if not pick or pick == 'Cancel':
+            return
+        if pick == 'Create Party':
+            party_id = pid or f'party-{self.user_id[:6]}-{uuid.uuid4().hex[:6]}'
+            members = self.party_state.get('members') if isinstance(self.party_state.get('members'), dict) else {}
+            self.party_state['party_id'] = party_id
+            self.party_state['party_name'] = f'{self.nickname} Party'
+            members[self.user_id] = {'name': self.nickname, 'online': True, 'last_seen': int(time.time())}
+            self.party_state['members'] = members
+            self._save_party_state()
+            self.engine.send_world_party_state(party_id, state='join')
+            self.status.setText(f'Party ready: {party_id}')
+            self._append_system(f'Party ready: {party_id}')
+            self._set_community_mode('party')
+            return
+        if pick == 'Invite Selected User':
+            peer = self._selected_peer() or {}
+            user_id = str(peer.get('user_id') or '').strip()
+            if not user_id:
+                low_name = str(peer.get('name') or '').strip().lower()
+                for uid, row in self.global_players.items():
+                    if str(row.get('name') or '').strip().lower() == low_name:
+                        user_id = str(uid)
+                        break
+            if not user_id:
+                self.status.setText('Select a global user to invite.')
+                return
+            if user_id == self.user_id:
+                self.status.setText('Cannot invite yourself.')
+                return
+            party_id = pid or f'party-{self.user_id[:6]}-{uuid.uuid4().hex[:6]}'
+            members = self.party_state.get('members') if isinstance(self.party_state.get('members'), dict) else {}
+            if not pid:
+                self.party_state['party_id'] = party_id
+                self.party_state['party_name'] = f'{self.nickname} Party'
+            members[self.user_id] = {'name': self.nickname, 'online': True, 'last_seen': int(time.time())}
+            self.party_state['members'] = members
+            try:
+                self.engine.send_world_party_invite(user_id, party_id, self.party_state.get('party_name', 'XUI Party'))
+                self.engine.send_world_party_state(party_id, state='join')
+                self._save_party_state()
+                self.status.setText(f"Party invite sent to {peer.get('name', 'user')}")
+                self._append_system(f"Party invite sent to {peer.get('name', 'user')}")
+            except Exception as exc:
+                self.status.setText(f'Party invite failed: {exc}')
+            return
+        if pick == 'Party Members':
+            rows = self._party_member_rows()
+            if not rows:
+                self._show_notice('Party Members', 'No members in party.')
+                return
+            txt = '\n'.join([f"- {r.get('name')} ({'Online' if r.get('online') else 'Offline'})" for r in rows[:48]])
+            self._show_notice('Party Members', txt)
+            return
+        if pick == 'Join Last Invite':
+            inv = self.last_party_invite or {}
+            party_id = str(inv.get('party_id') or '').strip()
+            if not party_id:
+                self.status.setText('No incoming party invite yet.')
+                return
+            members = self.party_state.get('members') if isinstance(self.party_state.get('members'), dict) else {}
+            self.party_state['party_id'] = party_id
+            self.party_state['party_name'] = str(inv.get('party_name') or f'Party {party_id}')
+            members[self.user_id] = {'name': self.nickname, 'online': True, 'last_seen': int(time.time())}
+            inv_uid = str(inv.get('from_user_id') or '').strip()
+            inv_name = str(inv.get('from') or 'Player')
+            if inv_uid and inv_uid != self.user_id:
+                members[inv_uid] = {'name': inv_name, 'online': True, 'last_seen': int(time.time())}
+            self.party_state['members'] = members
+            self._save_party_state()
+            self.engine.send_world_party_state(party_id, state='join')
+            self.status.setText(f'Joined party {party_id}')
+            self._append_system(f'Joined party {party_id}')
+            self._set_community_mode('party')
+            return
+        if pick == 'Leave Party':
+            party_id = str(self.party_state.get('party_id') or '').strip()
+            if party_id:
+                self.engine.send_world_party_state(party_id, state='leave')
+            self.party_state = {'party_id': '', 'party_name': '', 'members': {}}
+            self._save_party_state()
+            self.status.setText('Party closed.')
+            self._append_system('Party closed.')
+            self._set_community_mode('messages')
+
     def _friend_endpoint_key(self, host, port):
         h = str(host or '').strip().lower()
         try:
@@ -2482,10 +3221,12 @@ class SocialOverlay(QtWidgets.QDialog):
                 port = 0
             out.append({
                 'name': name or host or 'Friend',
+                'user_id': str(raw.get('user_id') or '').strip(),
                 'host': host,
                 'port': int(port),
                 'online': bool(raw.get('online', False)),
                 'accepted': bool(raw.get('accepted', True)),
+                'source': str(raw.get('source') or 'GLOBAL'),
                 'last_seen': int(raw.get('last_seen', int(time.time()))),
             })
         self.friends = out
@@ -2494,6 +3235,10 @@ class SocialOverlay(QtWidgets.QDialog):
         safe_json_write(FRIENDS_FILE, self.friends)
 
     def _friend_matches_peer(self, friend, peer):
+        fu = str(friend.get('user_id') or '').strip()
+        pu = str(peer.get('user_id') or '').strip()
+        if fu and pu and fu == pu:
+            return True
         fh = str(friend.get('host') or '').strip().lower()
         ph = str(peer.get('host') or '').strip().lower()
         fp = int(friend.get('port') or 0)
@@ -2518,33 +3263,42 @@ class SocialOverlay(QtWidgets.QDialog):
                 if f.get('online') != bool(online):
                     f['online'] = bool(online)
                     changed = True
-                f['last_seen'] = now
-                changed = True
+                prev_seen = int(f.get('last_seen') or 0)
+                if abs(now - prev_seen) >= 20:
+                    f['last_seen'] = now
+                    changed = True
         if changed:
             self._save_friends()
 
-    def _upsert_friend(self, name, host, port):
+    def _upsert_friend(self, name, host, port, user_id='', source='GLOBAL'):
         host = str(host or '').strip()
+        user_id = str(user_id or '').strip()
         try:
             port = int(port or 0)
         except Exception:
             port = 0
-        key = self._friend_endpoint_key(host, port)
+        key = self._friend_endpoint_key(host, port) if (host or port > 0) else ''
         now = int(time.time())
         for f in self.friends:
-            if self._friend_endpoint_key(f.get('host'), f.get('port')) == key:
+            same_uid = bool(user_id and str(f.get('user_id') or '').strip() == user_id)
+            same_ep = bool(key and self._friend_endpoint_key(f.get('host'), f.get('port')) == key)
+            if same_uid or same_ep:
                 f['name'] = str(name or f.get('name') or host or 'Friend')
+                f['user_id'] = user_id or str(f.get('user_id') or '')
                 f['online'] = True
                 f['accepted'] = True
+                f['source'] = str(source or f.get('source') or 'GLOBAL')
                 f['last_seen'] = now
                 self._save_friends()
                 return
         self.friends.append({
             'name': str(name or host or 'Friend'),
+            'user_id': user_id,
             'host': host,
             'port': int(port),
             'online': True,
             'accepted': True,
+            'source': str(source or 'GLOBAL'),
             'last_seen': now,
         })
         self._save_friends()
@@ -2559,9 +3313,11 @@ class SocialOverlay(QtWidgets.QDialog):
                 continue
             out.append({
                 'name': str(raw.get('name') or 'Unknown').strip() or 'Unknown',
+                'user_id': str(raw.get('user_id') or '').strip(),
                 'host': str(raw.get('host') or '').strip(),
                 'port': int(raw.get('port') or 0),
                 'note': str(raw.get('note') or '').strip(),
+                'kind': str(raw.get('kind') or 'lan').strip().lower(),
                 'ts': int(raw.get('ts') or int(time.time())),
             })
         self.friend_requests = out
@@ -2569,20 +3325,28 @@ class SocialOverlay(QtWidgets.QDialog):
     def _save_friend_requests(self):
         safe_json_write(FRIEND_REQUESTS_FILE, self.friend_requests)
 
-    def _queue_friend_request(self, name, host, port, note=''):
-        key = self._friend_endpoint_key(host, port)
+    def _queue_friend_request(self, name, host, port, note='', user_id='', kind='lan'):
+        key = self._friend_endpoint_key(host, port) if (str(host or '').strip() or int(port or 0) > 0) else ''
+        uid = str(user_id or '').strip()
         for req in self.friend_requests:
-            if self._friend_endpoint_key(req.get('host'), req.get('port')) == key:
+            req_uid = str(req.get('user_id') or '').strip()
+            same_uid = bool(uid and req_uid == uid)
+            same_ep = bool(key and self._friend_endpoint_key(req.get('host'), req.get('port')) == key)
+            if same_uid or same_ep:
                 req['name'] = str(name or req.get('name') or 'Unknown')
+                req['user_id'] = uid or req_uid
                 req['note'] = str(note or req.get('note') or '')
+                req['kind'] = str(kind or req.get('kind') or 'lan').strip().lower()
                 req['ts'] = int(time.time())
                 self._save_friend_requests()
                 return
         self.friend_requests.insert(0, {
             'name': str(name or 'Unknown'),
+            'user_id': uid,
             'host': str(host or ''),
             'port': int(port or 0),
             'note': str(note or ''),
+            'kind': str(kind or 'lan').strip().lower(),
             'ts': int(time.time()),
         })
         self.friend_requests = self.friend_requests[:120]
@@ -2595,8 +3359,28 @@ class SocialOverlay(QtWidgets.QDialog):
     def _send_friend_request(self):
         peer = self._selected_peer()
         if not peer or str(peer.get('source')) == 'WORLD':
-            self._show_notice('Friend Request', 'Select a LAN/P2P peer first.')
+            self._show_notice('Friend Request', 'Select a player first.')
             return
+        peer_name = str(peer.get('name') or 'player')
+        peer_uid = str(peer.get('user_id') or '').strip()
+        if self._is_friend(peer):
+            self.status.setText(f'{peer_name} is already your friend.')
+            return
+        if not peer_uid:
+            low_name = peer_name.strip().lower()
+            for uid, row in self.global_players.items():
+                if str(row.get('name') or '').strip().lower() == low_name:
+                    peer_uid = str(uid)
+                    break
+        if peer_uid:
+            try:
+                self.engine.send_world_friend_request(peer_uid, f'Add {self.nickname} as friend')
+                self.status.setText(f'Friend request sent to {peer_name}')
+                self._append_system(f'Global friend request sent to {peer_name}')
+                return
+            except Exception as exc:
+                self.status.setText(f'Friend request failed: {exc}')
+                return
         candidates = self._send_candidates(peer)
         err = None
         sent = None
@@ -2621,12 +3405,16 @@ class SocialOverlay(QtWidgets.QDialog):
         descriptions = {}
         for i, req in enumerate(self.friend_requests[:40], 1):
             name = str(req.get('name') or 'Unknown')
+            uid = str(req.get('user_id') or '').strip()
             host = str(req.get('host') or '-')
             port = int(req.get('port') or 0)
             note = str(req.get('note') or '').strip()
             op = f'{i:02d}. {name}'
             options.append(op)
-            descriptions[op] = f'{host}:{port}' + (f' | {note}' if note else '')
+            if uid:
+                descriptions[op] = f'global user: {uid}' + (f' | {note}' if note else '')
+            else:
+                descriptions[op] = f'{host}:{port}' + (f' | {note}' if note else '')
         options.append('Back')
         pick = self._pick_from_menu('Friend Requests', options, descriptions)
         if not pick or pick == 'Back':
@@ -2650,7 +3438,22 @@ class SocialOverlay(QtWidgets.QDialog):
         if not ask or ask == 'Cancel':
             return
         if ask == 'Accept':
-            self._upsert_friend(req.get('name'), req.get('host'), req.get('port'))
+            self._upsert_friend(
+                req.get('name'),
+                req.get('host'),
+                req.get('port'),
+                user_id=req.get('user_id'),
+                source='GLOBAL' if str(req.get('kind') or '').lower() == 'global' else 'LAN',
+            )
+            req_uid = str(req.get('user_id') or '').strip()
+            if req_uid:
+                self._touch_global_player(req_uid, req.get('name'), 'friend')
+            to_uid = str(req.get('user_id') or '').strip()
+            if to_uid:
+                try:
+                    self.engine.send_world_friend_accept(to_uid)
+                except Exception:
+                    pass
             self._append_system(f"Friend added: {req.get('name', 'Unknown')}")
             self.status.setText(f"Friend added: {req.get('name', 'Unknown')}")
         else:
@@ -2659,23 +3462,36 @@ class SocialOverlay(QtWidgets.QDialog):
         self._save_friend_requests()
 
     def _peer_row(self, peer):
-        if str(peer.get('source')) == 'WORLD':
+        src = str(peer.get('source') or '').upper()
+        if src == 'WORLD':
             return f"{peer['name']}  [global relay]  (WORLD)"
+        if src == 'GLOBAL':
+            st = 'online' if bool(peer.get('online', True)) else 'offline'
+            return f"{peer['name']}  [global {st}]  (GLOBAL)"
+        if src == 'FRIEND':
+            return f"{peer['name']}  [friend]  (FRIEND)"
         return f"{peer['name']}  [{peer['host']}:{peer['port']}]  ({peer['source']})"
 
     def _upsert_peer(self, peer, persist=False):
-        key = f"{peer['host']}:{int(peer.get('port', 0) or 0)}:{peer.get('source', '')}"
+        source = str(peer.get('source') or 'LAN')
+        uid = str(peer.get('user_id') or '').strip()
+        if uid:
+            key = f'uid:{uid}:{source}'
+        else:
+            key = f"{peer['host']}:{int(peer.get('port', 0) or 0)}:{source}"
         data = {
             'name': str(peer.get('name') or peer.get('host')),
             'host': str(peer.get('host')),
             'port': int(peer.get('port') or 0),
-            'source': str(peer.get('source') or 'LAN'),
+            'source': source,
             'node_id': str(peer.get('node_id') or ''),
+            'user_id': uid,
+            'online': bool(peer.get('online', True)),
             '_world': bool(peer.get('_world', False)),
         }
-        if not data['host']:
+        if not data['host'] and not uid:
             return
-        if data['source'] != 'WORLD' and data['port'] <= 0:
+        if data['source'] not in ('WORLD', 'GLOBAL', 'FRIEND', 'PARTY', 'RECENT') and data['port'] <= 0:
             return
         if key in self.peer_data:
             self.peer_data[key].update(data)
@@ -2815,24 +3631,11 @@ class SocialOverlay(QtWidgets.QDialog):
         self._show_notice('LAN Status', out or 'No network data.')
 
     def _open_voice_call_hub(self):
-        script = XUI_HOME / 'bin' / 'xui_social_chat.py'
-        if not script.exists():
-            self.status.setText(f'Voice/Call hub missing: {script}')
-            return
-        try:
-            subprocess.Popen(
-                ['/bin/sh', '-c', f'"{script}"'],
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-            )
-            self.status.setText('Opened Voice/Call hub.')
-            self._append_system('Opened global Voice/Call hub.')
-        except Exception as exc:
-            self.status.setText(f'Cannot open Voice/Call hub: {exc}')
+        self._open_voice_hub()
 
     def _stop_call_session(self, notify=False):
         if notify:
-            self.status.setText('No active call session in inline social overlay.')
+            self.status.setText('Voice session is integrated in Social Hub.')
 
     def _load_world_settings(self):
         cfg = safe_json_read(WORLD_CHAT_FILE, {})
@@ -2921,6 +3724,19 @@ class SocialOverlay(QtWidgets.QDialog):
             except Exception as e:
                 self.status.setText(f'World send failed: {e}')
             return
+        peer_uid = str(peer.get('user_id') or '').strip()
+        peer_src = str(peer.get('source') or '').upper()
+        if peer_uid and peer_src in ('GLOBAL', 'FRIEND', 'PARTY', 'RECENT'):
+            try:
+                self.engine.send_world_private_message(peer_uid, txt)
+                self._append_line(f"[{time.strftime('%H:%M:%S')}] You -> {peer.get('name', 'User')} [PM]: {txt}")
+                self._push_recent_message(f"You -> {peer.get('name', 'User')} [PM]", txt)
+                self.status.setText(f"PM sent to {peer.get('name', 'user')}")
+                self.input.clear()
+                return
+            except Exception as exc:
+                self.status.setText(f'Global PM failed: {exc}')
+                return
         is_friend = self._is_friend(peer)
         last_err = None
         used = None
@@ -2957,6 +3773,72 @@ class SocialOverlay(QtWidgets.QDialog):
         err_txt = str(last_err) if last_err is not None else 'No reachable peer endpoint.'
         self.status.setText(f'Cannot send: {err_txt}')
 
+    def _touch_global_player(self, user_id, name, status='online'):
+        uid = str(user_id or '').strip()
+        if not uid or uid == self.user_id:
+            return
+        now = int(time.time())
+        row = self.global_players.get(uid, {})
+        row.update({
+            'name': str(name or row.get('name') or 'Player'),
+            'status': str(status or 'online'),
+            'online': True,
+            'last_seen': now,
+        })
+        self.global_players[uid] = row
+        members = self.party_state.get('members') if isinstance(self.party_state.get('members'), dict) else {}
+        if uid in members:
+            m = dict(members.get(uid) or {})
+            m['name'] = row.get('name', m.get('name', 'Player'))
+            m['online'] = True
+            m['last_seen'] = now
+            members[uid] = m
+            self.party_state['members'] = members
+        self._upsert_peer(
+            {
+                'name': row.get('name', 'Player'),
+                'host': 'global',
+                'port': 0,
+                'source': 'GLOBAL',
+                'node_id': str(row.get('node_id') or ''),
+                'user_id': uid,
+                'online': bool(row.get('online', True)),
+            },
+            persist=False,
+        )
+        self._mark_friend_online({'user_id': uid, 'name': row.get('name')}, True)
+
+    def _expire_global_players(self):
+        now = int(time.time())
+        changed = False
+        for uid, row in list(self.global_players.items()):
+            last_seen = int(row.get('last_seen') or 0)
+            online = bool(row.get('online', False))
+            if online and (now - last_seen) > 80:
+                row['online'] = False
+                self.global_players[uid] = row
+                members = self.party_state.get('members') if isinstance(self.party_state.get('members'), dict) else {}
+                if uid in members:
+                    m = dict(members.get(uid) or {})
+                    m['online'] = False
+                    members[uid] = m
+                    self.party_state['members'] = members
+                self._upsert_peer(
+                    {
+                        'name': row.get('name', 'Player'),
+                        'host': 'global',
+                        'port': 0,
+                        'source': 'GLOBAL',
+                        'node_id': str(row.get('node_id') or ''),
+                        'user_id': uid,
+                        'online': False,
+                    },
+                    persist=False,
+                )
+                self._mark_friend_online({'user_id': uid, 'name': row.get('name')}, False)
+                changed = True
+        return changed
+
     def _poll_events(self):
         while True:
             try:
@@ -2983,15 +3865,112 @@ class SocialOverlay(QtWidgets.QDialog):
                 _kind, sender, text = evt
                 self._append_line(f"[{time.strftime('%H:%M:%S')}] {sender} [PM]: {text}")
                 self._push_recent_message(f'{sender} [PM]', text)
+            elif kind == 'world_private_message':
+                _kind, sender, sender_user_id, text = evt
+                self._append_line(f"[{time.strftime('%H:%M:%S')}] {sender} [GLOBAL PM]: {text}")
+                self._push_recent_message(f'{sender} [PM]', text)
+                self._touch_global_player(sender_user_id, sender, 'pm')
+                self.status.setText(f'Private message from {sender}')
             elif kind == 'friend_request':
-                _kind, sender, host, port, note = evt
-                self._queue_friend_request(sender, host, port, note)
+                sender = str(evt[1] if len(evt) > 1 else 'Unknown')
+                host = str(evt[2] if len(evt) > 2 else '')
+                try:
+                    port = int(evt[3] if len(evt) > 3 else 0)
+                except Exception:
+                    port = 0
+                note = str(evt[4] if len(evt) > 4 else '')
+                sender_user_id = str(evt[5] if len(evt) > 5 else '').strip()
+                self._queue_friend_request(sender, host, port, note, user_id=sender_user_id, kind='lan')
                 self._append_system(f"Friend request from {sender} [{host}:{port}]")
                 self.status.setText(f"Pending friend requests: {len(self.friend_requests)}")
+            elif kind == 'global_friend_request':
+                _kind, sender, sender_user_id, note = evt
+                self._queue_friend_request(sender, '', 0, note, user_id=sender_user_id, kind='global')
+                self._touch_global_player(sender_user_id, sender, 'friend request')
+                self._append_system(f"Global friend request from {sender}")
+                self.status.setText(f"Pending friend requests: {len(self.friend_requests)}")
+            elif kind == 'global_friend_accept':
+                _kind, sender, sender_user_id = evt
+                self._upsert_friend(sender, '', 0, user_id=sender_user_id, source='GLOBAL')
+                self._touch_global_player(sender_user_id, sender, 'friend')
+                self._append_system(f'{sender} accepted your friend request.')
+                self.status.setText(f'Friend added: {sender}')
             elif kind == 'world_chat':
                 _kind, sender, text = evt
                 self._append_line(f"[{time.strftime('%H:%M:%S')}] {sender} [WORLD]: {text}")
                 self._push_recent_message(f'{sender} [WORLD]', text)
+            elif kind == 'world_presence':
+                _kind, data = evt
+                if isinstance(data, dict):
+                    uid = str(data.get('user_id') or '').strip()
+                    name = str(data.get('name') or 'Player')
+                    if uid and uid != self.user_id:
+                        self._touch_global_player(uid, name, 'online')
+            elif kind == 'party_invite':
+                _kind, data = evt
+                if isinstance(data, dict):
+                    self.last_party_invite = dict(data)
+                    who = str(data.get('from') or 'Player')
+                    who_uid = str(data.get('from_user_id') or '').strip()
+                    pid = str(data.get('party_id') or '')
+                    if who_uid:
+                        self._touch_global_player(who_uid, who, 'party invite')
+                    self._append_system(f'Party invite from {who} ({pid})')
+                    self.status.setText(f'Party invite: {who}')
+            elif kind == 'party_state':
+                _kind, data = evt
+                if not isinstance(data, dict):
+                    continue
+                uid = str(data.get('from_user_id') or '').strip()
+                who = str(data.get('from') or 'Player')
+                pid = str(data.get('party_id') or '').strip()
+                state = str(data.get('state') or '').strip().lower()
+                if uid and pid and (pid == str(self.party_state.get('party_id') or '').strip()):
+                    members = self.party_state.get('members') if isinstance(self.party_state.get('members'), dict) else {}
+                    if state == 'leave':
+                        members.pop(uid, None)
+                    else:
+                        members[uid] = {'name': who, 'online': True, 'last_seen': int(time.time())}
+                    self.party_state['members'] = members
+                    self._save_party_state()
+                    self._touch_global_player(uid, who, 'party')
+            elif kind == 'voice_message':
+                sender = str(evt[1] if len(evt) > 1 else 'Unknown')
+                mime = str(evt[4] if len(evt) > 4 else 'audio/ogg')
+                try:
+                    duration = float(evt[5] if len(evt) > 5 else 0.0)
+                except Exception:
+                    duration = 0.0
+                encoded_audio = str(evt[6] if len(evt) > 6 else '')
+                sender_user_id = str(evt[7] if len(evt) > 7 else '').strip()
+                try:
+                    blob = base64.b64decode(str(encoded_audio or '').encode('ascii', errors='ignore'), validate=False)
+                except Exception:
+                    blob = b''
+                if blob:
+                    item = self._save_voice_blob(sender, sender_user_id, mime, duration, blob, party_id='')
+                    if item is not None:
+                        self._append_line(f"[{time.strftime('%H:%M:%S')}] {sender} [VOICE {float(duration):.0f}s]")
+                        self._push_recent_message(f'{sender} [VOICE]', f'Voice message ({float(duration):.0f}s)')
+                        if sender_user_id:
+                            self._touch_global_player(sender_user_id, sender, 'voice')
+                        self.status.setText(f'New voice message from {sender}')
+            elif kind == 'world_voice_message':
+                _kind, sender, sender_user_id, party_id, mime, duration, encoded_audio = evt
+                if party_id and party_id != str(self.party_state.get('party_id') or '').strip():
+                    continue
+                try:
+                    blob = base64.b64decode(str(encoded_audio or '').encode('ascii', errors='ignore'), validate=False)
+                except Exception:
+                    blob = b''
+                if blob:
+                    item = self._save_voice_blob(sender, sender_user_id, mime, duration, blob, party_id=party_id)
+                    if item is not None:
+                        tag = 'PARTY VOICE' if party_id else 'VOICE'
+                        self._append_line(f"[{time.strftime('%H:%M:%S')}] {sender} [{tag} {float(duration):.0f}s]")
+                        self._push_recent_message(f'{sender} [{tag}]', f'Voice message ({float(duration):.0f}s)')
+                        self._touch_global_player(sender_user_id, sender, 'voice')
+                        self.status.setText(f'New voice message from {sender}')
             elif kind == 'world_status':
                 _kind, enabled, room = evt
                 self._update_world_toggle_button()
@@ -3004,6 +3983,7 @@ class SocialOverlay(QtWidgets.QDialog):
                 _kind, room = evt
                 self._refresh_world_peer()
                 self.status.setText(f'World room: {room}')
+        self._expire_global_players()
         self._refresh_community_tabs()
         if self._community_mode != 'messages':
             if self._community_mode == 'friends':
@@ -3025,6 +4005,8 @@ class SocialOverlay(QtWidgets.QDialog):
             pass
         self._stop_call_session(notify=False)
         self._save_world_settings()
+        self._save_party_state()
+        self._save_voice_inbox()
         self.engine.stop()
         super().closeEvent(e)
 
@@ -3065,14 +4047,14 @@ class TopTabs(QtWidgets.QWidget):
     def apply_scale(self, scale=1.0, compact=False):
         self._scale = max(0.62, float(scale))
         self._compact = bool(compact)
-        spacing = int(16 * self._scale * (0.82 if self._compact else 1.0))
+        spacing = int(16 * self._scale * (0.90 if self._compact else 1.0))
         self._layout.setSpacing(max(8, spacing))
         self.set_current(self.current)
 
     def set_current(self, idx):
         self.current = max(0, min(idx, len(self.labels)-1))
-        active_px = max(16, int((30 if not self._compact else 22) * self._scale))
-        idle_px = max(12, int((24 if not self._compact else 18) * self._scale))
+        active_px = max(16, int((30 if not self._compact else 24) * self._scale))
+        idle_px = max(12, int((24 if not self._compact else 19) * self._scale))
         for i, lbl in enumerate(self.labels):
             if i == self.current:
                 lbl.setStyleSheet(
@@ -3127,6 +4109,7 @@ class GreenTile(QtWidgets.QFrame):
         self.icon_scale = max(0.55, float(icon_scale))
         self.text_scale = max(0.65, float(text_scale))
         self.dense = bool(dense)
+        self._selected = None
         self.setObjectName('green_tile')
         self.setFocusPolicy(QtCore.Qt.StrongFocus)
         v = QtWidgets.QVBoxLayout(self)
@@ -3153,9 +4136,9 @@ class GreenTile(QtWidgets.QFrame):
 
     def apply_scale(self, scale=1.0, compact=False):
         s = max(0.58, float(scale))
-        compact_factor = 0.88 if compact else 1.0
+        compact_factor = 0.96 if compact else 1.0
         if self.dense:
-            compact_factor *= 0.84
+            compact_factor *= 0.93
         w = max(120, int(self.base_size[0] * s * compact_factor))
         h = max(72, int(self.base_size[1] * s * compact_factor))
         self.setFixedSize(w, h)
@@ -3174,6 +4157,10 @@ class GreenTile(QtWidgets.QFrame):
         )
 
     def set_selected(self, on):
+        on = bool(on)
+        if self._selected is on:
+            return
+        self._selected = on
         border = 'rgba(249,255,249,0.98)' if on else 'rgba(244,252,246,0.32)'
         width = '2px' if on else '1px'
         bg_a = '#40ce55' if on else '#39c650'
@@ -3205,6 +4192,7 @@ class HeroPanel(QtWidgets.QFrame):
         self.title = title
         self.subtitle = subtitle
         self.base_size = (780, 320)
+        self._selected = None
         self.setObjectName('hero_panel')
         v = QtWidgets.QVBoxLayout(self)
         self._layout = v
@@ -3226,7 +4214,7 @@ class HeroPanel(QtWidgets.QFrame):
 
     def apply_scale(self, scale=1.0, compact=False):
         s = max(0.58, float(scale))
-        compact_factor = 0.9 if compact else 1.0
+        compact_factor = 0.96 if compact else 1.0
         w = max(460, int(self.base_size[0] * s * compact_factor))
         h = max(220, int(self.base_size[1] * s * compact_factor))
         self.setFixedSize(w, h)
@@ -3251,6 +4239,10 @@ class HeroPanel(QtWidgets.QFrame):
         )
 
     def set_selected(self, on):
+        on = bool(on)
+        if self._selected is on:
+            return
+        self._selected = on
         border = 'rgba(244,250,255,0.9)' if on else 'rgba(240,246,252,0.28)'
         width = '2px' if on else '1px'
         self.setStyleSheet(f'''
@@ -3275,6 +4267,7 @@ class GamesShowcasePanel(QtWidgets.QFrame):
         self.title = title
         self.subtitle = subtitle
         self.base_size = (820, 338)
+        self._selected = None
         self.setObjectName('games_showcase_panel')
         self.setFocusPolicy(QtCore.Qt.StrongFocus)
         self._blade_buttons = []
@@ -3361,7 +4354,7 @@ class GamesShowcasePanel(QtWidgets.QFrame):
 
     def apply_scale(self, scale=1.0, compact=False):
         s = max(0.58, float(scale))
-        compact_factor = 0.9 if compact else 1.0
+        compact_factor = 0.96 if compact else 1.0
         w = max(500, int(self.base_size[0] * s * compact_factor))
         h = max(240, int(self.base_size[1] * s * compact_factor))
         self.setFixedSize(w, h)
@@ -3414,6 +4407,10 @@ class GamesShowcasePanel(QtWidgets.QFrame):
             )
 
     def set_selected(self, on):
+        on = bool(on)
+        if self._selected is on:
+            return
+        self._selected = on
         border = 'rgba(242,248,254,0.9)' if on else 'rgba(246,252,255,0.30)'
         width = '2px' if on else '1px'
         self.setStyleSheet(
@@ -5914,7 +6911,7 @@ class DashboardPage(QtWidgets.QWidget):
 
     def _apply_scale_once(self, scale=1.0, compact=False):
         s = max(0.58, float(scale))
-        compact_factor = 0.88 if compact else 1.0
+        compact_factor = 0.95 if compact else 1.0
         left_w = max(112, int(220 * s * compact_factor))
         right_w = max(96, int(170 * s * compact_factor))
         gap = max(4, int(12 * s * compact_factor))
@@ -6485,6 +7482,9 @@ class Dashboard(QtWidgets.QMainWindow):
         ensure_data()
         self.setWindowTitle('XUI - Xbox 360 Style')
         scr = QtWidgets.QApplication.primaryScreen()
+        self._runtime_profile = detect_runtime_profile()
+        self._low_power_ui = use_low_power_ui(scr)
+        self._reduced_motion = self._low_power_ui or (os.environ.get('XUI_REDUCE_MOTION', '0') == '1')
         if scr is not None:
             g = scr.availableGeometry()
             self.resize(min(1600, g.width()), min(900, g.height()))
@@ -6806,16 +7806,25 @@ class Dashboard(QtWidgets.QMainWindow):
         self._games_inline.closed.connect(lambda: self._play_sfx('back'))
         self._games_inline.hide()
 
-        self.setStyleSheet('''
-            QMainWindow {
-                background:qlineargradient(x1:0.0,y1:0.0,x2:0.0,y2:1.0, stop:0 #4f555d, stop:0.44 #858b92, stop:1 #d7dbe0);
-            }
-            QFrame#stage {
-                background: rgba(255,255,255,0.06);
-                border: 1px solid rgba(255,255,255,0.10);
-                border-radius: 0px;
-            }
-        ''')
+        main_bg = (
+            '#8f959c'
+            if self._low_power_ui
+            else 'qlineargradient(x1:0.0,y1:0.0,x2:0.0,y2:1.0, stop:0 #4f555d, stop:0.44 #858b92, stop:1 #d7dbe0)'
+        )
+        stage_bg = 'rgba(255,255,255,0.03)' if self._low_power_ui else 'rgba(255,255,255,0.06)'
+        stage_border = 'rgba(255,255,255,0.08)' if self._low_power_ui else 'rgba(255,255,255,0.10)'
+        self.setStyleSheet(
+            f'''
+            QMainWindow {{
+                background:{main_bg};
+            }}
+            QFrame#stage {{
+                background:{stage_bg};
+                border:1px solid {stage_border};
+                border-radius:0px;
+            }}
+            '''
+        )
         self.setCursor(QtGui.QCursor(QtCore.Qt.BlankCursor))
         root.setCursor(QtGui.QCursor(QtCore.Qt.BlankCursor))
 
@@ -6829,22 +7838,35 @@ class Dashboard(QtWidgets.QMainWindow):
             g = scr.availableGeometry()
             sw = max(800, g.width())
             sh = max(480, g.height())
-        rw = min(w, sw) / 1600.0
-        rh = min(h, sh) / 900.0
-        scale = max(0.62, min(1.0, min(rw, rh)))
+        vw = min(w, sw)
+        vh = min(h, sh)
+        rw = vw / 1600.0
+        rh = vh / 900.0
+        base_scale = min(rw, rh)
         force_compact = os.environ.get('XUI_COMPACT_UI', '0') == '1'
-        compact = force_compact or (min(w, sw) <= 1280) or (min(h, sh) <= 720)
+        compact = force_compact or (vw <= 1366) or (vh <= 768)
+        scale = min(1.0, base_scale)
         if compact:
-            scale = min(scale, 0.8)
+            floor = 0.74 if vh < 700 else 0.80
+            boost = 1.08 if vh <= 800 else 1.0
+            scale = max(floor, min(1.0, scale * boost))
         if force_compact:
-            scale = min(scale, 0.74)
+            scale = min(scale, 0.92)
+        if self._low_power_ui:
+            scale = max(0.82 if vh >= 700 else 0.76, scale)
+        env_scale = str(os.environ.get('XUI_UI_SCALE', '')).strip()
+        if env_scale:
+            try:
+                scale = max(0.58, min(1.15, float(env_scale)))
+            except Exception:
+                pass
         return scale, compact
 
     def _apply_responsive_layout(self):
         scale, compact = self._compute_ui_metrics()
         self._ui_scale = scale
         self._compact_ui = compact
-        compact_factor = 0.72 if compact else 1.0
+        compact_factor = 0.80 if compact else 1.0
         if self._stage_layout is not None:
             side = max(18, int(94 * scale * compact_factor))
             top = max(10, int(34 * scale * compact_factor))
@@ -6855,7 +7877,7 @@ class Dashboard(QtWidgets.QMainWindow):
         if hasattr(self, 'top_tabs') and self.top_tabs is not None:
             self.top_tabs.apply_scale(scale, compact)
         if hasattr(self, 'desc') and self.desc is not None:
-            desc_px = max(10, int(18 * scale * (0.82 if compact else 1.0)))
+            desc_px = max(10, int(18 * scale * (0.92 if compact else 1.0)))
             self.desc.setStyleSheet(
                 f'font-size:{desc_px}px; color:rgba(236,240,244,0.82); '
                 'font-family:"Segoe UI","Noto Sans",sans-serif;'
@@ -6954,6 +7976,11 @@ class Dashboard(QtWidgets.QMainWindow):
             return
         if self._tab_animating:
             return
+        if self._reduced_motion:
+            self.page_stack.setCurrentIndex(to_idx)
+            self._normalize_page_visibility(to_idx)
+            self.update_focus()
+            return
         from_w = self.page_stack.widget(from_idx)
         to_w = self.page_stack.widget(to_idx)
         rect = self.page_stack.rect()
@@ -6972,50 +7999,55 @@ class Dashboard(QtWidgets.QMainWindow):
         to_w.show()
         to_w.raise_()
 
-        from_fx = QtWidgets.QGraphicsOpacityEffect(from_w)
-        to_fx = QtWidgets.QGraphicsOpacityEffect(to_w)
-        from_fx.setOpacity(1.0)
-        to_fx.setOpacity(0.0)
-        from_w.setGraphicsEffect(from_fx)
-        to_w.setGraphicsEffect(to_fx)
-
         self._tab_animating = True
         self._tab_anim_group = QtCore.QParallelAnimationGroup(self)
+        duration = 220 if self._low_power_ui else 320
 
         anim_from = QtCore.QPropertyAnimation(from_w, b'pos')
-        anim_from.setDuration(320)
+        anim_from.setDuration(duration)
         anim_from.setStartValue(QtCore.QPoint(0, 0))
         anim_from.setEndValue(QtCore.QPoint(from_end_x, 0))
         anim_from.setEasingCurve(QtCore.QEasingCurve.InOutCubic)
 
         anim_to = QtCore.QPropertyAnimation(to_w, b'pos')
-        anim_to.setDuration(320)
+        anim_to.setDuration(duration)
         anim_to.setStartValue(QtCore.QPoint(to_start_x, 0))
         anim_to.setEndValue(QtCore.QPoint(0, 0))
         anim_to.setEasingCurve(QtCore.QEasingCurve.InOutCubic)
 
-        fade_from = QtCore.QPropertyAnimation(from_fx, b'opacity')
-        fade_from.setDuration(280)
-        fade_from.setStartValue(1.0)
-        fade_from.setEndValue(0.08)
-        fade_from.setEasingCurve(QtCore.QEasingCurve.OutCubic)
-
-        fade_to = QtCore.QPropertyAnimation(to_fx, b'opacity')
-        fade_to.setDuration(300)
-        fade_to.setStartValue(0.0)
-        fade_to.setEndValue(1.0)
-        fade_to.setEasingCurve(QtCore.QEasingCurve.OutCubic)
-
         self._tab_anim_group.addAnimation(anim_from)
         self._tab_anim_group.addAnimation(anim_to)
-        self._tab_anim_group.addAnimation(fade_from)
-        self._tab_anim_group.addAnimation(fade_to)
+        from_fx = None
+        to_fx = None
+        if not self._low_power_ui:
+            from_fx = QtWidgets.QGraphicsOpacityEffect(from_w)
+            to_fx = QtWidgets.QGraphicsOpacityEffect(to_w)
+            from_fx.setOpacity(1.0)
+            to_fx.setOpacity(0.0)
+            from_w.setGraphicsEffect(from_fx)
+            to_w.setGraphicsEffect(to_fx)
+
+            fade_from = QtCore.QPropertyAnimation(from_fx, b'opacity')
+            fade_from.setDuration(280)
+            fade_from.setStartValue(1.0)
+            fade_from.setEndValue(0.08)
+            fade_from.setEasingCurve(QtCore.QEasingCurve.OutCubic)
+
+            fade_to = QtCore.QPropertyAnimation(to_fx, b'opacity')
+            fade_to.setDuration(300)
+            fade_to.setStartValue(0.0)
+            fade_to.setEndValue(1.0)
+            fade_to.setEasingCurve(QtCore.QEasingCurve.OutCubic)
+            self._tab_anim_group.addAnimation(fade_from)
+            self._tab_anim_group.addAnimation(fade_to)
 
         def done():
             self.page_stack.setCurrentIndex(to_idx)
             self._normalize_page_visibility(to_idx)
-            from_w.setGraphicsEffect(None)
-            to_w.setGraphicsEffect(None)
+            if from_fx is not None:
+                from_w.setGraphicsEffect(None)
+            if to_fx is not None:
+                to_w.setGraphicsEffect(None)
             self._tab_animating = False
             self._tab_anim_group = None
             self.update_focus()
@@ -7072,6 +8104,10 @@ class Dashboard(QtWidgets.QMainWindow):
         else:
             self.focus_idx = 0
 
+        cur = (self.tab_idx, self.focus_area, self.focus_idx)
+        if self._last_focus_state is not None and cur == self._last_focus_state:
+            return
+
         for i, t in enumerate(page.left_tiles):
             t.set_selected(self.focus_area == 'left' and self.focus_idx == i)
         for i, t in enumerate(page.center_tiles):
@@ -7080,10 +8116,9 @@ class Dashboard(QtWidgets.QMainWindow):
             t.set_selected(self.focus_area == 'right' and self.focus_idx == i)
         page.hero.set_selected(self.focus_area == 'center' and self.focus_idx == 0)
 
-        cur = (self.tab_idx, self.focus_area, self.focus_idx)
         if self._last_focus_state is None:
             self._last_focus_state = cur
-        elif cur != self._last_focus_state:
+        else:
             self._play_sfx('hover')
             self._last_focus_state = cur
 
@@ -9415,13 +10450,28 @@ def main():
     app.setApplicationName('XUI Xbox Style')
     f = app.font()
     scr = app.primaryScreen()
+    low_ui = use_low_power_ui(scr)
     if scr is not None:
         g = scr.availableGeometry()
-        base_pt = 10 if (g.width() <= 1280 or g.height() <= 720) else 12
+        if low_ui and (g.width() <= 1366 or g.height() <= 768):
+            base_pt = 11
+        else:
+            base_pt = 10 if (g.width() <= 1280 or g.height() <= 720) else 12
     else:
-        base_pt = 12
+        base_pt = 11 if low_ui else 12
     f.setPointSize(base_pt)
     app.setFont(f)
+    if low_ui:
+        for fx in (
+            QtCore.Qt.UI_AnimateMenu,
+            QtCore.Qt.UI_AnimateCombo,
+            QtCore.Qt.UI_FadeMenu,
+            QtCore.Qt.UI_FadeTooltip,
+        ):
+            try:
+                app.setEffectEnabled(fx, False)
+            except Exception:
+                pass
     play_startup_video()
     w = Dashboard()
     try:
@@ -19048,6 +20098,7 @@ class WebHub(QtWidgets.QMainWindow):
         self._kbd_opening = False
         self._kbd_last_close = 0.0
         self._skip_web_return_once = 0
+        self._web_edit_probe_pending = False
         self._gp = None
         self._gp_prev = {}
         self._gp_timer = None
@@ -19421,6 +20472,7 @@ class WebHub(QtWidgets.QMainWindow):
             'a': bool(self._gpv('buttonA', False)),
             'b': bool(self._gpv('buttonB', False)),
             'x': bool(self._gpv('buttonX', False)),
+            'y': bool(self._gpv('buttonY', False)),
             'guide': bool(self._gpv('buttonGuide', False)),
             'lb': bool(self._gpv('buttonL1', False)),
             'rb': bool(self._gpv('buttonR1', False)),
@@ -19435,6 +20487,8 @@ class WebHub(QtWidgets.QMainWindow):
                 self._send_key_focus(QtCore.Qt.Key_Escape)
             elif pressed('a'):
                 self._send_key_focus(QtCore.Qt.Key_Return)
+            elif pressed('y'):
+                self._send_key_focus(QtCore.Qt.Key_Space)
             elif pressed('x'):
                 self._send_key_focus(QtCore.Qt.Key_Backspace)
             elif pressed('left'):
@@ -19466,6 +20520,12 @@ class WebHub(QtWidgets.QMainWindow):
                 self._send_key_focus(QtCore.Qt.Key_Return)
             else:
                 self._open_keyboard_if_web_editable()
+        elif pressed('y'):
+            if self.stack.currentWidget() is self.hub:
+                self._focus_addr_with_keyboard()
+            else:
+                self._send_key_focus(QtCore.Qt.Key_Tab)
+                self._auto_open_keyboard_if_web_editable(140)
         elif pressed('left'):
             self._send_key_focus(QtCore.Qt.Key_Left)
         elif pressed('right'):
@@ -19503,21 +20563,49 @@ class WebHub(QtWidgets.QMainWindow):
         payload = json.dumps(str(text or ''))
         js = f"""
 (() => {{
-  const el = document.activeElement;
+  const deepActive = (root) => {{
+    let el = root && root.activeElement ? root.activeElement : null;
+    let guard = 0;
+    while (el && el.shadowRoot && el.shadowRoot.activeElement && guard < 8) {{
+      el = el.shadowRoot.activeElement;
+      guard += 1;
+    }}
+    return el;
+  }};
+  const el = deepActive(document);
   if (!el) return false;
   const tag = (el.tagName || '').toLowerCase();
   const tp = (el.type || '').toLowerCase();
   const editable = el.isContentEditable || tag === 'textarea' ||
-    (tag === 'input' && !['button','submit','checkbox','radio','range','color','file','image','reset'].includes(tp));
+    (tag === 'input' && !['button','submit','checkbox','radio','range','color','file','image','reset','hidden'].includes(tp));
+  if (el.readOnly || el.disabled) return false;
   if (!editable) return false;
   const txt = {payload};
+  el.focus();
   if (el.isContentEditable) {{
-    try {{ document.execCommand('insertText', false, txt); }} catch (_e) {{ el.textContent = (el.textContent || '') + txt; }}
+    try {{
+      document.execCommand('selectAll', false, null);
+      document.execCommand('insertText', false, txt);
+    }} catch (_e) {{
+      el.textContent = txt;
+    }}
   }} else {{
-    el.value = (el.value || '') + txt;
+    const proto = tag === 'textarea'
+      ? (window.HTMLTextAreaElement && window.HTMLTextAreaElement.prototype)
+      : (window.HTMLInputElement && window.HTMLInputElement.prototype);
+    const desc = proto ? Object.getOwnPropertyDescriptor(proto, 'value') : null;
+    if (desc && typeof desc.set === 'function') {{
+      desc.set.call(el, txt);
+    }} else {{
+      el.value = txt;
+    }}
   }}
-  el.dispatchEvent(new Event('input', {{ bubbles: true }}));
-  el.dispatchEvent(new Event('change', {{ bubbles: true }}));
+  try {{
+    el.dispatchEvent(new InputEvent('input', {{ bubbles: true, composed: true, data: txt, inputType: 'insertText' }}));
+  }} catch (_e) {{
+    el.dispatchEvent(new Event('input', {{ bubbles: true, composed: true }}));
+  }}
+  el.dispatchEvent(new Event('change', {{ bubbles: true, composed: true }}));
   return true;
 }})();
 """
@@ -19532,39 +20620,112 @@ class WebHub(QtWidgets.QMainWindow):
         QtWidgets.QApplication.postEvent(self.web, press)
         QtWidgets.QApplication.postEvent(self.web, rel)
 
+    def _probe_web_editable(self, callback):
+        if self.web is None:
+            try:
+                callback(False, '')
+            except Exception:
+                pass
+            return
+        if self._web_edit_probe_pending:
+            return
+        self._web_edit_probe_pending = True
+        probe = """
+(() => {
+  const deepActive = (root) => {
+    let el = root && root.activeElement ? root.activeElement : null;
+    let guard = 0;
+    while (el && el.shadowRoot && el.shadowRoot.activeElement && guard < 8) {
+      el = el.shadowRoot.activeElement;
+      guard += 1;
+    }
+    return el;
+  };
+  const el = deepActive(document);
+  if (!el) return { editable: false, value: '' };
+  const tag = (el.tagName || '').toLowerCase();
+  const tp = (el.type || '').toLowerCase();
+  const editable = !el.readOnly && !el.disabled && (
+    el.isContentEditable ||
+    tag === 'textarea' ||
+    (tag === 'input' && !['button','submit','checkbox','radio','range','color','file','image','reset','hidden'].includes(tp))
+  );
+  let value = '';
+  if (editable) {
+    if (el.isContentEditable) value = el.innerText || el.textContent || '';
+    else value = el.value || '';
+  }
+  return { editable: !!editable, value: String(value || '') };
+})();
+"""
+        def _cb(result):
+            self._web_edit_probe_pending = False
+            editable = False
+            value = ''
+            if isinstance(result, dict):
+                editable = bool(result.get('editable', False))
+                value = str(result.get('value', '') or '')
+            else:
+                editable = bool(result)
+            try:
+                callback(editable, value)
+            except Exception:
+                pass
+        try:
+            self.web.page().runJavaScript(probe, _cb)
+        except Exception:
+            self._web_edit_probe_pending = False
+            try:
+                callback(False, '')
+            except Exception:
+                pass
+
+    def _auto_open_keyboard_if_web_editable(self, delay_ms=120):
+        if self.web is None:
+            return
+        if self._active_virtual_keyboard() is not None:
+            return
+        try:
+            delay = max(0, int(delay_ms))
+        except Exception:
+            delay = 120
+        def _probe_and_open():
+            if self._active_virtual_keyboard() is not None:
+                return
+            self._probe_web_editable(lambda editable, value: editable and self._open_virtual_keyboard_for_web(value))
+        if delay <= 0:
+            _probe_and_open()
+            return
+        QtCore.QTimer.singleShot(delay, _probe_and_open)
+
     def _open_keyboard_if_web_editable(self):
         if self.web is None:
             return
-        probe = """
-(() => {
-  const el = document.activeElement;
-  if (!el) return false;
-  const tag = (el.tagName || '').toLowerCase();
-  const tp = (el.type || '').toLowerCase();
-  return !!(el.isContentEditable || tag === 'textarea' ||
-    (tag === 'input' && !['button','submit','checkbox','radio','range','color','file','image','reset'].includes(tp)));
-})();
-"""
-        def cb(editable):
+        def cb(editable, value):
             if bool(editable):
-                self._open_virtual_keyboard_for_web()
+                self._open_virtual_keyboard_for_web(value)
             else:
                 self._forward_enter_to_web()
-        self.web.page().runJavaScript(probe, cb)
+        self._probe_web_editable(cb)
 
-    def _open_virtual_keyboard_for_web(self):
+    def _open_virtual_keyboard_for_web(self, initial_text=''):
         if self.web is None:
+            return
+        if self._active_virtual_keyboard() is not None:
+            return
+        if self._kbd_opening:
             return
         if (time.monotonic() - float(self._kbd_last_close)) < 0.35:
             return
-        d = VirtualKeyboardDialog('', self)
+        self._kbd_opening = True
+        d = VirtualKeyboardDialog(str(initial_text or ''), self)
         try:
             if d.exec_() == QtWidgets.QDialog.Accepted:
                 txt = d.text()
-                if txt:
-                    self._inject_text_into_page(txt)
+                self._inject_text_into_page(txt)
         finally:
             self._kbd_last_close = time.monotonic()
+            self._kbd_opening = False
 
     def _open_virtual_keyboard_contextual(self):
         if self.stack.currentWidget() is self.hub:
@@ -19576,13 +20737,19 @@ class WebHub(QtWidgets.QMainWindow):
         if obj is self.addr and event.type() in (QtCore.QEvent.FocusIn, QtCore.QEvent.MouseButtonPress):
             if not self._kbd_opening and (time.monotonic() - float(self._kbd_last_close)) >= 0.35:
                 QtCore.QTimer.singleShot(0, self._open_virtual_keyboard_for_addr)
-        if obj is self.web and event.type() == QtCore.QEvent.KeyPress:
-            if event.key() in (QtCore.Qt.Key_Return, QtCore.Qt.Key_Enter):
-                if self._skip_web_return_once > 0:
-                    self._skip_web_return_once -= 1
+        if obj is self.web:
+            if event.type() == QtCore.QEvent.KeyPress:
+                if event.key() in (QtCore.Qt.Key_Return, QtCore.Qt.Key_Enter):
+                    if self._skip_web_return_once > 0:
+                        self._skip_web_return_once -= 1
+                        return False
+                    self._open_keyboard_if_web_editable()
+                    return True
+                if event.key() == QtCore.Qt.Key_Tab:
+                    QtCore.QTimer.singleShot(90, lambda: self._auto_open_keyboard_if_web_editable(0))
                     return False
-                self._open_keyboard_if_web_editable()
-                return True
+            if event.type() == QtCore.QEvent.MouseButtonRelease:
+                self._auto_open_keyboard_if_web_editable(130)
         return super().eventFilter(obj, event)
 
     def _build_hub_widget(self):
@@ -19609,7 +20776,7 @@ class WebHub(QtWidgets.QMainWindow):
         grid.addWidget(self._section('Recent', self.recent_list), 0, 1)
         grid.addWidget(self._section('Featured', self.featured_list), 0, 2)
         v.addLayout(grid, 1)
-        hint = QtWidgets.QLabel('ENTER = open | F1 = toggle hub | ESC = close browser')
+        hint = QtWidgets.QLabel('A/ENTER open | Y/TAB focus | X/F2 keyboard | LB/RB back/next | F1 guide | B/ESC close')
         hint.setObjectName('hint')
         v.addWidget(hint)
         return hub
@@ -19704,6 +20871,7 @@ class WebHub(QtWidgets.QMainWindow):
                 self.open_url(fixed)
                 return
             self._remember_recent(current)
+            self._auto_open_keyboard_if_web_editable(280)
 
     def _go_back(self):
         if self.web is not None:
