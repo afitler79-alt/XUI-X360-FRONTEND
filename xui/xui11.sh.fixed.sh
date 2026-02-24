@@ -4324,6 +4324,87 @@ class InstallTaskProgressDialog(QtWidgets.QDialog):
         QtCore.QTimer.singleShot(0, self._center_dialog)
 
 
+class VerticalTextLabel(QtWidgets.QLabel):
+    def __init__(self, text='', clockwise=False, parent=None):
+        super().__init__(text, parent)
+        self._clockwise = bool(clockwise)
+        self.setAlignment(QtCore.Qt.AlignCenter)
+
+    def sizeHint(self):
+        s = super().sizeHint()
+        return QtCore.QSize(s.height() + 8, s.width() + 8)
+
+    def minimumSizeHint(self):
+        s = super().minimumSizeHint()
+        return QtCore.QSize(s.height() + 8, s.width() + 8)
+
+    def paintEvent(self, _event):
+        painter = QtGui.QPainter(self)
+        painter.setRenderHint(QtGui.QPainter.Antialiasing, True)
+        painter.setRenderHint(QtGui.QPainter.TextAntialiasing, True)
+        if self._clockwise:
+            painter.translate(self.width(), 0)
+            painter.rotate(90)
+        else:
+            painter.translate(0, self.height())
+            painter.rotate(-90)
+        rect = QtCore.QRect(0, 0, self.height(), self.width())
+        painter.setPen(self.palette().windowText().color())
+        painter.setFont(self.font())
+        painter.drawText(rect, QtCore.Qt.AlignCenter, self.text())
+        painter.end()
+
+
+class GuideSideBlade(QtWidgets.QFrame):
+    activated = QtCore.pyqtSignal(int)
+
+    def __init__(self, clockwise=False, parent=None):
+        super().__init__(parent)
+        self._section_idx = 0
+        self._active = False
+        self._clockwise = bool(clockwise)
+        self.setFixedWidth(76)
+        self.setCursor(QtGui.QCursor(QtCore.Qt.PointingHandCursor))
+        lay = QtWidgets.QVBoxLayout(self)
+        lay.setContentsMargins(0, 0, 0, 0)
+        self.label = VerticalTextLabel('', clockwise=self._clockwise)
+        self.label.setAlignment(QtCore.Qt.AlignCenter)
+        lay.addWidget(self.label, 1)
+        self._apply_style()
+
+    def set_payload(self, section_idx, text, active=False):
+        self._section_idx = int(section_idx)
+        self.label.setText(str(text or ''))
+        self._active = bool(active)
+        self._apply_style()
+
+    def _apply_style(self):
+        if self._active:
+            bg0, bg1, fg, bdr = '#4a5f78', '#31465f', '#f5f9fc', 'rgba(240,248,255,0.84)'
+            fs = 18
+            fw = 800
+        else:
+            bg0, bg1, fg, bdr = '#9ab1c6', '#7e99b2', '#f5f9fc', 'rgba(236,245,253,0.62)'
+            fs = 15
+            fw = 700
+        self.setStyleSheet(
+            f'''
+            QFrame {{
+                background:qlineargradient(x1:0,y1:0,x2:0,y2:1, stop:0 {bg0}, stop:1 {bg1});
+                border:1px solid {bdr};
+                border-radius:0px;
+            }}
+            '''
+        )
+        self.label.setStyleSheet(
+            f'color:{fg}; font-size:{fs}px; font-weight:{fw}; font-family:"Segoe UI","Noto Sans",sans-serif;'
+        )
+
+    def mousePressEvent(self, e):
+        self.activated.emit(int(self._section_idx))
+        super().mousePressEvent(e)
+
+
 class XboxGuideMenu(QtWidgets.QDialog):
     def __init__(self, gamertag='Player1', parent=None, sfx_cb=None, mode='dashboard'):
         super().__init__(parent)
@@ -4333,6 +4414,7 @@ class XboxGuideMenu(QtWidgets.QDialog):
         self._selection = None
         self._open_anim = None
         self._page_anim = None
+        self._blade_anim = None
         self._last_row = 0
         self._section_idx = 0
         self._sections = self._build_sections()
@@ -4341,89 +4423,77 @@ class XboxGuideMenu(QtWidgets.QDialog):
         self.setWindowFlags(QtCore.Qt.Dialog | QtCore.Qt.FramelessWindowHint)
         self.setAttribute(QtCore.Qt.WA_TranslucentBackground, True)
         self.setModal(True)
-        self.resize(1120, 590)
+        self.resize(1060, 560)
         self.setStyleSheet('''
             QDialog {
-                background:rgba(10, 16, 24, 0.58);
+                background:rgba(8, 14, 22, 0.58);
             }
             QFrame#xguide_panel {
-                background:qlineargradient(x1:0,y1:0,x2:1,y2:1, stop:0 #404a56, stop:1 #262e39);
-                border:1px solid rgba(226,238,248,0.28);
-                border-radius:1px;
+                background:qlineargradient(x1:0,y1:0,x2:1,y2:1, stop:0 #3a4654, stop:1 #2a3340);
+                border:1px solid rgba(226,238,248,0.30);
+                border-radius:0px;
             }
             QLabel#xguide_title {
-                color:#f2f7fb;
-                font-size:44px;
+                color:#f3f7fb;
+                font-size:30px;
                 font-weight:800;
+                font-family:"Segoe UI","Noto Sans",sans-serif;
             }
             QLabel#xguide_meta {
-                color:rgba(233,243,251,0.93);
-                font-size:30px;
-                font-weight:600;
-            }
-            QListWidget#xguide_blades {
-                background:qlineargradient(x1:0,y1:0,x2:0,y2:1, stop:0 #99b0c5, stop:1 #6f879b);
-                border:1px solid rgba(233,241,247,0.65);
-                outline:none;
-                color:#f7fbff;
-                font-size:32px;
-                font-weight:800;
-            }
-            QListWidget#xguide_blades::item {
-                min-height:110px;
-                padding:6px 10px;
-                border:1px solid transparent;
-            }
-            QListWidget#xguide_blades::item:selected {
-                background:qlineargradient(x1:0,y1:0,x2:1,y2:0, stop:0 #4b5e74, stop:1 #314357);
-                border:1px solid rgba(243,249,254,0.45);
+                color:rgba(233,243,251,0.95);
+                font-size:17px;
+                font-weight:700;
+                font-family:"Segoe UI","Noto Sans",sans-serif;
             }
             QFrame#xguide_page_host {
-                background:#dde2e8;
-                border:1px solid rgba(8,12,16,0.32);
-            }
-            QListWidget#xguide_list {
-                background:transparent;
-                color:#1e2933;
-                border:none;
-                font-size:50px;
-                outline:none;
-            }
-            QListWidget#xguide_list::item {
-                min-height:58px;
-                padding:7px 16px;
-                border-bottom:1px solid rgba(40,52,68,0.10);
-            }
-            QListWidget#xguide_list::item:selected {
-                color:#edfbea;
-                background:qlineargradient(x1:0,y1:0,x2:1,y2:0, stop:0 #59b53f, stop:1 #3f9932);
-                border:1px solid rgba(255,255,255,0.22);
+                background:#d9dde3;
+                border:1px solid rgba(11,16,22,0.38);
             }
             QLabel#xguide_section_title {
-                color:#2a3642;
-                font-size:24px;
+                color:#293541;
+                font-size:16px;
                 font-weight:800;
                 padding:4px 12px;
+                font-family:"Segoe UI","Noto Sans",sans-serif;
+            }
+            QListWidget#xguide_list {
+                background:#c9ced6;
+                color:#1a2a40;
+                border:none;
+                font-size:20px;
+                outline:none;
+                font-family:"Segoe UI","Noto Sans",sans-serif;
+            }
+            QListWidget#xguide_list::item {
+                min-height:38px;
+                padding:4px 16px;
+                border-bottom:1px solid rgba(38,48,62,0.14);
+            }
+            QListWidget#xguide_list::item:selected {
+                color:#eefeed;
+                background:qlineargradient(x1:0,y1:0,x2:1,y2:0, stop:0 #57b73d, stop:1 #3d9531);
+                border:1px solid rgba(255,255,255,0.24);
             }
             QLabel#xguide_hint {
-                color:#eaf1f7;
-                font-size:27px;
-                font-weight:700;
+                color:#edf3f8;
+                font-size:20px;
+                font-weight:800;
+                font-family:"Segoe UI","Noto Sans",sans-serif;
             }
         ''')
+
         outer = QtWidgets.QVBoxLayout(self)
-        outer.setContentsMargins(18, 18, 18, 18)
+        outer.setContentsMargins(10, 12, 10, 12)
         panel = QtWidgets.QFrame()
         panel.setObjectName('xguide_panel')
-        panel.setMinimumSize(940, 520)
-        panel.setMaximumSize(1360, 820)
-        outer.addWidget(panel, 0, QtCore.Qt.AlignCenter)
+        outer.addWidget(panel)
 
         root = QtWidgets.QVBoxLayout(panel)
-        root.setContentsMargins(14, 12, 14, 12)
-        root.setSpacing(10)
+        root.setContentsMargins(10, 8, 10, 8)
+        root.setSpacing(6)
 
         top = QtWidgets.QHBoxLayout()
+        top.setSpacing(8)
         title = QtWidgets.QLabel('Xbox Guide')
         title.setObjectName('xguide_title')
         self.meta = QtWidgets.QLabel('')
@@ -4434,18 +4504,16 @@ class XboxGuideMenu(QtWidgets.QDialog):
         root.addLayout(top)
 
         body = QtWidgets.QHBoxLayout()
-        body.setSpacing(10)
+        body.setSpacing(0)
 
-        self.blades = QtWidgets.QListWidget()
-        self.blades.setObjectName('xguide_blades')
-        self.blades.setFlow(QtWidgets.QListView.TopToBottom)
-        self.blades.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarAlwaysOff)
-        self.blades.setVerticalScrollBarPolicy(QtCore.Qt.ScrollBarAlwaysOff)
-        self.blades.setFixedWidth(154)
-        for section_name, _items in self._sections:
-            self.blades.addItem(QtWidgets.QListWidgetItem(section_name))
-        self.blades.currentRowChanged.connect(self._on_blade_changed)
-        body.addWidget(self.blades, 0)
+        self.blade_primary = GuideSideBlade(clockwise=False)
+        self.blade_secondary = GuideSideBlade(clockwise=False)
+        self.blade_right = GuideSideBlade(clockwise=True)
+        self.blade_primary.activated.connect(self._switch_section_from_blade)
+        self.blade_secondary.activated.connect(self._switch_section_from_blade)
+        self.blade_right.activated.connect(self._switch_section_from_blade)
+        body.addWidget(self.blade_primary, 0)
+        body.addWidget(self.blade_secondary, 0)
 
         page_shell = QtWidgets.QFrame()
         page_shell.setObjectName('xguide_page_host')
@@ -4475,21 +4543,21 @@ class XboxGuideMenu(QtWidgets.QDialog):
             self._section_lists.append(lw)
             self.page_stack.addWidget(lw)
         body.addWidget(page_shell, 1)
+        body.addWidget(self.blade_right, 0)
         root.addLayout(body, 1)
 
         if self.mode == 'app':
-            hint_text = '<font color="#49b93e">A Select</font>   <font color="#cf2d2d">B Back</font>   <font color="#2b7fd8">X Sign Out</font>   <font color="#ddb126">Y Xbox Home</font>'
+            hint_text = '<font color="#49b93e">A Select</font> <font color="#cf2d2d">B Back</font> <font color="#2b7fd8">X Sign Out</font> <font color="#ddb126">Y Xbox Home</font>'
         else:
-            hint_text = '<font color="#49b93e">A Select</font>   <font color="#cf2d2d">B Back</font>   <font color="#2b7fd8">X Cerrar sesion</font>   <font color="#ddb126">Y Inicio de Xbox</font>'
+            hint_text = '<font color="#49b93e">A Select</font> <font color="#cf2d2d">B Back</font> <font color="#2b7fd8">X Cerrar sesion</font> <font color="#ddb126">Y Inicio de Xbox</font>'
         hint = QtWidgets.QLabel(hint_text)
         hint.setObjectName('xguide_hint')
-        root.addWidget(hint)
+        root.addWidget(hint, 0, QtCore.Qt.AlignLeft)
 
         self._clock = QtCore.QTimer(self)
         self._clock.timeout.connect(self._refresh_meta)
         self._clock.start(1000)
         self._refresh_meta()
-        self.blades.setCurrentRow(0)
         self._switch_section(0, animate=False)
 
     def _build_sections(self):
@@ -4502,7 +4570,7 @@ class XboxGuideMenu(QtWidgets.QDialog):
         return [
             ('Guide', ['Reciente', 'Mensajes recientes', 'Social global', 'Beacons', 'Mis juegos', 'Descargas activas', 'Canjear codigo']),
             (self.gamertag, ['Friends', 'Party', 'Messages', 'Chat', 'Beacons & Activity']),
-            ('Dashboard', ['Inicio de Xbox', 'Configuracion', 'Cerrar app actual', 'Cerrar sesion']),
+            ('Dash', ['Inicio de Xbox', 'Configuracion', 'Cerrar app actual', 'Cerrar sesion']),
         ]
 
     def _current_list(self):
@@ -4518,8 +4586,17 @@ class XboxGuideMenu(QtWidgets.QDialog):
             except Exception:
                 pass
 
-    def _on_blade_changed(self, row):
-        self._switch_section(row, animate=True)
+    def _switch_section_from_blade(self, section_idx):
+        self._switch_section(section_idx, animate=True)
+
+    def _refresh_side_blades(self):
+        n = max(1, len(self._sections))
+        cur = int(self._section_idx) % n
+        nxt = (cur + 1) % n
+        prv = (cur - 1) % n
+        self.blade_primary.set_payload(cur, self._sections[cur][0], active=True)
+        self.blade_secondary.set_payload(nxt, self._sections[nxt][0], active=False)
+        self.blade_right.set_payload(prv, self._sections[prv][0], active=False)
 
     def _switch_section(self, row, animate=True):
         try:
@@ -4530,13 +4607,15 @@ class XboxGuideMenu(QtWidgets.QDialog):
             return
         old_idx = int(self._section_idx)
         if row == old_idx and self.page_stack.currentIndex() == row:
+            self._section_title_refresh()
             cur = self._current_list()
             if cur is not None:
                 cur.setFocus()
-            self._section_title_refresh()
+            self._refresh_side_blades()
             return
         self._section_idx = row
         self._section_title_refresh()
+        self._refresh_side_blades()
         self._sfx('hover')
         if not animate:
             self.page_stack.setCurrentIndex(row)
@@ -4551,6 +4630,47 @@ class XboxGuideMenu(QtWidgets.QDialog):
         label = self._sections[idx][0] if 0 <= idx < len(self._sections) else 'Guide'
         self.section_title.setText(str(label))
 
+    def _animate_blades(self, direction):
+        direction = 1 if int(direction) >= 0 else -1
+        blades = [self.blade_primary, self.blade_secondary, self.blade_right]
+        grp = QtCore.QParallelAnimationGroup(self)
+        self._blade_anim = grp
+        for blade in blades:
+            effect = QtWidgets.QGraphicsOpacityEffect(blade)
+            blade.setGraphicsEffect(effect)
+            effect.setOpacity(0.55)
+            end_rect = blade.geometry()
+            start_rect = QtCore.QRect(
+                end_rect.x() - (16 * direction),
+                end_rect.y(),
+                end_rect.width(),
+                end_rect.height(),
+            )
+            blade.setGeometry(start_rect)
+
+            slide = QtCore.QPropertyAnimation(blade, b'geometry', self)
+            slide.setDuration(170)
+            slide.setStartValue(start_rect)
+            slide.setEndValue(end_rect)
+            slide.setEasingCurve(QtCore.QEasingCurve.OutCubic)
+
+            fade = QtCore.QPropertyAnimation(effect, b'opacity', self)
+            fade.setDuration(160)
+            fade.setStartValue(0.55)
+            fade.setEndValue(1.0)
+            fade.setEasingCurve(QtCore.QEasingCurve.OutCubic)
+
+            grp.addAnimation(slide)
+            grp.addAnimation(fade)
+
+        def done():
+            for blade in blades:
+                blade.setGraphicsEffect(None)
+            self._blade_anim = None
+
+        grp.finished.connect(done)
+        grp.start(QtCore.QAbstractAnimation.DeleteWhenStopped)
+
     def _animate_section_transition(self, from_idx, to_idx):
         if from_idx < 0 or from_idx >= self.page_stack.count():
             self.page_stack.setCurrentIndex(to_idx)
@@ -4558,11 +4678,12 @@ class XboxGuideMenu(QtWidgets.QDialog):
             if cur is not None:
                 cur.setFocus()
             return
+
         from_w = self.page_stack.widget(from_idx)
         to_w = self.page_stack.widget(to_idx)
         rect = self.page_stack.rect()
         direction = 1 if to_idx > from_idx else -1
-        shift = max(90, rect.width() // 5) * direction
+        shift = max(52, rect.width() // 8) * direction
 
         for i, lw in enumerate(self._section_lists):
             if i not in (from_idx, to_idx):
@@ -4585,26 +4706,26 @@ class XboxGuideMenu(QtWidgets.QDialog):
         grp = QtCore.QParallelAnimationGroup(self)
         self._page_anim = grp
 
-        move_from = QtCore.QPropertyAnimation(from_w, b'pos')
-        move_from.setDuration(220)
+        move_from = QtCore.QPropertyAnimation(from_w, b'pos', self)
+        move_from.setDuration(190)
         move_from.setStartValue(QtCore.QPoint(0, 0))
         move_from.setEndValue(QtCore.QPoint(-shift, 0))
         move_from.setEasingCurve(QtCore.QEasingCurve.InOutCubic)
 
-        move_to = QtCore.QPropertyAnimation(to_w, b'pos')
-        move_to.setDuration(220)
+        move_to = QtCore.QPropertyAnimation(to_w, b'pos', self)
+        move_to.setDuration(190)
         move_to.setStartValue(QtCore.QPoint(shift, 0))
         move_to.setEndValue(QtCore.QPoint(0, 0))
         move_to.setEasingCurve(QtCore.QEasingCurve.OutCubic)
 
-        fade_from = QtCore.QPropertyAnimation(fx_from, b'opacity')
-        fade_from.setDuration(200)
+        fade_from = QtCore.QPropertyAnimation(fx_from, b'opacity', self)
+        fade_from.setDuration(170)
         fade_from.setStartValue(1.0)
-        fade_from.setEndValue(0.12)
+        fade_from.setEndValue(0.14)
         fade_from.setEasingCurve(QtCore.QEasingCurve.OutCubic)
 
-        fade_to = QtCore.QPropertyAnimation(fx_to, b'opacity')
-        fade_to.setDuration(210)
+        fade_to = QtCore.QPropertyAnimation(fx_to, b'opacity', self)
+        fade_to.setDuration(180)
         fade_to.setStartValue(0.0)
         fade_to.setEndValue(1.0)
         fade_to.setEasingCurve(QtCore.QEasingCurve.OutCubic)
@@ -4626,6 +4747,7 @@ class XboxGuideMenu(QtWidgets.QDialog):
 
         grp.finished.connect(done)
         grp.start(QtCore.QAbstractAnimation.DeleteWhenStopped)
+        self._animate_blades(direction)
 
     def _on_row_changed(self, row):
         try:
@@ -4639,7 +4761,7 @@ class XboxGuideMenu(QtWidgets.QDialog):
     def _refresh_meta(self):
         now = QtCore.QDateTime.currentDateTime().toString('HH:mm')
         mode_tag = 'APP' if self.mode == 'app' else 'DASH'
-        self.meta.setText(f'{self.gamertag}    {now}    {mode_tag}')
+        self.meta.setText(f'{self.gamertag}   {now}   {mode_tag}')
 
     def _accept_current(self, *_):
         lw = self._current_list()
@@ -4665,13 +4787,14 @@ class XboxGuideMenu(QtWidgets.QDialog):
         super().showEvent(e)
         parent = self.parentWidget()
         if parent is not None:
-            w = min(max(980, int(parent.width() * 0.88)), max(980, parent.width() - 36))
-            h = min(max(530, int(parent.height() * 0.74)), max(530, parent.height() - 36))
+            w = min(max(940, int(parent.width() * 0.86)), max(940, parent.width() - 34))
+            h = min(max(510, int(parent.height() * 0.72)), max(510, parent.height() - 34))
             self.resize(w, h)
             x = parent.x() + max(8, (parent.width() - self.width()) // 2)
             y = parent.y() + max(8, (parent.height() - self.height()) // 2)
             self.move(max(0, x), max(0, y))
         self._refresh_meta()
+        self._refresh_side_blades()
         self._animate_open()
         cur = self._current_list()
         if cur is not None:
@@ -4682,16 +4805,21 @@ class XboxGuideMenu(QtWidgets.QDialog):
         self.setGraphicsEffect(effect)
         effect.setOpacity(0.0)
         end_rect = self.geometry()
-        start_rect = QtCore.QRect(end_rect.x() - max(28, end_rect.width() // 14), end_rect.y(), end_rect.width(), end_rect.height())
+        start_rect = QtCore.QRect(
+            end_rect.x() - max(24, end_rect.width() // 16),
+            end_rect.y(),
+            end_rect.width(),
+            end_rect.height(),
+        )
         self.setGeometry(start_rect)
         self._open_anim = QtCore.QParallelAnimationGroup(self)
         fade = QtCore.QPropertyAnimation(effect, b'opacity', self)
-        fade.setDuration(190)
+        fade.setDuration(180)
         fade.setStartValue(0.0)
         fade.setEndValue(1.0)
         fade.setEasingCurve(QtCore.QEasingCurve.OutCubic)
         slide = QtCore.QPropertyAnimation(self, b'geometry', self)
-        slide.setDuration(240)
+        slide.setDuration(220)
         slide.setStartValue(start_rect)
         slide.setEndValue(end_rect)
         slide.setEasingCurve(QtCore.QEasingCurve.OutCubic)
@@ -4713,10 +4841,10 @@ class XboxGuideMenu(QtWidgets.QDialog):
             self.accept()
             return
         if k in (QtCore.Qt.Key_Left,):
-            self.blades.setCurrentRow(max(0, int(self.blades.currentRow()) - 1))
+            self._switch_section((int(self._section_idx) - 1) % max(1, len(self._sections)), animate=True)
             return
         if k in (QtCore.Qt.Key_Right,):
-            self.blades.setCurrentRow(min(self.blades.count() - 1, int(self.blades.currentRow()) + 1))
+            self._switch_section((int(self._section_idx) + 1) % max(1, len(self._sections)), animate=True)
             return
         if k in (QtCore.Qt.Key_Prior, QtCore.Qt.Key_Next):
             lw = self._current_list()
@@ -5447,6 +5575,7 @@ class DashboardPage(QtWidgets.QWidget):
         left.addStretch(1)
 
         center_col = QtWidgets.QWidget()
+        center_col.setSizePolicy(QtWidgets.QSizePolicy.Fixed, QtWidgets.QSizePolicy.Preferred)
         center = QtWidgets.QVBoxLayout(center_col)
         self.center_layout = center
         center.setContentsMargins(0, 0, 0, 0)
@@ -5484,9 +5613,11 @@ class DashboardPage(QtWidgets.QWidget):
         )
         right.addStretch(1)
 
+        body.addStretch(1)
         body.addWidget(left_col, 0, alignment=QtCore.Qt.AlignTop)
-        body.addWidget(center_col, 1, alignment=QtCore.Qt.AlignTop)
+        body.addWidget(center_col, 0, alignment=QtCore.Qt.AlignTop)
         body.addWidget(right_col, 0, alignment=QtCore.Qt.AlignTop)
+        body.addStretch(1)
 
     def apply_scale(self, scale=1.0, compact=False):
         s = max(0.62, float(scale))
@@ -8022,18 +8153,17 @@ exit 0
         elif action == 'My Games':
             self._menu('My Games', ['Runner', 'Casino', 'Gem Match', 'FNAE', 'Steam', 'RetroArch', 'Games Integrations'])
         elif action in ('Browse Games', 'Browse'):
-            self._run('/bin/sh', ['-c', f'{xui}/bin/xui_store.sh'])
+            self._menu('Browse Games', ['Games Marketplace', 'Game Marketplace', 'Indie Channel', 'Steam', 'RetroArch', 'Store'])
+        elif action == 'Xbox Home Feed':
+            self._open_url_external('https://www.xbox.com/en-US/', normal_mode=True)
         elif action == 'My TV & Movies':
-            if 'tv & movies' in self.tabs:
-                self._switch_tab(self.tabs.index('tv & movies'), animate=True, keep_tabs_focus=True)
-            else:
-                self._open_url_external('https://www.xbox.com/en-US/entertainment', normal_mode=True)
+            self._menu('My TV & Movies', ['Netflix', 'YouTube', 'Twitch', 'Movie Trailers', 'Video Marketplace', 'Live TV'])
         elif action == 'Browse TV & Movies':
-            self._open_url_external('https://www.xbox.com/en-US/entertainment', normal_mode=True)
+            self._menu('Browse TV & Movies', ['Video Marketplace', 'Movie Trailers', 'Netflix', 'YouTube', 'Twitch', 'Live TV', 'Skype'])
         elif action == 'Quickplay Queue':
             self._menu('Quickplay Queue', ['My Games', 'Recently Played', 'Arcade Picks', 'Games Marketplace', 'Web Browser'])
         elif action == 'Spotlight':
-            self._open_url_external('https://www.xbox.com/en-US/games', normal_mode=True)
+            self._menu('Spotlight', ['Xbox Home Feed', 'Games Marketplace', 'Video Marketplace', 'Music Marketplace', 'Bing Search'])
         elif action == 'Bing Search':
             q, ok = self._input_text('Bing Search', 'Search the web:', '')
             if ok and str(q).strip():
