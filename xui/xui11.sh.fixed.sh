@@ -2954,7 +2954,7 @@ class TopTabs(QtWidgets.QWidget):
         h = QtWidgets.QHBoxLayout(self)
         self._layout = h
         h.setContentsMargins(0, 0, 0, 0)
-        h.setSpacing(28)
+        h.setSpacing(16)
         for i, n in enumerate(self.names):
             lbl = TabLabel(n)
             lbl.setCursor(QtGui.QCursor(QtCore.Qt.PointingHandCursor))
@@ -2968,19 +2968,25 @@ class TopTabs(QtWidgets.QWidget):
     def apply_scale(self, scale=1.0, compact=False):
         self._scale = max(0.62, float(scale))
         self._compact = bool(compact)
-        spacing = int(28 * self._scale * (0.75 if self._compact else 1.0))
+        spacing = int(16 * self._scale * (0.82 if self._compact else 1.0))
         self._layout.setSpacing(max(8, spacing))
         self.set_current(self.current)
 
     def set_current(self, idx):
         self.current = max(0, min(idx, len(self.labels)-1))
-        active_px = max(20, int((42 if not self._compact else 30) * self._scale))
-        idle_px = max(16, int((34 if not self._compact else 24) * self._scale))
+        active_px = max(16, int((30 if not self._compact else 22) * self._scale))
+        idle_px = max(12, int((24 if not self._compact else 18) * self._scale))
         for i, lbl in enumerate(self.labels):
             if i == self.current:
-                lbl.setStyleSheet(f'color:#f3f7f7; font-size:{active_px}px; font-weight:700;')
+                lbl.setStyleSheet(
+                    f'color:#f4f6f8; font-size:{active_px}px; font-weight:700; '
+                    'font-family:"Segoe UI","Noto Sans",sans-serif;'
+                )
             else:
-                lbl.setStyleSheet(f'color:rgba(230,236,240,0.64); font-size:{idle_px}px; font-weight:600;')
+                lbl.setStyleSheet(
+                    f'color:rgba(210,217,224,0.82); font-size:{idle_px}px; font-weight:600; '
+                    'font-family:"Segoe UI","Noto Sans",sans-serif;'
+                )
 
 
 def tile_icon(action, text=''):
@@ -3028,50 +3034,53 @@ class GreenTile(QtWidgets.QFrame):
         self.setFocusPolicy(QtCore.Qt.StrongFocus)
         v = QtWidgets.QVBoxLayout(self)
         self._layout = v
-        v.setContentsMargins(14, 10, 14, 10)
+        v.setContentsMargins(10, 8, 10, 8)
         top = QtWidgets.QHBoxLayout()
         self._top_layout = top
         top.setContentsMargins(0, 0, 0, 0)
         self.icon = QtWidgets.QLabel()
         self.icon.setObjectName('tile_icon')
-        self.icon.setFixedSize(36, 36)
+        self.icon.setFixedSize(30, 30)
         self.icon.setAlignment(QtCore.Qt.AlignCenter)
         icon = tile_icon(action, text)
-        self.icon.setPixmap(icon.pixmap(22, 22))
+        self.icon.setPixmap(icon.pixmap(18, 18))
         top.addWidget(self.icon, 0, alignment=QtCore.Qt.AlignLeft | QtCore.Qt.AlignTop)
         top.addStretch(1)
         v.addLayout(top)
         v.addStretch(1)
         self.lbl = QtWidgets.QLabel(text)
-        self.lbl.setStyleSheet('color:#f4fff3; font-size:24px; font-weight:700;')
+        self.lbl.setStyleSheet('color:#f4fff3; font-size:17px; font-weight:700; font-family:"Segoe UI","Noto Sans",sans-serif;')
         v.addWidget(self.lbl, alignment=QtCore.Qt.AlignLeft | QtCore.Qt.AlignBottom)
         self.apply_scale(1.0, False)
         self.set_selected(False)
 
     def apply_scale(self, scale=1.0, compact=False):
         s = max(0.62, float(scale))
-        compact_factor = 0.85 if compact else 1.0
+        compact_factor = 0.88 if compact else 1.0
         if self.dense:
-            compact_factor *= 0.92
-        w = max(170, int(self.base_size[0] * s * compact_factor))
-        h = max(90, int(self.base_size[1] * s * compact_factor))
+            compact_factor *= 0.84
+        w = max(120, int(self.base_size[0] * s * compact_factor))
+        h = max(72, int(self.base_size[1] * s * compact_factor))
         self.setFixedSize(w, h)
-        pad_x = max(7, int((13 if self.dense else 16) * s * compact_factor))
-        pad_y = max(5, int((8 if self.dense else 12) * s * compact_factor))
+        pad_x = max(6, int((9 if self.dense else 12) * s * compact_factor))
+        pad_y = max(4, int((5 if self.dense else 8) * s * compact_factor))
         self._layout.setContentsMargins(pad_x, pad_y, pad_x, pad_y)
-        icon_sz = max(18, int(36 * s * compact_factor * self.icon_scale))
-        pix_sz = max(13, int(22 * s * compact_factor * self.icon_scale))
+        icon_sz = max(16, int(30 * s * compact_factor * self.icon_scale))
+        pix_sz = max(12, int(18 * s * compact_factor * self.icon_scale))
         self.icon.setFixedSize(icon_sz, icon_sz)
         icon = tile_icon(self.action, self.text)
         self.icon.setPixmap(icon.pixmap(pix_sz, pix_sz))
-        font_px = max(11, int(22 * s * compact_factor * self.text_scale))
-        self.lbl.setStyleSheet(f'color:#f4fff3; font-size:{font_px}px; font-weight:700;')
+        font_px = max(10, int(17 * s * compact_factor * self.text_scale))
+        self.lbl.setStyleSheet(
+            f'color:#f4fff3; font-size:{font_px}px; font-weight:700; '
+            'font-family:"Segoe UI","Noto Sans",sans-serif;'
+        )
 
     def set_selected(self, on):
-        border = 'rgba(248,255,248,0.96)' if on else 'rgba(255,255,255,0.22)'
-        width = '3px' if on else '1px'
-        bg_a = '#39d65a' if on else '#31c94f'
-        bg_b = '#2aa745' if on else '#259c3e'
+        border = 'rgba(249,255,249,0.98)' if on else 'rgba(244,252,246,0.32)'
+        width = '2px' if on else '1px'
+        bg_a = '#40ce55' if on else '#39c650'
+        bg_b = '#2ea63f' if on else '#2a9a3a'
         self.setStyleSheet(f'''
             QFrame#green_tile {{
                 background:qlineargradient(x1:0,y1:0,x2:0,y2:1, stop:0 {bg_a}, stop:1 {bg_b});
@@ -3098,17 +3107,22 @@ class HeroPanel(QtWidgets.QFrame):
         self.action = action
         self.title = title
         self.subtitle = subtitle
-        self.base_size = (900, 460)
+        self.base_size = (780, 320)
         self.setObjectName('hero_panel')
         v = QtWidgets.QVBoxLayout(self)
         self._layout = v
-        v.setContentsMargins(20, 16, 20, 14)
-        self.top_label = QtWidgets.QLabel(self.title)
-        self.top_label.setStyleSheet('color:#f2f6f9; font-size:34px; font-weight:700;')
+        v.setContentsMargins(16, 14, 16, 10)
+        self.top_label = QtWidgets.QLabel(str(self.title).lower())
+        self.top_label.setObjectName('hero_top')
         v.addWidget(self.top_label, 0, alignment=QtCore.Qt.AlignLeft | QtCore.Qt.AlignTop)
+        self.logo_label = QtWidgets.QLabel(str(self.title).upper())
+        self.logo_label.setObjectName('hero_logo')
+        self.logo_label.setAlignment(QtCore.Qt.AlignCenter)
+        v.addWidget(self.logo_label, 1)
         v.addStretch(1)
         self.sub_label = QtWidgets.QLabel(self.subtitle)
-        self.sub_label.setStyleSheet('color:rgba(226,234,241,0.78); font-size:22px; font-weight:600;')
+        self.sub_label.setObjectName('hero_sub')
+        self.sub_label.setWordWrap(True)
         v.addWidget(self.sub_label, 0, alignment=QtCore.Qt.AlignLeft | QtCore.Qt.AlignBottom)
         self.apply_scale(1.0, False)
         self.set_selected(False)
@@ -3117,23 +3131,34 @@ class HeroPanel(QtWidgets.QFrame):
         s = max(0.62, float(scale))
         compact_factor = 0.9 if compact else 1.0
         w = max(460, int(self.base_size[0] * s * compact_factor))
-        h = max(250, int(self.base_size[1] * s * compact_factor))
+        h = max(220, int(self.base_size[1] * s * compact_factor))
         self.setFixedSize(w, h)
-        mx = max(10, int(22 * s * compact_factor))
-        my = max(8, int(18 * s * compact_factor))
-        mb = max(8, int(16 * s * compact_factor))
+        mx = max(10, int(16 * s * compact_factor))
+        my = max(8, int(14 * s * compact_factor))
+        mb = max(8, int(11 * s * compact_factor))
         self._layout.setContentsMargins(mx, my, mx, mb)
-        title_fs = max(18, int(34 * s * compact_factor))
-        sub_fs = max(13, int(22 * s * compact_factor))
-        self.top_label.setStyleSheet(f'color:#f2f6f9; font-size:{title_fs}px; font-weight:700;')
-        self.sub_label.setStyleSheet(f'color:rgba(226,234,241,0.78); font-size:{sub_fs}px; font-weight:600;')
+        top_fs = max(12, int(18 * s * compact_factor))
+        logo_fs = max(18, int(44 * s * compact_factor))
+        sub_fs = max(10, int(14 * s * compact_factor))
+        self.top_label.setStyleSheet(
+            f'color:rgba(238,244,247,0.92); font-size:{top_fs}px; font-weight:600; '
+            'font-family:"Segoe UI","Noto Sans",sans-serif;'
+        )
+        self.logo_label.setStyleSheet(
+            f'color:#f5fafb; font-size:{logo_fs}px; font-weight:700; '
+            'font-family:"Segoe UI","Noto Sans",sans-serif;'
+        )
+        self.sub_label.setStyleSheet(
+            f'color:rgba(230,238,243,0.86); font-size:{sub_fs}px; font-weight:600; '
+            'font-family:"Segoe UI","Noto Sans",sans-serif;'
+        )
 
     def set_selected(self, on):
-        border = 'rgba(240,248,255,0.92)' if on else 'rgba(255,255,255,0.2)'
-        width = '3px' if on else '1px'
+        border = 'rgba(244,250,255,0.9)' if on else 'rgba(240,246,252,0.28)'
+        width = '2px' if on else '1px'
         self.setStyleSheet(f'''
             QFrame#hero_panel {{
-                background:qlineargradient(x1:0,y1:0,x2:1,y2:1, stop:0 #0b1016, stop:1 #1a222c);
+                background:qlineargradient(x1:0,y1:0,x2:1,y2:1, stop:0 #1b1f25, stop:1 #101318);
                 border:{width} solid {border};
                 border-radius:0px;
             }}
@@ -3152,34 +3177,30 @@ class GamesShowcasePanel(QtWidgets.QFrame):
         self.action = action
         self.title = title
         self.subtitle = subtitle
-        self.base_size = (900, 460)
+        self.base_size = (820, 338)
         self.setObjectName('games_showcase_panel')
         self.setFocusPolicy(QtCore.Qt.StrongFocus)
-        self._cards = []
+        self._blade_buttons = []
+        self._cover_buttons = []
         self._build()
         self.apply_scale(1.0, False)
         self.set_selected(False)
 
-    def _make_mini_card(self, label):
-        card = QtWidgets.QFrame()
-        card.setObjectName('games_mini_card')
-        card_l = QtWidgets.QVBoxLayout(card)
-        card_l.setContentsMargins(8, 6, 8, 6)
-        card_l.setSpacing(0)
-        cat = QtWidgets.QLabel('GAME')
-        cat.setObjectName('games_mini_cat')
-        name = QtWidgets.QLabel(label)
-        name.setObjectName('games_mini_name')
-        card_l.addWidget(cat, 0, QtCore.Qt.AlignLeft | QtCore.Qt.AlignTop)
-        card_l.addStretch(1)
-        card_l.addWidget(name, 0, QtCore.Qt.AlignLeft | QtCore.Qt.AlignBottom)
-        return card
+    def _make_cover(self, text, action, color_a, color_b):
+        btn = QtWidgets.QPushButton(text)
+        btn.setObjectName('games_cover_tile')
+        btn.setProperty('ga', str(color_a))
+        btn.setProperty('gb', str(color_b))
+        btn.clicked.connect(lambda _=False, a=str(action): self.clicked.emit(a))
+        btn.setCursor(QtGui.QCursor(QtCore.Qt.PointingHandCursor))
+        self._cover_buttons.append(btn)
+        return btn
 
     def _build(self):
         root = QtWidgets.QVBoxLayout(self)
         self._layout = root
-        root.setContentsMargins(18, 16, 18, 12)
-        root.setSpacing(8)
+        root.setContentsMargins(12, 8, 12, 8)
+        root.setSpacing(6)
 
         title_row = QtWidgets.QHBoxLayout()
         self.top_label = QtWidgets.QLabel(self.title)
@@ -3194,127 +3215,114 @@ class GamesShowcasePanel(QtWidgets.QFrame):
         blades = QtWidgets.QFrame()
         blades.setObjectName('games_blades')
         blades_l = QtWidgets.QVBoxLayout(blades)
-        blades_l.setContentsMargins(6, 6, 6, 6)
+        blades_l.setContentsMargins(4, 4, 4, 4)
         blades_l.setSpacing(4)
         self.btn_my_games = QtWidgets.QPushButton('My Games')
         self.btn_browse_games = QtWidgets.QPushButton('Browse Games')
         self.btn_search_games = QtWidgets.QPushButton('Search Games')
         for b in (self.btn_my_games, self.btn_browse_games, self.btn_search_games):
             b.setObjectName('games_blade_btn')
+            b.setCursor(QtGui.QCursor(QtCore.Qt.PointingHandCursor))
             blades_l.addWidget(b)
+            self._blade_buttons.append(b)
         blades_l.addStretch(1)
         self.btn_my_games.clicked.connect(lambda: self.clicked.emit('My Games'))
         self.btn_browse_games.clicked.connect(lambda: self.clicked.emit('Browse Games'))
         self.btn_search_games.clicked.connect(lambda: self.clicked.emit('Search Games'))
         body.addWidget(blades, 1)
+        grid_wrap = QtWidgets.QFrame()
+        grid_wrap.setObjectName('games_grid')
+        grid = QtWidgets.QGridLayout(grid_wrap)
+        grid.setContentsMargins(0, 0, 0, 0)
+        grid.setHorizontalSpacing(4)
+        grid.setVerticalSpacing(4)
+        grid.setColumnStretch(0, 1)
+        grid.setColumnStretch(1, 1)
+        grid.setColumnStretch(2, 1)
+        grid.setRowStretch(0, 1)
+        grid.setRowStretch(1, 1)
 
-        right = QtWidgets.QVBoxLayout()
-        right.setSpacing(8)
+        self.cover_halo = self._make_cover('Halo 4', 'Showcase Halo 4', '#1f5c8d', '#113e63')
+        self.cover_cod = self._make_cover('Call of Duty: Black Ops', 'Showcase COD Black Ops', '#32353c', '#191b20')
+        self.cover_reco = self._make_cover('Gears of War:\nJudgment\nRecommended', 'Showcase Recommendations', '#f0f1f2', '#cfd2d6')
+        self.cover_fifa = self._make_cover('FIFA Soccer 13', 'Showcase FIFA Soccer 13', '#467e4d', '#315a38')
+        self.cover_nike = self._make_cover('Nike+ Kinect Training', 'Showcase Nike Kinect Training', '#7a2e30', '#541f21')
+        self.cover_all = self._make_cover('All Recommendations', 'Showcase All Recommendations', '#8e949c', '#707780')
 
-        covers = QtWidgets.QHBoxLayout()
-        covers.setSpacing(8)
-        self.featured = QtWidgets.QFrame()
-        self.featured.setObjectName('games_featured')
-        ft_l = QtWidgets.QVBoxLayout(self.featured)
-        ft_l.setContentsMargins(10, 8, 10, 8)
-        ft_l.setSpacing(2)
-        self.featured_tag = QtWidgets.QLabel('HIGHLIGHT')
-        self.featured_tag.setObjectName('games_featured_tag')
-        self.featured_name = QtWidgets.QLabel('Halo 4')
-        self.featured_name.setObjectName('games_featured_name')
-        self.featured_sub = QtWidgets.QLabel('Open your collection and continue playing')
-        self.featured_sub.setObjectName('games_featured_sub')
-        ft_l.addWidget(self.featured_tag, 0, QtCore.Qt.AlignLeft)
-        ft_l.addStretch(1)
-        ft_l.addWidget(self.featured_name, 0, QtCore.Qt.AlignLeft)
-        ft_l.addWidget(self.featured_sub, 0, QtCore.Qt.AlignLeft)
-        covers.addWidget(self.featured, 2)
-
-        mini_col = QtWidgets.QVBoxLayout()
-        mini_col.setSpacing(8)
-        for label in ('Forza 4', 'Gears', 'FIFA', 'MW3'):
-            card = self._make_mini_card(label)
-            self._cards.append(card)
-            mini_col.addWidget(card, 1)
-        covers.addLayout(mini_col, 1)
-        right.addLayout(covers, 1)
-
-        rec = QtWidgets.QFrame()
-        rec.setObjectName('games_recommend')
-        rec_l = QtWidgets.QVBoxLayout(rec)
-        rec_l.setContentsMargins(10, 6, 10, 6)
-        rec_l.setSpacing(2)
-        rec_tag = QtWidgets.QLabel('RECOMMENDATIONS')
-        rec_tag.setObjectName('games_recommend_tag')
-        rec_text = QtWidgets.QLabel('Popular now: Runner, Gem Match, FNAE')
-        rec_text.setObjectName('games_recommend_text')
-        rec_l.addWidget(rec_tag, 0, QtCore.Qt.AlignLeft)
-        rec_l.addWidget(rec_text, 0, QtCore.Qt.AlignLeft)
-        right.addWidget(rec, 0)
-
-        body.addLayout(right, 4)
+        grid.addWidget(self.cover_halo, 0, 0)
+        grid.addWidget(self.cover_cod, 0, 1)
+        grid.addWidget(self.cover_reco, 0, 2)
+        grid.addWidget(self.cover_fifa, 1, 0)
+        grid.addWidget(self.cover_nike, 1, 1)
+        grid.addWidget(self.cover_all, 1, 2)
+        body.addWidget(grid_wrap, 4)
 
         root.addLayout(body, 1)
-        self.sub_label = QtWidgets.QLabel(self.subtitle)
+        self.sub_label = QtWidgets.QLabel('A Select   X Search')
         self.sub_label.setObjectName('games_sub')
         root.addWidget(self.sub_label, 0, QtCore.Qt.AlignLeft | QtCore.Qt.AlignBottom)
 
     def apply_scale(self, scale=1.0, compact=False):
         s = max(0.62, float(scale))
-        compact_factor = 0.88 if compact else 1.0
-        w = max(480, int(self.base_size[0] * s * compact_factor))
-        h = max(260, int(self.base_size[1] * s * compact_factor))
+        compact_factor = 0.9 if compact else 1.0
+        w = max(500, int(self.base_size[0] * s * compact_factor))
+        h = max(240, int(self.base_size[1] * s * compact_factor))
         self.setFixedSize(w, h)
 
-        mx = max(10, int(18 * s * compact_factor))
-        my = max(8, int(16 * s * compact_factor))
-        self._layout.setContentsMargins(mx, my, mx, max(8, int(12 * s * compact_factor)))
-        self._layout.setSpacing(max(6, int(8 * s * compact_factor)))
+        mx = max(8, int(12 * s * compact_factor))
+        my = max(6, int(8 * s * compact_factor))
+        self._layout.setContentsMargins(mx, my, mx, max(6, int(8 * s * compact_factor)))
+        self._layout.setSpacing(max(4, int(6 * s * compact_factor)))
 
-        title_fs = max(20, int(37 * s * compact_factor))
-        sub_fs = max(13, int(22 * s * compact_factor))
-        blade_fs = max(11, int(17 * s * compact_factor))
-        self.top_label.setStyleSheet(f'color:#f2f6fa; font-size:{title_fs}px; font-weight:800;')
-        self.sub_label.setStyleSheet(f'color:rgba(235,242,244,0.78); font-size:{sub_fs}px; font-weight:600;')
+        title_fs = max(14, int(22 * s * compact_factor))
+        sub_fs = max(9, int(12 * s * compact_factor))
+        blade_fs = max(10, int(14 * s * compact_factor))
+        self.top_label.setStyleSheet(
+            f'color:rgba(240,246,249,0.93); font-size:{title_fs}px; font-weight:700; '
+            'font-family:"Segoe UI","Noto Sans",sans-serif;'
+        )
+        self.sub_label.setStyleSheet(
+            f'color:rgba(232,239,242,0.86); font-size:{sub_fs}px; font-weight:600; '
+            'font-family:"Segoe UI","Noto Sans",sans-serif;'
+        )
 
-        blade_h = max(40, int(58 * s * compact_factor))
-        for b in (self.btn_my_games, self.btn_browse_games, self.btn_search_games):
+        blade_h = max(30, int(46 * s * compact_factor))
+        for b in self._blade_buttons:
             b.setMinimumHeight(blade_h)
             b.setStyleSheet(
                 'QPushButton#games_blade_btn {'
-                'text-align:left; padding:6px 8px;'
+                'text-align:left; padding:4px 7px;'
                 f'font-size:{blade_fs}px; font-weight:700;'
-                'color:#f3fff2; background:qlineargradient(x1:0,y1:0,x2:0,y2:1, stop:0 #35cb51, stop:1 #279f3f);'
-                'border:1px solid rgba(250,255,250,0.3); border-radius:0px; }'
-                'QPushButton#games_blade_btn:hover { background:#3ed35a; }'
+                'font-family:"Segoe UI","Noto Sans",sans-serif;'
+                'color:#f6fff6; background:qlineargradient(x1:0,y1:0,x2:0,y2:1, stop:0 #3ecf55, stop:1 #2ca43f);'
+                'border:1px solid rgba(248,255,248,0.34); border-radius:0px; }'
+                'QPushButton#games_blade_btn:hover { background:#45d75d; }'
             )
 
-        feat_name_fs = max(14, int(31 * s * compact_factor))
-        feat_sub_fs = max(10, int(16 * s * compact_factor))
-        self.featured_tag.setStyleSheet(f'color:rgba(220,231,236,0.92); font-size:{max(9, int(12 * s))}px; font-weight:700;')
-        self.featured_name.setStyleSheet(f'color:#eff4f8; font-size:{feat_name_fs}px; font-weight:800;')
-        self.featured_sub.setStyleSheet(f'color:rgba(234,241,246,0.86); font-size:{feat_sub_fs}px; font-weight:600;')
-
-        mini_h = max(54, int(88 * s * compact_factor))
-        mini_cat_fs = max(8, int(11 * s * compact_factor))
-        mini_name_fs = max(10, int(17 * s * compact_factor))
-        for c in self._cards:
-            c.setMinimumHeight(mini_h)
-            c.setStyleSheet(
-                'QFrame#games_mini_card {'
-                'background:qlineargradient(x1:0,y1:0,x2:1,y2:1, stop:0 #707b84, stop:1 #4f5962);'
-                'border:1px solid rgba(223,232,239,0.5); border-radius:0px; }'
-                f'QLabel#games_mini_cat {{ color:rgba(229,236,241,0.82); font-size:{mini_cat_fs}px; font-weight:700; }}'
-                f'QLabel#games_mini_name {{ color:#f3f7f9; font-size:{mini_name_fs}px; font-weight:700; }}'
+        cover_fs = max(9, int(12 * s * compact_factor))
+        for b in self._cover_buttons:
+            ga = str(b.property('ga') or '#4f5962')
+            gb = str(b.property('gb') or '#3b444d')
+            dark_text = ga.lower().startswith('#f')
+            txt_color = '#27313a' if dark_text else '#f2f7fa'
+            b.setStyleSheet(
+                'QPushButton#games_cover_tile {'
+                'text-align:left; padding:6px 8px; '
+                f'font-size:{cover_fs}px; font-weight:700; color:{txt_color}; '
+                'font-family:"Segoe UI","Noto Sans",sans-serif; '
+                f'background:qlineargradient(x1:0,y1:0,x2:1,y2:1, stop:0 {ga}, stop:1 {gb}); '
+                'border:1px solid rgba(241,248,252,0.35); border-radius:0px;'
+                '}'
+                'QPushButton#games_cover_tile:hover { border:1px solid rgba(255,255,255,0.65); }'
             )
 
     def set_selected(self, on):
-        border = 'rgba(240,248,255,0.92)' if on else 'rgba(255,255,255,0.2)'
-        width = '3px' if on else '1px'
+        border = 'rgba(242,248,254,0.9)' if on else 'rgba(246,252,255,0.30)'
+        width = '2px' if on else '1px'
         self.setStyleSheet(
             f'''
             QFrame#games_showcase_panel {{
-                background:qlineargradient(x1:0,y1:0,x2:1,y2:1, stop:0 #0b1016, stop:1 #1a222c);
+                background:qlineargradient(x1:0,y1:0,x2:1,y2:1, stop:0 #20242a, stop:1 #15181d);
                 border:{width} solid {border};
                 border-radius:0px;
             }}
@@ -3322,25 +3330,9 @@ class GamesShowcasePanel(QtWidgets.QFrame):
                 background:transparent;
                 border:0px solid transparent;
             }}
-            QFrame#games_featured {{
-                background:qlineargradient(x1:0,y1:0,x2:1,y2:1, stop:0 #4f5962, stop:1 #3b444d);
-                border:1px solid rgba(223,232,239,0.5);
-                border-radius:0px;
-            }}
-            QFrame#games_recommend {{
-                background:qlineargradient(x1:0,y1:0,x2:1,y2:0, stop:0 #d8dde3, stop:1 #c8ced5);
-                border:1px solid rgba(117,126,136,0.5);
-                border-radius:0px;
-            }}
-            QLabel#games_recommend_tag {{
-                color:#3f4a56;
-                font-size:11px;
-                font-weight:800;
-            }}
-            QLabel#games_recommend_text {{
-                color:#2f3944;
-                font-size:14px;
-                font-weight:700;
+            QFrame#games_grid {{
+                background:transparent;
+                border:0px solid transparent;
             }}
             '''
         )
@@ -4333,75 +4325,89 @@ class InstallTaskProgressDialog(QtWidgets.QDialog):
 
 
 class XboxGuideMenu(QtWidgets.QDialog):
-    def __init__(self, gamertag='Player1', parent=None, sfx_cb=None):
+    def __init__(self, gamertag='Player1', parent=None, sfx_cb=None, mode='dashboard'):
         super().__init__(parent)
         self.gamertag = str(gamertag or 'Player1')
+        self.mode = 'app' if str(mode or '').strip().lower() == 'app' else 'dashboard'
         self._play_sfx = sfx_cb
         self._selection = None
         self._open_anim = None
+        self._page_anim = None
         self._last_row = 0
+        self._section_idx = 0
+        self._sections = self._build_sections()
+        self._section_lists = []
         self.setWindowTitle('Xbox Guide')
         self.setWindowFlags(QtCore.Qt.Dialog | QtCore.Qt.FramelessWindowHint)
         self.setAttribute(QtCore.Qt.WA_TranslucentBackground, True)
         self.setModal(True)
-        self.resize(1060, 560)
+        self.resize(1120, 590)
         self.setStyleSheet('''
             QDialog {
-                background:rgba(10, 16, 24, 0.56);
+                background:rgba(10, 16, 24, 0.58);
             }
             QFrame#xguide_panel {
-                background:qlineargradient(x1:0,y1:0,x2:1,y2:1, stop:0 #38414d, stop:1 #222a35);
-                border:1px solid rgba(226,238,248,0.30);
-                border-radius:2px;
+                background:qlineargradient(x1:0,y1:0,x2:1,y2:1, stop:0 #404a56, stop:1 #262e39);
+                border:1px solid rgba(226,238,248,0.28);
+                border-radius:1px;
             }
             QLabel#xguide_title {
                 color:#f2f7fb;
-                font-size:46px;
+                font-size:44px;
                 font-weight:800;
             }
             QLabel#xguide_meta {
-                color:rgba(233,243,251,0.92);
-                font-size:34px;
+                color:rgba(233,243,251,0.93);
+                font-size:30px;
                 font-weight:600;
             }
+            QListWidget#xguide_blades {
+                background:qlineargradient(x1:0,y1:0,x2:0,y2:1, stop:0 #99b0c5, stop:1 #6f879b);
+                border:1px solid rgba(233,241,247,0.65);
+                outline:none;
+                color:#f7fbff;
+                font-size:32px;
+                font-weight:800;
+            }
+            QListWidget#xguide_blades::item {
+                min-height:110px;
+                padding:6px 10px;
+                border:1px solid transparent;
+            }
+            QListWidget#xguide_blades::item:selected {
+                background:qlineargradient(x1:0,y1:0,x2:1,y2:0, stop:0 #4b5e74, stop:1 #314357);
+                border:1px solid rgba(243,249,254,0.45);
+            }
+            QFrame#xguide_page_host {
+                background:#dde2e8;
+                border:1px solid rgba(8,12,16,0.32);
+            }
             QListWidget#xguide_list {
-                background:#d8dce1;
-                color:#1b2b42;
-                border:1px solid rgba(0,0,0,0.26);
-                font-size:52px;
+                background:transparent;
+                color:#1e2933;
+                border:none;
+                font-size:50px;
                 outline:none;
             }
             QListWidget#xguide_list::item {
-                padding:8px 16px;
-                border:1px solid transparent;
+                min-height:58px;
+                padding:7px 16px;
+                border-bottom:1px solid rgba(40,52,68,0.10);
             }
             QListWidget#xguide_list::item:selected {
-                color:#eefeed;
-                background:qlineargradient(x1:0,y1:0,x2:1,y2:0, stop:0 #59b53f, stop:1 #429b33);
-                border:1px solid rgba(255,255,255,0.25);
+                color:#edfbea;
+                background:qlineargradient(x1:0,y1:0,x2:1,y2:0, stop:0 #59b53f, stop:1 #3f9932);
+                border:1px solid rgba(255,255,255,0.22);
             }
-            QFrame#xguide_actions {
-                background:rgba(47,58,72,0.88);
-                border:1px solid rgba(206,220,236,0.24);
-            }
-            QPushButton#xguide_action_btn {
-                text-align:left;
-                color:#f3f8fc;
-                background:#222f41;
-                border:1px solid rgba(202,218,236,0.28);
-                padding:8px 12px;
-                font-size:34px;
+            QLabel#xguide_section_title {
+                color:#2a3642;
+                font-size:24px;
                 font-weight:800;
-                min-height:62px;
-            }
-            QPushButton#xguide_action_btn:hover,
-            QPushButton#xguide_action_btn:focus {
-                background:#2f4260;
-                border:1px solid rgba(228,239,252,0.48);
+                padding:4px 12px;
             }
             QLabel#xguide_hint {
                 color:#eaf1f7;
-                font-size:29px;
+                font-size:27px;
                 font-weight:700;
             }
         ''')
@@ -4409,7 +4415,7 @@ class XboxGuideMenu(QtWidgets.QDialog):
         outer.setContentsMargins(18, 18, 18, 18)
         panel = QtWidgets.QFrame()
         panel.setObjectName('xguide_panel')
-        panel.setMinimumSize(920, 500)
+        panel.setMinimumSize(940, 520)
         panel.setMaximumSize(1360, 820)
         outer.addWidget(panel, 0, QtCore.Qt.AlignCenter)
 
@@ -4429,38 +4435,53 @@ class XboxGuideMenu(QtWidgets.QDialog):
 
         body = QtWidgets.QHBoxLayout()
         body.setSpacing(10)
-        self.listw = QtWidgets.QListWidget()
-        self.listw.setObjectName('xguide_list')
-        self.listw.addItems([
-            'Reciente',
-            'Mensajes recientes',
-            'Social global',
-            'Beacons',
-            'Mis juegos',
-            'Descargas activas',
-            'Canjear codigo',
-        ])
-        self.listw.setCurrentRow(0)
-        self.listw.itemActivated.connect(self._accept_current)
-        self.listw.itemDoubleClicked.connect(self._accept_current)
-        self.listw.currentRowChanged.connect(self._on_row_changed)
-        body.addWidget(self.listw, 7)
 
-        actions = QtWidgets.QFrame()
-        actions.setObjectName('xguide_actions')
-        actions_l = QtWidgets.QVBoxLayout(actions)
-        actions_l.setContentsMargins(8, 8, 8, 8)
-        actions_l.setSpacing(6)
-        for txt in ('Configuracion', 'Inicio de Xbox', 'Cerrar app actual', 'Cerrar sesion'):
-            b = QtWidgets.QPushButton(txt)
-            b.setObjectName('xguide_action_btn')
-            b.clicked.connect(lambda _=False, action=txt: self._accept_action(action))
-            actions_l.addWidget(b)
-        actions_l.addStretch(1)
-        body.addWidget(actions, 3)
+        self.blades = QtWidgets.QListWidget()
+        self.blades.setObjectName('xguide_blades')
+        self.blades.setFlow(QtWidgets.QListView.TopToBottom)
+        self.blades.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarAlwaysOff)
+        self.blades.setVerticalScrollBarPolicy(QtCore.Qt.ScrollBarAlwaysOff)
+        self.blades.setFixedWidth(154)
+        for section_name, _items in self._sections:
+            self.blades.addItem(QtWidgets.QListWidgetItem(section_name))
+        self.blades.currentRowChanged.connect(self._on_blade_changed)
+        body.addWidget(self.blades, 0)
+
+        page_shell = QtWidgets.QFrame()
+        page_shell.setObjectName('xguide_page_host')
+        shell_l = QtWidgets.QVBoxLayout(page_shell)
+        shell_l.setContentsMargins(0, 0, 0, 0)
+        shell_l.setSpacing(0)
+
+        self.section_title = QtWidgets.QLabel('')
+        self.section_title.setObjectName('xguide_section_title')
+        shell_l.addWidget(self.section_title, 0)
+
+        self.page_stack = QtWidgets.QStackedWidget()
+        sl = self.page_stack.layout()
+        if isinstance(sl, QtWidgets.QStackedLayout):
+            sl.setStackingMode(QtWidgets.QStackedLayout.StackAll)
+        shell_l.addWidget(self.page_stack, 1)
+
+        for _section_name, items in self._sections:
+            lw = QtWidgets.QListWidget()
+            lw.setObjectName('xguide_list')
+            lw.addItems([str(x) for x in items])
+            lw.itemActivated.connect(self._accept_current)
+            lw.itemDoubleClicked.connect(self._accept_current)
+            lw.currentRowChanged.connect(self._on_row_changed)
+            if lw.count() > 0:
+                lw.setCurrentRow(0)
+            self._section_lists.append(lw)
+            self.page_stack.addWidget(lw)
+        body.addWidget(page_shell, 1)
         root.addLayout(body, 1)
 
-        hint = QtWidgets.QLabel('<font color="#49b93e">A Select</font>   <font color="#cf2d2d">B Back</font>   <font color="#2b7fd8">X Sign Out</font>   <font color="#ddb126">Y Inicio de Xbox</font>')
+        if self.mode == 'app':
+            hint_text = '<font color="#49b93e">A Select</font>   <font color="#cf2d2d">B Back</font>   <font color="#2b7fd8">X Sign Out</font>   <font color="#ddb126">Y Xbox Home</font>'
+        else:
+            hint_text = '<font color="#49b93e">A Select</font>   <font color="#cf2d2d">B Back</font>   <font color="#2b7fd8">X Cerrar sesion</font>   <font color="#ddb126">Y Inicio de Xbox</font>'
+        hint = QtWidgets.QLabel(hint_text)
         hint.setObjectName('xguide_hint')
         root.addWidget(hint)
 
@@ -4468,6 +4489,27 @@ class XboxGuideMenu(QtWidgets.QDialog):
         self._clock.timeout.connect(self._refresh_meta)
         self._clock.start(1000)
         self._refresh_meta()
+        self.blades.setCurrentRow(0)
+        self._switch_section(0, animate=False)
+
+    def _build_sections(self):
+        if self.mode == 'app':
+            return [
+                ('Games', ['Leave Game', 'Friends', 'Party', 'Messages', 'Beacons & Activity', 'Chat', 'Manage Storage']),
+                (self.gamertag, ['Reciente', 'Mensajes recientes', 'Social global', 'Mis juegos', 'Descargas activas']),
+                ('Settings', ['Xbox Home', 'Canjear codigo', 'Configuracion', 'Sign Out']),
+            ]
+        return [
+            ('Guide', ['Reciente', 'Mensajes recientes', 'Social global', 'Beacons', 'Mis juegos', 'Descargas activas', 'Canjear codigo']),
+            (self.gamertag, ['Friends', 'Party', 'Messages', 'Chat', 'Beacons & Activity']),
+            ('Dashboard', ['Inicio de Xbox', 'Configuracion', 'Cerrar app actual', 'Cerrar sesion']),
+        ]
+
+    def _current_list(self):
+        idx = int(self._section_idx)
+        if 0 <= idx < len(self._section_lists):
+            return self._section_lists[idx]
+        return None
 
     def _sfx(self, name):
         if callable(self._play_sfx):
@@ -4475,6 +4517,115 @@ class XboxGuideMenu(QtWidgets.QDialog):
                 self._play_sfx(str(name))
             except Exception:
                 pass
+
+    def _on_blade_changed(self, row):
+        self._switch_section(row, animate=True)
+
+    def _switch_section(self, row, animate=True):
+        try:
+            row = int(row)
+        except Exception:
+            return
+        if row < 0 or row >= len(self._sections):
+            return
+        old_idx = int(self._section_idx)
+        if row == old_idx and self.page_stack.currentIndex() == row:
+            cur = self._current_list()
+            if cur is not None:
+                cur.setFocus()
+            self._section_title_refresh()
+            return
+        self._section_idx = row
+        self._section_title_refresh()
+        self._sfx('hover')
+        if not animate:
+            self.page_stack.setCurrentIndex(row)
+            cur = self._current_list()
+            if cur is not None:
+                cur.setFocus()
+            return
+        self._animate_section_transition(old_idx, row)
+
+    def _section_title_refresh(self):
+        idx = int(self._section_idx)
+        label = self._sections[idx][0] if 0 <= idx < len(self._sections) else 'Guide'
+        self.section_title.setText(str(label))
+
+    def _animate_section_transition(self, from_idx, to_idx):
+        if from_idx < 0 or from_idx >= self.page_stack.count():
+            self.page_stack.setCurrentIndex(to_idx)
+            cur = self._current_list()
+            if cur is not None:
+                cur.setFocus()
+            return
+        from_w = self.page_stack.widget(from_idx)
+        to_w = self.page_stack.widget(to_idx)
+        rect = self.page_stack.rect()
+        direction = 1 if to_idx > from_idx else -1
+        shift = max(90, rect.width() // 5) * direction
+
+        for i, lw in enumerate(self._section_lists):
+            if i not in (from_idx, to_idx):
+                lw.hide()
+        from_w.setGeometry(rect)
+        to_w.setGeometry(rect)
+        from_w.move(0, 0)
+        to_w.move(shift, 0)
+        from_w.show()
+        to_w.show()
+        to_w.raise_()
+
+        fx_from = QtWidgets.QGraphicsOpacityEffect(from_w)
+        fx_to = QtWidgets.QGraphicsOpacityEffect(to_w)
+        fx_from.setOpacity(1.0)
+        fx_to.setOpacity(0.0)
+        from_w.setGraphicsEffect(fx_from)
+        to_w.setGraphicsEffect(fx_to)
+
+        grp = QtCore.QParallelAnimationGroup(self)
+        self._page_anim = grp
+
+        move_from = QtCore.QPropertyAnimation(from_w, b'pos')
+        move_from.setDuration(220)
+        move_from.setStartValue(QtCore.QPoint(0, 0))
+        move_from.setEndValue(QtCore.QPoint(-shift, 0))
+        move_from.setEasingCurve(QtCore.QEasingCurve.InOutCubic)
+
+        move_to = QtCore.QPropertyAnimation(to_w, b'pos')
+        move_to.setDuration(220)
+        move_to.setStartValue(QtCore.QPoint(shift, 0))
+        move_to.setEndValue(QtCore.QPoint(0, 0))
+        move_to.setEasingCurve(QtCore.QEasingCurve.OutCubic)
+
+        fade_from = QtCore.QPropertyAnimation(fx_from, b'opacity')
+        fade_from.setDuration(200)
+        fade_from.setStartValue(1.0)
+        fade_from.setEndValue(0.12)
+        fade_from.setEasingCurve(QtCore.QEasingCurve.OutCubic)
+
+        fade_to = QtCore.QPropertyAnimation(fx_to, b'opacity')
+        fade_to.setDuration(210)
+        fade_to.setStartValue(0.0)
+        fade_to.setEndValue(1.0)
+        fade_to.setEasingCurve(QtCore.QEasingCurve.OutCubic)
+
+        grp.addAnimation(move_from)
+        grp.addAnimation(move_to)
+        grp.addAnimation(fade_from)
+        grp.addAnimation(fade_to)
+
+        def done():
+            self.page_stack.setCurrentIndex(to_idx)
+            for lw in self._section_lists:
+                lw.move(0, 0)
+                lw.setGraphicsEffect(None)
+            cur = self._current_list()
+            if cur is not None:
+                cur.setFocus()
+            self._page_anim = None
+
+        grp.finished.connect(done)
+        grp.start(QtCore.QAbstractAnimation.DeleteWhenStopped)
 
     def _on_row_changed(self, row):
         try:
@@ -4487,46 +4638,51 @@ class XboxGuideMenu(QtWidgets.QDialog):
 
     def _refresh_meta(self):
         now = QtCore.QDateTime.currentDateTime().toString('HH:mm')
-        self.meta.setText(f'{self.gamertag}    {now}')
+        mode_tag = 'APP' if self.mode == 'app' else 'DASH'
+        self.meta.setText(f'{self.gamertag}    {now}    {mode_tag}')
 
     def _accept_current(self, *_):
-        it = self.listw.currentItem()
+        lw = self._current_list()
+        if lw is None:
+            return
+        it = lw.currentItem()
         if it is None:
             return
         self._selection = it.text()
         self._sfx('select')
         self.accept()
 
-    def _accept_action(self, action):
-        self._selection = str(action)
-        self._sfx('select')
-        self.accept()
-
     def selected(self):
         if self._selection:
             return self._selection
-        it = self.listw.currentItem()
+        lw = self._current_list()
+        if lw is None:
+            return None
+        it = lw.currentItem()
         return it.text() if it else None
 
     def showEvent(self, e):
         super().showEvent(e)
         parent = self.parentWidget()
         if parent is not None:
-            w = min(max(980, int(parent.width() * 0.86)), max(980, parent.width() - 40))
-            h = min(max(520, int(parent.height() * 0.72)), max(520, parent.height() - 40))
+            w = min(max(980, int(parent.width() * 0.88)), max(980, parent.width() - 36))
+            h = min(max(530, int(parent.height() * 0.74)), max(530, parent.height() - 36))
             self.resize(w, h)
-            x = parent.x() + max(10, (parent.width() - self.width()) // 2)
-            y = parent.y() + max(10, (parent.height() - self.height()) // 2)
+            x = parent.x() + max(8, (parent.width() - self.width()) // 2)
+            y = parent.y() + max(8, (parent.height() - self.height()) // 2)
             self.move(max(0, x), max(0, y))
         self._refresh_meta()
         self._animate_open()
+        cur = self._current_list()
+        if cur is not None:
+            cur.setFocus()
 
     def _animate_open(self):
         effect = QtWidgets.QGraphicsOpacityEffect(self)
         self.setGraphicsEffect(effect)
         effect.setOpacity(0.0)
         end_rect = self.geometry()
-        start_rect = QtCore.QRect(end_rect.x() - max(24, end_rect.width() // 18), end_rect.y(), end_rect.width(), end_rect.height())
+        start_rect = QtCore.QRect(end_rect.x() - max(28, end_rect.width() // 14), end_rect.y(), end_rect.width(), end_rect.height())
         self.setGeometry(start_rect)
         self._open_anim = QtCore.QParallelAnimationGroup(self)
         fade = QtCore.QPropertyAnimation(effect, b'opacity', self)
@@ -4535,7 +4691,7 @@ class XboxGuideMenu(QtWidgets.QDialog):
         fade.setEndValue(1.0)
         fade.setEasingCurve(QtCore.QEasingCurve.OutCubic)
         slide = QtCore.QPropertyAnimation(self, b'geometry', self)
-        slide.setDuration(230)
+        slide.setDuration(240)
         slide.setStartValue(start_rect)
         slide.setEndValue(end_rect)
         slide.setEasingCurve(QtCore.QEasingCurve.OutCubic)
@@ -4545,30 +4701,39 @@ class XboxGuideMenu(QtWidgets.QDialog):
         self._open_anim.start(QtCore.QAbstractAnimation.DeleteWhenStopped)
 
     def keyPressEvent(self, e):
-        if e.key() in (QtCore.Qt.Key_Y, QtCore.Qt.Key_Tab):
-            self._selection = 'Inicio de Xbox'
+        k = e.key()
+        if k in (QtCore.Qt.Key_Y, QtCore.Qt.Key_Tab):
+            self._selection = 'Xbox Home' if self.mode == 'app' else 'Inicio de Xbox'
             self._sfx('select')
             self.accept()
             return
-        if e.key() in (QtCore.Qt.Key_X, QtCore.Qt.Key_Space):
-            self._selection = 'Cerrar sesion'
+        if k in (QtCore.Qt.Key_X, QtCore.Qt.Key_Space):
+            self._selection = 'Sign Out' if self.mode == 'app' else 'Cerrar sesion'
             self._sfx('select')
             self.accept()
             return
-        if e.key() in (QtCore.Qt.Key_Prior, QtCore.Qt.Key_Next):
-            n = int(self.listw.count())
-            if n > 0:
-                step = -5 if e.key() == QtCore.Qt.Key_Prior else 5
-                row = int(self.listw.currentRow())
-                if row < 0:
-                    row = 0
-                row = max(0, min(n - 1, row + step))
-                self.listw.setCurrentRow(row)
+        if k in (QtCore.Qt.Key_Left,):
+            self.blades.setCurrentRow(max(0, int(self.blades.currentRow()) - 1))
             return
-        if e.key() in (QtCore.Qt.Key_Escape, QtCore.Qt.Key_Back):
+        if k in (QtCore.Qt.Key_Right,):
+            self.blades.setCurrentRow(min(self.blades.count() - 1, int(self.blades.currentRow()) + 1))
+            return
+        if k in (QtCore.Qt.Key_Prior, QtCore.Qt.Key_Next):
+            lw = self._current_list()
+            if lw is not None:
+                n = int(lw.count())
+                if n > 0:
+                    step = -5 if k == QtCore.Qt.Key_Prior else 5
+                    row = int(lw.currentRow())
+                    if row < 0:
+                        row = 0
+                    row = max(0, min(n - 1, row + step))
+                    lw.setCurrentRow(row)
+            return
+        if k in (QtCore.Qt.Key_Escape, QtCore.Qt.Key_Back):
             self.reject()
             return
-        if e.key() in (QtCore.Qt.Key_Return, QtCore.Qt.Key_Enter):
+        if k in (QtCore.Qt.Key_Return, QtCore.Qt.Key_Enter):
             self._accept_current()
             return
         super().keyPressEvent(e)
@@ -5099,14 +5264,14 @@ class WebKioskWindow(QtWidgets.QMainWindow):
                 gamertag = str(parent._gamertag())
             except Exception:
                 pass
-        d = XboxGuideMenu(gamertag, self, sfx_cb=self._play_sfx)
+        d = XboxGuideMenu(gamertag, self, sfx_cb=self._play_sfx, mode='app')
         if d.exec_() != QtWidgets.QDialog.Accepted:
             self._sfx('back')
             return
         sel = str(d.selected() or '').strip()
         if not sel:
             return
-        if sel == 'Cerrar app actual':
+        if sel in ('Cerrar app actual', 'Close Current App', 'Leave Game'):
             self.close()
             return
         if parent is not None and hasattr(parent, '_handle_xbox_guide_action'):
@@ -5239,11 +5404,14 @@ class DashboardPage(QtWidgets.QWidget):
         opts = dict(tile_opts or {})
         for action, text, size in defs:
             tile_size = size
-            if opts.get('dense'):
-                try:
-                    tile_size = (int(size[0]), max(84, int(size[1] * 0.86)))
-                except Exception:
-                    tile_size = size
+            try:
+                w0, h0 = int(size[0]), int(size[1])
+            except Exception:
+                w0, h0 = 220, 120
+            if opts.get('metro_left'):
+                tile_size = (max(130, int(w0 * 0.64)), max(74, int(h0 * 0.60)))
+            elif opts.get('dense'):
+                tile_size = (max(110, int(w0 * 0.63)), max(70, int(h0 * 0.62)))
             tile = GreenTile(
                 action,
                 text,
@@ -5260,24 +5428,29 @@ class DashboardPage(QtWidgets.QWidget):
         body = QtWidgets.QHBoxLayout(self)
         self._body_layout = body
         body.setContentsMargins(0, 0, 0, 0)
-        body.setSpacing(26)
-        body.addStretch(1)
+        body.setSpacing(14)
 
         left_col = QtWidgets.QWidget()
         self.left_col = left_col
-        left_col.setFixedWidth(320)
+        left_col.setFixedWidth(236)
         left = QtWidgets.QVBoxLayout(left_col)
         self.left_layout = left
         left.setContentsMargins(0, 0, 0, 0)
-        left.setSpacing(14)
-        self._build_tiles(self.spec.get('left', []), self.left_tiles, left, QtCore.Qt.AlignLeft)
+        left.setSpacing(8)
+        self._build_tiles(
+            self.spec.get('left', []),
+            self.left_tiles,
+            left,
+            QtCore.Qt.AlignLeft,
+            tile_opts={'metro_left': True, 'icon_scale': 0.86, 'text_scale': 0.88},
+        )
         left.addStretch(1)
 
         center_col = QtWidgets.QWidget()
         center = QtWidgets.QVBoxLayout(center_col)
         self.center_layout = center
         center.setContentsMargins(0, 0, 0, 0)
-        center.setSpacing(14)
+        center.setSpacing(8)
         hero_variant = str(self.spec.get('hero_variant', 'default')).strip().lower()
         if hero_variant == 'games':
             self.hero = GamesShowcasePanel(
@@ -5292,42 +5465,42 @@ class DashboardPage(QtWidgets.QWidget):
                 self.spec.get('hero_subtitle', 'featured'),
             )
         self.hero.clicked.connect(self.actionTriggered.emit)
-        center.addWidget(self.hero, 0, alignment=QtCore.Qt.AlignHCenter)
+        center.addWidget(self.hero, 0, alignment=QtCore.Qt.AlignLeft | QtCore.Qt.AlignTop)
         center.addStretch(1)
 
         right_col = QtWidgets.QWidget()
         self.right_col = right_col
-        right_col.setFixedWidth(320)
+        right_col.setFixedWidth(186)
         right = QtWidgets.QVBoxLayout(right_col)
         self.right_layout = right
         right.setContentsMargins(0, 0, 0, 0)
-        right.setSpacing(14)
+        right.setSpacing(7)
         self._build_tiles(
             self.spec.get('right', []),
             self.right_tiles,
             right,
-            QtCore.Qt.AlignRight,
-            tile_opts={'dense': True, 'icon_scale': 0.70, 'text_scale': 0.86},
+            QtCore.Qt.AlignLeft,
+            tile_opts={'dense': True, 'icon_scale': 0.62, 'text_scale': 0.78},
         )
         right.addStretch(1)
 
-        body.addWidget(left_col, 0, alignment=QtCore.Qt.AlignVCenter)
-        body.addWidget(center_col, 0, alignment=QtCore.Qt.AlignVCenter)
-        body.addWidget(right_col, 0, alignment=QtCore.Qt.AlignVCenter)
-        body.addStretch(1)
+        body.addWidget(left_col, 0, alignment=QtCore.Qt.AlignTop)
+        body.addWidget(center_col, 1, alignment=QtCore.Qt.AlignTop)
+        body.addWidget(right_col, 0, alignment=QtCore.Qt.AlignTop)
 
     def apply_scale(self, scale=1.0, compact=False):
         s = max(0.62, float(scale))
-        compact_factor = 0.86 if compact else 1.0
-        col_w = max(170, int(320 * s * compact_factor))
-        gap = max(8, int(26 * s * compact_factor))
-        col_gap = max(6, int(14 * s * compact_factor))
+        compact_factor = 0.88 if compact else 1.0
+        left_w = max(120, int(236 * s * compact_factor))
+        right_w = max(104, int(186 * s * compact_factor))
+        gap = max(6, int(14 * s * compact_factor))
+        col_gap = max(4, int(8 * s * compact_factor))
         if self._body_layout is not None:
             self._body_layout.setSpacing(gap)
         if self.left_col is not None:
-            self.left_col.setFixedWidth(col_w)
+            self.left_col.setFixedWidth(left_w)
         if self.right_col is not None:
-            self.right_col.setFixedWidth(col_w)
+            self.right_col.setFixedWidth(right_w)
         if self.left_layout is not None:
             self.left_layout.setSpacing(col_gap)
         if self.center_layout is not None:
@@ -5888,19 +6061,15 @@ class Dashboard(QtWidgets.QMainWindow):
             },
             'home': {
                 'hint': 'home: usa flechas para moverte y Enter para abrir',
-                'hero_action': 'Hub',
-                'hero_title': 'home',
-                'hero_subtitle': 'featured',
+                'hero_action': 'Spotlight',
+                'hero_title': 'xbox live',
+                'hero_subtitle': 'Connect your Xbox 360 to the Internet to explore games, entertainment, and more',
                 'left': [
                     ('Open Tray', 'Open Tray', (320, 170)),
-                    ('Quickplay Queue', 'Quickplay Queue', (320, 170)),
                     ('My Pins', 'My Pins', (320, 170)),
-                    ('Recent', 'Recent', (320, 205)),
+                    ('Recent', 'Recent', (320, 170)),
                 ],
                 'right': [
-                    ('Spotlight', 'Spotlight', (270, 130)),
-                    ('Bing Search', 'Bing Search', (270, 130)),
-                    ('Downloads', 'Downloads', (270, 130)),
                     ('Friends', 'Friends', (270, 130)),
                     ('Avatar Store', 'Avatar Store', (270, 130)),
                     ('Sign In', 'Sign In', (270, 130)),
@@ -5932,18 +6101,14 @@ class Dashboard(QtWidgets.QMainWindow):
                 'hero_title': 'games',
                 'hero_subtitle': 'play now',
                 'left': [
-                    ('Casino', 'Casino', (320, 170)),
-                    ('Runner', 'Runner', (320, 170)),
-                    ('Missions', 'Missions', (320, 170)),
-                    ('FNAE', 'FNAE', (320, 205)),
+                    ('My Games', 'My Games', (320, 170)),
+                    ('Browse Games', 'Browse Games', (320, 170)),
+                    ('Search Games', 'Search Games', (320, 170)),
                 ],
                 'right': [
-                    ('Game Marketplace', 'Game Marketplace', (270, 130)),
-                    ('Indie Channel', 'Indie Channel', (270, 130)),
-                    ('Demos', 'Demos', (270, 130)),
-                    ('Steam', 'Steam', (270, 130)),
-                    ('RetroArch', 'RetroArch', (270, 130)),
-                    ('Store', 'Store', (270, 130)),
+                    ('Friends', 'Friends', (270, 130)),
+                    ('My TV & Movies', 'My TV & Movies', (270, 130)),
+                    ('Browse TV & Movies', 'Browse TV & Movies', (270, 130)),
                 ],
             },
             'tv & movies': {
@@ -6120,8 +6285,8 @@ class Dashboard(QtWidgets.QMainWindow):
         stage.setObjectName('stage')
         stage_l = QtWidgets.QVBoxLayout(stage)
         self._stage_layout = stage_l
-        stage_l.setContentsMargins(150, 70, 150, 50)
-        stage_l.setSpacing(18)
+        stage_l.setContentsMargins(94, 34, 94, 26)
+        stage_l.setSpacing(10)
 
         self.top_tabs = TopTabs(self.tabs)
         self.top_tabs.changed.connect(self._on_tab_changed)
@@ -6140,8 +6305,8 @@ class Dashboard(QtWidgets.QMainWindow):
         self._normalize_page_visibility(0)
         stage_l.addWidget(self.page_stack, 1)
 
-        self.desc = QtWidgets.QLabel('Connect your device to the Internet to explore games, entertainment, and more')
-        self.desc.setStyleSheet('font-size:28px; color:rgba(235,240,244,0.75);')
+        self.desc = QtWidgets.QLabel('Connect your Xbox 360 to the Internet to explore games, entertainment, and more')
+        self.desc.setStyleSheet('font-size:18px; color:rgba(236,240,244,0.82); font-family:"Segoe UI","Noto Sans",sans-serif;')
         stage_l.addWidget(self.desc)
 
         outer.addWidget(stage)
@@ -6153,11 +6318,11 @@ class Dashboard(QtWidgets.QMainWindow):
 
         self.setStyleSheet('''
             QMainWindow {
-                background:qlineargradient(x1:0.0,y1:0.0,x2:0.0,y2:1.0, stop:0 #545b64, stop:0.55 #666d76, stop:1 #aeb5be);
+                background:qlineargradient(x1:0.0,y1:0.0,x2:0.0,y2:1.0, stop:0 #4f555d, stop:0.44 #858b92, stop:1 #d7dbe0);
             }
             QFrame#stage {
-                background: rgba(255,255,255,0.05);
-                border: 1px solid rgba(255,255,255,0.08);
+                background: rgba(255,255,255,0.06);
+                border: 1px solid rgba(255,255,255,0.10);
                 border-radius: 0px;
             }
         ''')
@@ -6191,17 +6356,20 @@ class Dashboard(QtWidgets.QMainWindow):
         self._compact_ui = compact
         compact_factor = 0.72 if compact else 1.0
         if self._stage_layout is not None:
-            side = max(22, int(150 * scale * compact_factor))
-            top = max(12, int(70 * scale * compact_factor))
-            bottom = max(12, int(50 * scale * compact_factor))
-            spacing = max(8, int(18 * scale * compact_factor))
+            side = max(18, int(94 * scale * compact_factor))
+            top = max(10, int(34 * scale * compact_factor))
+            bottom = max(8, int(26 * scale * compact_factor))
+            spacing = max(6, int(10 * scale * compact_factor))
             self._stage_layout.setContentsMargins(side, top, side, bottom)
             self._stage_layout.setSpacing(spacing)
         if hasattr(self, 'top_tabs') and self.top_tabs is not None:
             self.top_tabs.apply_scale(scale, compact)
         if hasattr(self, 'desc') and self.desc is not None:
-            desc_px = max(12, int(28 * scale * (0.82 if compact else 1.0)))
-            self.desc.setStyleSheet(f'font-size:{desc_px}px; color:rgba(235,240,244,0.75);')
+            desc_px = max(10, int(18 * scale * (0.82 if compact else 1.0)))
+            self.desc.setStyleSheet(
+                f'font-size:{desc_px}px; color:rgba(236,240,244,0.82); '
+                'font-family:"Segoe UI","Noto Sans",sans-serif;'
+            )
         for p in self.pages:
             p.apply_scale(scale, compact)
         if self._achievement_toast is not None:
@@ -6490,6 +6658,34 @@ class Dashboard(QtWidgets.QMainWindow):
                     'name': name,
                 })
         return games
+
+    def _launch_steam_game_by_name(self, query):
+        q = str(query or '').strip().lower()
+        if not q:
+            return False
+        hits = []
+        tokens = [tok for tok in re.split(r'[^a-z0-9]+', q) if tok]
+        for game in self._steam_installed_games(limit=500):
+            appid = str(game.get('appid', '')).strip()
+            name = str(game.get('name', '')).strip()
+            n = name.lower()
+            if not appid or not name:
+                continue
+            ok = all(tok in n for tok in tokens) if tokens else (q in n)
+            if ok:
+                score = len(n)
+                hits.append((score, appid, name))
+        if not hits:
+            return False
+        hits.sort(key=lambda row: row[0])
+        appid = str(hits[0][1])
+        steam = XUI_HOME / 'bin' / 'xui_steam.sh'
+        if steam.exists():
+            self._run('/bin/sh', ['-c', f'"{steam}" -applaunch {appid}'])
+        else:
+            self._open_url_external(f'steam://run/{appid}', normal_mode=True)
+        self._unlock_achievement_event('launch', 'steam')
+        return True
 
     def _platform_games_tiles(self):
         tiles = []
@@ -7421,7 +7617,7 @@ exit 0
             return
         self._guide_open_last_at = now
         self._play_sfx('open')
-        d = XboxGuideMenu(current_gamertag(), self, sfx_cb=self._play_sfx)
+        d = XboxGuideMenu(current_gamertag(), self, sfx_cb=self._play_sfx, mode='dashboard')
         if d.exec_() == QtWidgets.QDialog.Accepted:
             opt = d.selected()
             if opt:
@@ -7827,6 +8023,13 @@ exit 0
             self._menu('My Games', ['Runner', 'Casino', 'Gem Match', 'FNAE', 'Steam', 'RetroArch', 'Games Integrations'])
         elif action in ('Browse Games', 'Browse'):
             self._run('/bin/sh', ['-c', f'{xui}/bin/xui_store.sh'])
+        elif action == 'My TV & Movies':
+            if 'tv & movies' in self.tabs:
+                self._switch_tab(self.tabs.index('tv & movies'), animate=True, keep_tabs_focus=True)
+            else:
+                self._open_url_external('https://www.xbox.com/en-US/entertainment', normal_mode=True)
+        elif action == 'Browse TV & Movies':
+            self._open_url_external('https://www.xbox.com/en-US/entertainment', normal_mode=True)
         elif action == 'Quickplay Queue':
             self._menu('Quickplay Queue', ['My Games', 'Recently Played', 'Arcade Picks', 'Games Marketplace', 'Web Browser'])
         elif action == 'Spotlight':
@@ -7885,6 +8088,8 @@ exit 0
                 if self._ask_yes_no('Beacons', 'Clear all active beacons?'):
                     safe_json_write(BEACONS_FILE, [])
                     self._msg('Beacons', 'All beacons cleared.')
+        elif action in ('View Beacons', 'Add Beacon', 'Remove Beacon', 'Clear Beacons'):
+            self.handle_action('Beacons')
         elif action == 'Cloud Storage':
             out = subprocess.getoutput('/bin/sh -c "du -sh $HOME/.xui/data 2>/dev/null | head -n 1"').strip()
             info = (
@@ -7917,6 +8122,10 @@ exit 0
             self._run('/bin/sh', ['-c', f'{xui}/bin/xui_store.sh'])
         elif action == 'Indie Channel':
             self._menu('Indie Channel', ['Store', 'Games Marketplace', 'Itch.io Free Games Hub', 'Game Jolt Games Hub'])
+        elif action == 'Itch.io Free Games Hub':
+            self._open_url_external('https://itch.io/games/free', normal_mode=True)
+        elif action == 'Game Jolt Games Hub':
+            self._open_url_external('https://gamejolt.com/games', normal_mode=True)
         elif action == 'Demos':
             self._menu('Demos', ['Runner', 'Casino', 'Gem Match', 'Movie Trailers'])
         elif action == 'Recently Played':
@@ -7938,12 +8147,29 @@ exit 0
             except Exception:
                 arr = []
             self._menu('Recent', arr or ['No recent actions'])
+        elif action == 'No recent actions':
+            self._msg('Recent', 'No recent actions.')
+        elif action == 'No recent games':
+            self._msg('Recently Played', 'No recent games.')
         elif action == 'Casino':
             self._run('/bin/sh', ['-c', f'{xui}/bin/xui_python.sh {xui}/casino/casino.py'])
         elif action == 'Runner':
             self._run('/bin/sh', ['-c', f'{xui}/bin/xui_python.sh {xui}/games/runner.py'])
         elif action in ('Gem Match', 'Bejeweled'):
             self._run('/bin/sh', ['-c', f'{xui}/bin/xui_gem_match.sh'])
+        elif action == 'Showcase Halo 4':
+            if not self._launch_steam_game_by_name('Halo 4'):
+                self._open_url_external('https://www.bing.com/search?q=Halo+4', normal_mode=True)
+        elif action == 'Showcase COD Black Ops':
+            if not self._launch_steam_game_by_name('Call of Duty Black Ops'):
+                self._open_url_external('https://www.bing.com/search?q=Call+of+Duty+Black+Ops', normal_mode=True)
+        elif action == 'Showcase FIFA Soccer 13':
+            if not self._launch_steam_game_by_name('FIFA 13'):
+                self._open_url_external('https://www.bing.com/search?q=FIFA+Soccer+13', normal_mode=True)
+        elif action == 'Showcase Nike Kinect Training':
+            self._open_url_external('https://www.bing.com/search?q=Nike+Kinect+Training', normal_mode=True)
+        elif action in ('Showcase Recommendations', 'Showcase All Recommendations'):
+            self._menu('Recommendations', ['Game Marketplace', 'Indie Channel', 'Demos', 'Movie Trailers'])
         elif action in ('FNAE', "Five Night's At Epstein's", "Five Nights At Epstein's"):
             run_fnae = f'{xui}/bin/xui_run_fnae.sh'
             install_fnae = f'{xui}/bin/xui_install_fnae.sh'
@@ -8339,7 +8565,11 @@ exit 0
             if self._ask_yes_no('Exit', 'Salir al escritorio?'):
                 QtWidgets.QApplication.quit()
         else:
-            self._msg('Action', f'{action} launched.')
+            q = urllib.parse.quote_plus(str(action or '').strip())
+            if q:
+                self._open_url_external(f'https://www.bing.com/search?q={q}', normal_mode=True)
+            else:
+                self._msg('Action', 'No action selected.')
 
     def _dispatch_dashboard_key(self, key):
         modal = QtWidgets.QApplication.activeModalWidget()
@@ -14941,51 +15171,86 @@ find_linux_executable(){
     LC_ALL=C head -c 4 "$f" 2>/dev/null | grep -q $'^\x7fELF'
   }
 
-  # 1) Common Unity/Linux artifacts.
-  local exe=""
-  exe="$(find "$root" -maxdepth 8 -type f \( -name '*.x86_64' -o -name '*.x86' -o -name '*.AppImage' \) | head -n1 || true)"
-  if [ -n "$exe" ] && [ -f "$exe" ]; then
-    chmod +x "$exe" >/dev/null 2>&1 || true
-    echo "$exe"
-    return 0
-  fi
+  is_script(){
+    local f="$1"
+    [ -f "$f" ] || return 1
+    head -n1 "$f" 2>/dev/null | grep -q '^#!'
+  }
 
-  # 2) Unity convention: <GameName> executable + <GameName>_Data directory.
-  local data_dir base cand
+  looks_launcher(){
+    local f="$1"
+    [ -f "$f" ] || return 1
+    local bn low
+    bn="$(basename "$f")"
+    low="$(printf '%s' "$bn" | tr '[:upper:]' '[:lower:]')"
+    case "$low" in
+      unitycrashhandler*|crashhandler*|chrome-sandbox|\
+      *.so|*.dll|*.pdb|*.json|*.txt|*.md|*.png|*.jpg|*.jpeg|*.bmp|*.svg|*.ico|\
+      *.wav|*.mp3|*.ogg|*.desktop|*.cfg|*.ini|*.xml)
+        return 1
+        ;;
+    esac
+    if [ -d "${f}_Data" ] || [ -d "$(dirname "$f")/${bn}_Data" ]; then
+      return 0
+    fi
+    case "$low" in
+      *epstein*|*fnae*|*five*night*)
+        return 0
+        ;;
+    esac
+    is_elf "$f" && return 0
+    is_script "$f" && return 0
+    return 1
+  }
+
+  local exe="" data_dir base cand
   while IFS= read -r data_dir; do
     [ -n "$data_dir" ] || continue
     base="${data_dir%_Data}"
-    for cand in "$base" "$base.x86_64" "$base.x86"; do
-      if [ -f "$cand" ]; then
+    for cand in "$base" "$base.x86_64" "$base.x86" "$base.sh"; do
+      if [ -f "$cand" ] && looks_launcher "$cand"; then
         chmod +x "$cand" >/dev/null 2>&1 || true
         echo "$cand"
         return 0
       fi
     done
-  done < <(find "$root" -maxdepth 8 -type d -name '*_Data' 2>/dev/null)
+  done < <(find "$root" -maxdepth 8 -type d -name '*_Data' 2>/dev/null | sort)
 
-  # 3) Fallback: executable files that look like game launchers.
-  exe="$(find "$root" -maxdepth 8 -type f \
-    ! -name '*.so' ! -name '*.dll' ! -name '*.pdb' \
-    ! -name 'UnityCrashHandler*' ! -name '*.exe' \
-    -perm -u+x | head -n1 || true)"
-  if [ -n "$exe" ] && [ -f "$exe" ]; then
-    chmod +x "$exe" >/dev/null 2>&1 || true
-    echo "$exe"
-    return 0
-  fi
-
-  # 4) Fallback: any ELF binary, even if it was extracted without +x bit.
   while IFS= read -r exe; do
     [ -n "$exe" ] || continue
-    if is_elf "$exe"; then
+    if looks_launcher "$exe"; then
       chmod +x "$exe" >/dev/null 2>&1 || true
       echo "$exe"
       return 0
     fi
-  done < <(find "$root" -maxdepth 8 -type f \
-    ! -name '*.so' ! -name '*.dll' ! -name '*.pdb' \
-    ! -name 'UnityCrashHandler*' ! -name '*.exe' 2>/dev/null)
+  done < <(find "$root" -maxdepth 8 -type f \( -name '*.x86_64' -o -name '*.x86' -o -name '*.AppImage' \) 2>/dev/null | sort)
+
+  while IFS= read -r exe; do
+    [ -n "$exe" ] || continue
+    if looks_launcher "$exe"; then
+      chmod +x "$exe" >/dev/null 2>&1 || true
+      echo "$exe"
+      return 0
+    fi
+  done < <(find "$root" -maxdepth 8 -type f \( -iname '*epstein*' -o -iname '*fnae*' -o -iname '*five*night*' \) 2>/dev/null | sort)
+
+  while IFS= read -r exe; do
+    [ -n "$exe" ] || continue
+    if looks_launcher "$exe"; then
+      chmod +x "$exe" >/dev/null 2>&1 || true
+      echo "$exe"
+      return 0
+    fi
+  done < <(find "$root" -maxdepth 8 -type f -perm -u+x 2>/dev/null | sort)
+
+  while IFS= read -r exe; do
+    [ -n "$exe" ] || continue
+    if looks_launcher "$exe"; then
+      chmod +x "$exe" >/dev/null 2>&1 || true
+      echo "$exe"
+      return 0
+    fi
+  done < <(find "$root" -maxdepth 8 -type f 2>/dev/null | sort)
   return 1
 }
 
@@ -15213,6 +15478,8 @@ APP_HOME="$XUI_HOME/apps/fnae"
 DATA_FILE="$XUI_HOME/data/fnae_paths.json"
 BIN_DIR="$XUI_HOME/bin"
 PID_FILE="$XUI_HOME/data/active_game.pid"
+LOG_DIR="$XUI_HOME/logs"
+LOG_FILE="$LOG_DIR/fnae_run.log"
 HOST_OS="$(uname -s 2>/dev/null || echo Linux)"
 IS_LINUX=0
 [ "$HOST_OS" = "Linux" ] && IS_LINUX=1
@@ -15224,6 +15491,11 @@ if [ "${1:-}" = "--check" ]; then
   CHECK_ONLY=1
   shift || true
 fi
+mkdir -p "$LOG_DIR" "$(dirname "$PID_FILE")" >/dev/null 2>&1 || true
+
+run_note(){
+  printf '[%s] %s\n' "$(date '+%Y-%m-%d %H:%M:%S' 2>/dev/null || echo now)" "$*" >> "$LOG_FILE" 2>/dev/null || true
+}
 
 read_json_field(){
   local field="$1"
@@ -15240,47 +15512,96 @@ print(str(data.get(field, '')))
 PY
 }
 
+is_elf_file(){
+  local f="$1"
+  [ -f "$f" ] || return 1
+  LC_ALL=C head -c 4 "$f" 2>/dev/null | grep -q $'^\x7fELF'
+}
+
+is_script_file(){
+  local f="$1"
+  [ -f "$f" ] || return 1
+  head -n1 "$f" 2>/dev/null | grep -q '^#!'
+}
+
+is_probable_launcher(){
+  local f="$1"
+  [ -f "$f" ] || return 1
+  local bn low
+  bn="$(basename "$f")"
+  low="$(printf '%s' "$bn" | tr '[:upper:]' '[:lower:]')"
+  case "$low" in
+    unitycrashhandler*|crashhandler*|chrome-sandbox|\
+    *.so|*.dll|*.pdb|*.json|*.txt|*.md|*.png|*.jpg|*.jpeg|*.bmp|*.svg|*.ico|\
+    *.wav|*.mp3|*.ogg|*.desktop|*.cfg|*.ini|*.xml)
+      return 1
+      ;;
+  esac
+  if [ -d "${f}_Data" ] || [ -d "$(dirname "$f")/${bn}_Data" ]; then
+    return 0
+  fi
+  case "$low" in
+    *epstein*|*fnae*|*five*night*)
+      return 0
+      ;;
+  esac
+  is_elf_file "$f" && return 0
+  is_script_file "$f" && return 0
+  return 1
+}
+
 find_linux_executable(){
   local root="${1:-$APP_HOME/linux}"
   [ -d "$root" ] || return 1
-  is_elf(){
-    local f="$1"
-    [ -f "$f" ] || return 1
-    LC_ALL=C head -c 4 "$f" 2>/dev/null | grep -q $'^\x7fELF'
-  }
-  local exe=""
-  exe="$(find "$root" -maxdepth 8 -type f \( -name '*.x86_64' -o -name '*.x86' -o -name '*.AppImage' \) | head -n1 || true)"
-  if [ -n "$exe" ] && [ -f "$exe" ]; then
-    echo "$exe"
-    return 0
-  fi
+  local exe="" data_dir base cand
+
   while IFS= read -r data_dir; do
     [ -n "$data_dir" ] || continue
-    local base="${data_dir%_Data}"
-    for exe in "$base" "$base.x86_64" "$base.x86"; do
-      if [ -f "$exe" ]; then
-        echo "$exe"
+    base="${data_dir%_Data}"
+    for cand in "$base" "$base.x86_64" "$base.x86" "$base.sh"; do
+      if [ -f "$cand" ] && is_probable_launcher "$cand"; then
+        chmod +x "$cand" >/dev/null 2>&1 || true
+        echo "$cand"
         return 0
       fi
     done
-  done < <(find "$root" -maxdepth 8 -type d -name '*_Data' 2>/dev/null)
-  exe="$(find "$root" -maxdepth 8 -type f \
-    ! -name '*.so' ! -name '*.dll' ! -name '*.pdb' \
-    ! -name 'UnityCrashHandler*' ! -name '*.exe' \
-    -perm -u+x | head -n1 || true)"
-  if [ -n "$exe" ] && [ -f "$exe" ]; then
-    echo "$exe"
-    return 0
-  fi
+  done < <(find "$root" -maxdepth 8 -type d -name '*_Data' 2>/dev/null | sort)
+
   while IFS= read -r exe; do
     [ -n "$exe" ] || continue
-    if is_elf "$exe"; then
+    if is_probable_launcher "$exe"; then
+      chmod +x "$exe" >/dev/null 2>&1 || true
       echo "$exe"
       return 0
     fi
-  done < <(find "$root" -maxdepth 8 -type f \
-    ! -name '*.so' ! -name '*.dll' ! -name '*.pdb' \
-    ! -name 'UnityCrashHandler*' ! -name '*.exe' 2>/dev/null)
+  done < <(find "$root" -maxdepth 8 -type f \( -name '*.x86_64' -o -name '*.x86' -o -name '*.AppImage' \) 2>/dev/null | sort)
+
+  while IFS= read -r exe; do
+    [ -n "$exe" ] || continue
+    if is_probable_launcher "$exe"; then
+      chmod +x "$exe" >/dev/null 2>&1 || true
+      echo "$exe"
+      return 0
+    fi
+  done < <(find "$root" -maxdepth 8 -type f \( -iname '*epstein*' -o -iname '*fnae*' -o -iname '*five*night*' \) 2>/dev/null | sort)
+
+  while IFS= read -r exe; do
+    [ -n "$exe" ] || continue
+    if is_probable_launcher "$exe"; then
+      chmod +x "$exe" >/dev/null 2>&1 || true
+      echo "$exe"
+      return 0
+    fi
+  done < <(find "$root" -maxdepth 8 -type f -perm -u+x 2>/dev/null | sort)
+
+  while IFS= read -r exe; do
+    [ -n "$exe" ] || continue
+    if is_probable_launcher "$exe"; then
+      chmod +x "$exe" >/dev/null 2>&1 || true
+      echo "$exe"
+      return 0
+    fi
+  done < <(find "$root" -maxdepth 8 -type f 2>/dev/null | sort)
   return 1
 }
 
@@ -15337,6 +15658,10 @@ if [ -f "$DATA_FILE" ]; then
   LINUX_EXE="$(read_json_field linux_exe)"
   WIN_EXE="$(read_json_field windows_exe)"
 fi
+if [ -n "$LINUX_EXE" ] && { [ ! -f "$LINUX_EXE" ] || ! is_probable_launcher "$LINUX_EXE"; }; then
+  run_note "Ignoring stale/invalid linux_exe from data file: $LINUX_EXE"
+  LINUX_EXE=""
+fi
 if [ -z "$LINUX_EXE" ] || [ ! -f "$LINUX_EXE" ]; then
   LINUX_EXE="$(find_linux_executable "$APP_HOME/linux" || true)"
 fi
@@ -15381,25 +15706,96 @@ launch_and_wait(){
   return $rc
 }
 
+launch_linux_native(){
+  local exe="$1"
+  shift || true
+  local dir rc ldp
+  dir="$(dirname "$exe")"
+  rc=0
+  ldp="$dir"
+  if [ -n "${LD_LIBRARY_PATH:-}" ]; then
+    ldp="$dir:$LD_LIBRARY_PATH"
+  fi
+  chmod +x "$exe" >/dev/null 2>&1 || true
+  run_note "Launching native: $exe"
+  launch_and_wait "$dir" env LD_LIBRARY_PATH="$ldp" "$exe" "$@" || rc=$?
+  if [ "$rc" -eq 0 ]; then
+    return 0
+  fi
+  if is_script_file "$exe"; then
+    rc=0
+    run_note "Native failed, retrying via bash: $exe"
+    launch_and_wait "$dir" env LD_LIBRARY_PATH="$ldp" /bin/bash "$exe" "$@" || rc=$?
+  fi
+  return "$rc"
+}
+
+launch_linux_steam(){
+  local exe="$1"
+  shift || true
+  if ! command -v steam-run >/dev/null 2>&1; then
+    ensure_fnae_runtime_deps || true
+  fi
+  if ! command -v steam-run >/dev/null 2>&1; then
+    return 127
+  fi
+  local rc=0
+  run_note "Launching with steam-run: $exe"
+  launch_and_wait "$(dirname "$exe")" steam-run "$exe" "$@" || rc=$?
+  return "$rc"
+}
+
 if [ -n "$LINUX_EXE" ] && [ -f "$LINUX_EXE" ]; then
   chmod +x "$LINUX_EXE" || true
-  if [ "$IS_LINUX" = "1" ] && [ "$USE_STEAM_RUNTIME" != "0" ]; then
-    if [ "$USE_STEAM_RUNTIME" = "1" ] || needs_runtime_for_glibc "$LINUX_EXE"; then
-      if ! command -v steam-run >/dev/null 2>&1; then
-        ensure_fnae_runtime_deps || true
-      fi
-      if command -v steam-run >/dev/null 2>&1; then
-        launch_and_wait "$(dirname "$LINUX_EXE")" steam-run "$LINUX_EXE" "$@"
-        exit $?
-      fi
-      host_glibc="$(host_glibc_version || true)"
-      req_glibc="$(required_glibc_version "$LINUX_EXE" || true)"
-      echo "FNAE requires newer runtime (glibc ${req_glibc:-unknown}, host ${host_glibc:-unknown})."
-      echo "steam-run is not available."
-      echo "Run dependency installer:"
-      echo "  $DEPS_SCRIPT"
-      exit 1
-    fi
+  if [ "$IS_LINUX" = "1" ]; then
+    native_rc=1
+    steam_rc=1
+    mode="$(printf '%s' "$USE_STEAM_RUNTIME" | tr '[:upper:]' '[:lower:]')"
+    case "$mode" in
+      1|on|force|always)
+        launch_linux_steam "$LINUX_EXE" "$@" || steam_rc=$?
+        if [ "$steam_rc" -eq 0 ]; then
+          exit 0
+        fi
+        run_note "steam-run failed rc=$steam_rc, fallback native"
+        launch_linux_native "$LINUX_EXE" "$@" || native_rc=$?
+        [ "$native_rc" -eq 0 ] && exit 0
+        echo "FNAE failed to launch (steam-run rc=$steam_rc, native rc=$native_rc)."
+        echo "See log: $LOG_FILE"
+        exit "${native_rc:-1}"
+        ;;
+      0|off|never)
+        launch_linux_native "$LINUX_EXE" "$@" || native_rc=$?
+        [ "$native_rc" -eq 0 ] && exit 0
+        echo "FNAE failed to launch natively (rc=$native_rc)."
+        echo "See log: $LOG_FILE"
+        exit "${native_rc:-1}"
+        ;;
+      *)
+        launch_linux_native "$LINUX_EXE" "$@" || native_rc=$?
+        if [ "$native_rc" -eq 0 ]; then
+          exit 0
+        fi
+        run_note "native launch failed rc=$native_rc; trying steam-run fallback"
+        if needs_runtime_for_glibc "$LINUX_EXE" || command -v steam-run >/dev/null 2>&1; then
+          launch_linux_steam "$LINUX_EXE" "$@" || steam_rc=$?
+          if [ "$steam_rc" -eq 0 ]; then
+            exit 0
+          fi
+          run_note "steam-run launch failed rc=$steam_rc"
+        fi
+        host_glibc="$(host_glibc_version || true)"
+        req_glibc="$(required_glibc_version "$LINUX_EXE" || true)"
+        echo "FNAE failed to launch on Linux."
+        if [ -n "${req_glibc:-}" ] || [ -n "${host_glibc:-}" ]; then
+          echo "glibc host=${host_glibc:-unknown} required=${req_glibc:-unknown}"
+        fi
+        echo "See log: $LOG_FILE"
+        echo "You can force runtime mode:"
+        echo "  XUI_FNAE_USE_STEAM_RUNTIME=1 $BIN_DIR/xui_run_fnae.sh"
+        exit "${native_rc:-1}"
+        ;;
+    esac
   fi
   launch_and_wait "$(dirname "$LINUX_EXE")" "$LINUX_EXE" "$@"
   exit $?
