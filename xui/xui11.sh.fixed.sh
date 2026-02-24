@@ -2955,6 +2955,7 @@ class TopTabs(QtWidgets.QWidget):
         self._layout = h
         h.setContentsMargins(0, 0, 0, 0)
         h.setSpacing(16)
+        h.addStretch(1)
         for i, n in enumerate(self.names):
             lbl = TabLabel(n)
             lbl.setCursor(QtGui.QCursor(QtCore.Qt.PointingHandCursor))
@@ -5553,18 +5554,23 @@ class DashboardPage(QtWidgets.QWidget):
             layout.addWidget(tile, 0, alignment)
 
     def _build(self):
-        body = QtWidgets.QHBoxLayout(self)
+        wrap = QtWidgets.QVBoxLayout(self)
+        wrap.setContentsMargins(0, 0, 0, 0)
+        wrap.setSpacing(0)
+        wrap.addStretch(1)
+
+        body = QtWidgets.QHBoxLayout()
         self._body_layout = body
         body.setContentsMargins(0, 0, 0, 0)
-        body.setSpacing(14)
+        body.setSpacing(12)
 
         left_col = QtWidgets.QWidget()
         self.left_col = left_col
-        left_col.setFixedWidth(236)
+        left_col.setFixedWidth(220)
         left = QtWidgets.QVBoxLayout(left_col)
         self.left_layout = left
         left.setContentsMargins(0, 0, 0, 0)
-        left.setSpacing(8)
+        left.setSpacing(7)
         self._build_tiles(
             self.spec.get('left', []),
             self.left_tiles,
@@ -5579,7 +5585,7 @@ class DashboardPage(QtWidgets.QWidget):
         center = QtWidgets.QVBoxLayout(center_col)
         self.center_layout = center
         center.setContentsMargins(0, 0, 0, 0)
-        center.setSpacing(8)
+        center.setSpacing(6)
         hero_variant = str(self.spec.get('hero_variant', 'default')).strip().lower()
         if hero_variant == 'games':
             self.hero = GamesShowcasePanel(
@@ -5599,11 +5605,11 @@ class DashboardPage(QtWidgets.QWidget):
 
         right_col = QtWidgets.QWidget()
         self.right_col = right_col
-        right_col.setFixedWidth(186)
+        right_col.setFixedWidth(170)
         right = QtWidgets.QVBoxLayout(right_col)
         self.right_layout = right
         right.setContentsMargins(0, 0, 0, 0)
-        right.setSpacing(7)
+        right.setSpacing(6)
         self._build_tiles(
             self.spec.get('right', []),
             self.right_tiles,
@@ -5618,14 +5624,16 @@ class DashboardPage(QtWidgets.QWidget):
         body.addWidget(center_col, 0, alignment=QtCore.Qt.AlignTop)
         body.addWidget(right_col, 0, alignment=QtCore.Qt.AlignTop)
         body.addStretch(1)
+        wrap.addLayout(body, 0)
+        wrap.addStretch(1)
 
     def apply_scale(self, scale=1.0, compact=False):
         s = max(0.62, float(scale))
         compact_factor = 0.88 if compact else 1.0
-        left_w = max(120, int(236 * s * compact_factor))
-        right_w = max(104, int(186 * s * compact_factor))
-        gap = max(6, int(14 * s * compact_factor))
-        col_gap = max(4, int(8 * s * compact_factor))
+        left_w = max(116, int(220 * s * compact_factor))
+        right_w = max(98, int(170 * s * compact_factor))
+        gap = max(6, int(12 * s * compact_factor))
+        col_gap = max(4, int(7 * s * compact_factor))
         if self._body_layout is not None:
             self._body_layout.setSpacing(gap)
         if self.left_col is not None:
