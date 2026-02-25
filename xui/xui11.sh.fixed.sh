@@ -8818,6 +8818,7 @@ class Dashboard(QtWidgets.QMainWindow):
         self._last_hover_at = 0.0
         self._tab_animating = False
         self._tab_anim_group = None
+        self._tab_anim_watchdog = None
         self._visible_page_idx = 0
         self._last_responsive_key = None
         self._web_windows = []
@@ -9130,8 +9131,11 @@ class Dashboard(QtWidgets.QMainWindow):
         except Exception:
             pass
         sl = self.page_stack.layout()
-        if isinstance(sl, QtWidgets.QStackedLayout):
-            sl.setStackingMode(QtWidgets.QStackedLayout.StackOne)
+        if hasattr(sl, 'setStackingMode'):
+            try:
+                sl.setStackingMode(QtWidgets.QStackedLayout.StackOne)
+            except Exception:
+                pass
         for i, page in enumerate(self.pages):
             page.move(0, 0)
             page.setVisible(i == idx)
@@ -9143,6 +9147,38 @@ class Dashboard(QtWidgets.QMainWindow):
                 except Exception:
                     pass
         self._visible_page_idx = idx
+
+    def _finish_tab_animation(self, to_idx, from_w=None, to_w=None, from_fx=None, to_fx=None):
+        to_idx = max(0, min(int(to_idx), len(self.pages) - 1))
+        try:
+            self.page_stack.setCurrentIndex(to_idx)
+        except Exception:
+            pass
+        self._normalize_page_visibility(to_idx)
+        try:
+            if from_w is not None:
+                from_w.setGraphicsEffect(None)
+        except Exception:
+            pass
+        try:
+            if to_w is not None:
+                to_w.setGraphicsEffect(None)
+        except Exception:
+            pass
+        self._tab_animating = False
+        self._tab_anim_group = None
+        wd = self._tab_anim_watchdog
+        self._tab_anim_watchdog = None
+        if wd is not None:
+            try:
+                wd.stop()
+            except Exception:
+                pass
+            try:
+                wd.deleteLater()
+            except Exception:
+                pass
+        self.update_focus()
 
     def _animate_tab_transition(self, from_idx, to_idx):
         if from_idx == to_idx:
@@ -9160,8 +9196,11 @@ class Dashboard(QtWidgets.QMainWindow):
         to_w = self.page_stack.widget(to_idx)
         rect = self.page_stack.rect()
         sl = self.page_stack.layout()
-        if isinstance(sl, QtWidgets.QStackedLayout):
-            sl.setStackingMode(QtWidgets.QStackedLayout.StackAll)
+        if hasattr(sl, 'setStackingMode'):
+            try:
+                sl.setStackingMode(QtWidgets.QStackedLayout.StackAll)
+            except Exception:
+                pass
         direction = 1 if to_idx > from_idx else -1
         # Xbox-like side blade movement, but compact to keep GPU/CPU cost low.
         travel = int(max(56, rect.width() * (0.20 if self._low_power_ui else 0.28)))
@@ -9222,18 +9261,16 @@ class Dashboard(QtWidgets.QMainWindow):
             self._tab_anim_group.addAnimation(fade_to)
 
         def done():
-            self.page_stack.setCurrentIndex(to_idx)
-            self._normalize_page_visibility(to_idx)
-            if from_fx is not None:
-                from_w.setGraphicsEffect(None)
-            if to_fx is not None:
-                to_w.setGraphicsEffect(None)
-            self._tab_animating = False
-            self._tab_anim_group = None
-            self.update_focus()
+            self._finish_tab_animation(to_idx, from_w, to_w, from_fx, to_fx)
 
         self._tab_anim_group.finished.connect(done)
         self._tab_anim_group.start(QtCore.QAbstractAnimation.DeleteWhenStopped)
+        watchdog = QtCore.QTimer(self)
+        watchdog.setSingleShot(True)
+        watchdog.setInterval(max(280, duration + 220))
+        watchdog.timeout.connect(lambda: self._finish_tab_animation(to_idx, from_w, to_w, from_fx, to_fx))
+        self._tab_anim_watchdog = watchdog
+        watchdog.start()
 
     def _switch_tab(self, idx, animate=True, keep_tabs_focus=False):
         idx = max(0, min(idx, len(self.tabs) - 1))
@@ -9262,6 +9299,8 @@ class Dashboard(QtWidgets.QMainWindow):
         self._play_sfx('open')
 
     def update_focus(self):
+        if not self._tab_animating:
+            self._normalize_page_visibility(self.tab_idx)
         self.top_tabs.set_current(self.tab_idx)
         tab_name = self.tabs[self.tab_idx]
         page = self._current_page()
