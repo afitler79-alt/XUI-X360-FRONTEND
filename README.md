@@ -5,3 +5,11 @@ sudo sh -c 'printf "%s ALL=(root) NOPASSWD: %s, %s\n" "$USER" "$HOME/.xui/bin/xu
 sudo chmod 0440 /etc/sudoers.d/xui-dashboard-$USER
 sudo visudo -cf /etc/sudoers.d/xui-dashboard-$USER
 FOR SOLVING SUDO PROBLEMS
+
+
+FOR INSTALL:
+Set-ExecutionPolicy -Scope Process Bypass -Force
+.\install_xui_windows.ps1
+
+FOR WINDOWS AUTOSTART:
+.\install_xui_windows.ps1 -EnableAutostart
