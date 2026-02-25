@@ -13,3 +13,6 @@ Set-ExecutionPolicy -Scope Process Bypass -Force
 
 FOR WINDOWS AUTOSTART:
 .\install_xui_windows.ps1 -EnableAutostart
+
+WINDOWS POWERSHELL SOLUTION:
+Set-ExecutionPolicy -Scope Process Bypass -Force; Get-ChildItem . -Recurse -File | Unblock-File; .\install_xui_windows.bat -UpdateBranch Windows
