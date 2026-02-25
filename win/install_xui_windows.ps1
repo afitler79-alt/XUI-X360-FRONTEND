@@ -10,24 +10,94 @@ $ErrorActionPreference = "Stop"
 
 function Invoke-Python {
     param([string[]]$Args)
-    if (Get-Command py -ErrorAction SilentlyContinue) {
+    if (-not $script:PyLauncher) {
+        $script:PyLauncher = ""
+        $tests = @(
+            @{cmd = "py";      args = @("-3", "-V")},
+            @{cmd = "python";  args = @("--version")},
+            @{cmd = "python3"; args = @("--version")}
+        )
+        foreach ($t in $tests) {
+            $cmd = [string]$t.cmd
+            if (-not (Get-Command $cmd -ErrorAction SilentlyContinue)) {
+                continue
+            }
+            try {
+                & $cmd @($t.args) *> $null
+                $rc = $LASTEXITCODE
+                if ($null -eq $rc) { $rc = 0 }
+                if ([int]$rc -eq 0) {
+                    $script:PyLauncher = $cmd
+                    break
+                }
+            } catch {
+            }
+        }
+    }
+
+    if ([string]::IsNullOrWhiteSpace($script:PyLauncher)) {
+        throw "Python 3 not available. Install Python 3.10+ (python.org), enable Add to PATH, or disable Windows App Execution Alias for python/python3."
+    }
+
+    if ($script:PyLauncher -eq "py") {
         & py -3 @Args
-        return $LASTEXITCODE
+    } else {
+        & $script:PyLauncher @Args
     }
-    if (Get-Command python -ErrorAction SilentlyContinue) {
-        & python @Args
-        return $LASTEXITCODE
-    }
-    if (Get-Command python3 -ErrorAction SilentlyContinue) {
-        & python3 @Args
-        return $LASTEXITCODE
-    }
-    throw "Python 3 not found in PATH."
+    return $LASTEXITCODE
 }
 
 Write-Host "[INFO] XUI Windows installer"
 Write-Host "[INFO] SourceRoot: $SourceRoot"
 Write-Host "[INFO] XuiHome: $XuiHome"
+
+function Resolve-SourceInstallerPath {
+    param(
+        [Parameter(Mandatory = $true)][string]$BaseRoot,
+        [string]$Branch = "Windows"
+    )
+
+    $candidatePaths = @(
+        (Join-Path $BaseRoot "xui11.sh.fixed.sh"),
+        (Join-Path (Join-Path $PSScriptRoot "..") "xui11.sh.fixed.sh"),
+        (Join-Path (Join-Path $PSScriptRoot "..\..") "xui11.sh.fixed.sh"),
+        (Join-Path (Join-Path $PSScriptRoot "..\dist") "xui11.sh.fixed.sh")
+    )
+    foreach ($p in $candidatePaths) {
+        if (-not [string]::IsNullOrWhiteSpace($p) -and (Test-Path $p -PathType Leaf)) {
+            return (Resolve-Path $p).Path
+        }
+    }
+
+    try {
+        $near = Get-ChildItem -Path $BaseRoot -Filter "xui11.sh.fixed.sh" -File -Recurse -ErrorAction SilentlyContinue |
+            Sort-Object LastWriteTime -Descending |
+            Select-Object -First 1
+        if ($near -and (Test-Path $near.FullName -PathType Leaf)) {
+            return $near.FullName
+        }
+    } catch {
+    }
+
+    $branches = @($Branch, "Windows", "Main-XUI", "main")
+    $cacheDir = Join-Path $env:TEMP "xui-win-installer-cache"
+    New-Item -Path $cacheDir -ItemType Directory -Force | Out-Null
+    foreach ($b in $branches) {
+        if ([string]::IsNullOrWhiteSpace($b)) { continue }
+        $url = "https://raw.githubusercontent.com/afitler79-alt/XUI-X360-FRONTEND/$b/xui11.sh.fixed.sh"
+        $dst = Join-Path $cacheDir ("xui11.sh.fixed." + $b + ".sh")
+        try {
+            Invoke-WebRequest -Uri $url -OutFile $dst -TimeoutSec 30 -ErrorAction Stop
+            if ((Test-Path $dst -PathType Leaf) -and ((Get-Item $dst).Length -gt 4096)) {
+                Write-Host "[INFO] Downloaded source installer from branch: $b"
+                return $dst
+            }
+        } catch {
+        }
+    }
+
+    return ""
+}
 
 $xuiAssets = Join-Path $XuiHome "assets"
 $xuiBin = Join-Path $XuiHome "bin"
@@ -40,10 +110,12 @@ $xuiLogs = Join-Path $XuiHome "logs"
     New-Item -Path $_ -ItemType Directory -Force | Out-Null
 }
 
-$sourceScript = Join-Path $SourceRoot "xui11.sh.fixed.sh"
-if (-not (Test-Path $sourceScript)) {
-    throw "Source installer not found: $sourceScript"
+$sourceScript = Resolve-SourceInstallerPath -BaseRoot $SourceRoot -Branch $UpdateBranch
+if ([string]::IsNullOrWhiteSpace($sourceScript) -or (-not (Test-Path $sourceScript -PathType Leaf))) {
+    throw "Source installer not found. Looked in: $SourceRoot and nearby bundle folders. Expected xui11.sh.fixed.sh"
 }
+$resolvedSourceRoot = (Split-Path -Parent $sourceScript)
+Write-Host "[INFO] SourceScript: $sourceScript"
 
 $extractPy = Join-Path $PSScriptRoot "extract_xui_payload.py"
 if (-not (Test-Path $extractPy)) {
@@ -59,6 +131,9 @@ New-Item -Path $payloadDir -ItemType Directory -Force | Out-Null
 Write-Host "[INFO] Extracting payload from master installer..."
 $rc = Invoke-Python @($extractPy, "--source", $sourceScript, "--out", $payloadDir)
 if ($rc -ne 0) {
+    if ($rc -eq 9009) {
+        throw "Payload extraction failed (9009): Python launcher not executable. Install Python 3.10+ from python.org or disable App Execution Alias for python/python3."
+    }
     throw "Payload extraction failed with code $rc"
 }
 
@@ -89,7 +164,10 @@ if (Test-Path $updateCheckerSrc) {
 }
 
 $assetSources = @(
+    $resolvedSourceRoot,
     $SourceRoot,
+    (Join-Path $resolvedSourceRoot "assets"),
+    (Join-Path $resolvedSourceRoot "user_sounds"),
     (Join-Path $SourceRoot "assets"),
     (Join-Path $SourceRoot "user_sounds")
 )
@@ -123,7 +201,7 @@ $channelData = @{
     platform = "windows"
     branch = "$UpdateBranch"
     repo = "afitler79-alt/XUI-X360-FRONTEND"
-    source_dir = "$SourceRoot"
+    source_dir = "$resolvedSourceRoot"
     updated_at_epoch = [DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
 }
 $channelData | ConvertTo-Json -Depth 4 | Set-Content -Path $channelPath -Encoding UTF8

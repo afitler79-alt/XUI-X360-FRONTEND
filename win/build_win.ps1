@@ -59,6 +59,7 @@ foreach ($dirName in @("assets", "user_sounds")) {
 $winFiles = @(
     "install_xui_windows.ps1",
     "install_xui_windows.bat",
+    "install_xui_master.bat",
     "xui_start_windows.bat",
     "xui_update_check.py",
     "extract_xui_payload.py",
@@ -78,7 +79,7 @@ $rootInstallBat = Join-Path $bundleDir "install_xui_windows.bat"
 @'
 @echo off
 setlocal
-call "%~dp0win\install_xui_windows.bat" %*
+call "%~dp0win\install_xui_master.bat" %*
 '@ | Set-Content -Path $rootInstallBat -Encoding ASCII
 
 $rootReadme = Join-Path $bundleDir "README-WINDOWS.txt"
@@ -86,8 +87,8 @@ $rootReadme = Join-Path $bundleDir "README-WINDOWS.txt"
 XUI Windows Bundle
 ==================
 
-1) Install Python 3.10+ (Add to PATH).
-2) Run install_xui_windows.bat (in this folder).
+1) Run install_xui_windows.bat (in this folder).
+2) The master installer auto-checks and installs dependencies.
 3) After installation, launch %USERPROFILE%\.xui\bin\xui_start.bat
 '@ | Set-Content -Path $rootReadme -Encoding ASCII
 

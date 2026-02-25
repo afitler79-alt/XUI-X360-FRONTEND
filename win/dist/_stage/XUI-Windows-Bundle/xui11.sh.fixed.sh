@@ -491,7 +491,7 @@ STATE_FILE = DATA_HOME / "update_state.json"
 CHANNEL_FILE = DATA_HOME / "update_channel.json"
 SRC = Path(os.environ.get("XUI_SOURCE_DIR", str(XUI_HOME / "src" / "XUI-X360-FRONTEND"))).expanduser()
 INSTALLER_NAME = os.environ.get("XUI_UPDATE_INSTALLER", "win/install_xui_windows.ps1").strip() or "win/install_xui_windows.ps1"
-DEFAULT_BRANCH = os.environ.get("XUI_DEFAULT_UPDATE_BRANCH", "windows").strip() or "windows"
+DEFAULT_BRANCH = os.environ.get("XUI_DEFAULT_UPDATE_BRANCH", "Windows").strip() or "Windows"
 
 
 def ensure_data_home() -> None:
@@ -865,7 +865,7 @@ BAT
 Param(
     [string]$SourceRoot = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path,
     [string]$XuiHome = "$HOME\.xui",
-    [string]$UpdateBranch = "windows",
+    [string]$UpdateBranch = "Windows",
     [switch]$EnableAutostart,
     [switch]$SkipPip
 )
@@ -893,6 +893,54 @@ Write-Host "[INFO] XUI Windows installer"
 Write-Host "[INFO] SourceRoot: $SourceRoot"
 Write-Host "[INFO] XuiHome: $XuiHome"
 
+function Resolve-SourceInstallerPath {
+    param(
+        [Parameter(Mandatory = $true)][string]$BaseRoot,
+        [string]$Branch = "Windows"
+    )
+
+    $candidatePaths = @(
+        (Join-Path $BaseRoot "xui11.sh.fixed.sh"),
+        (Join-Path (Join-Path $PSScriptRoot "..") "xui11.sh.fixed.sh"),
+        (Join-Path (Join-Path $PSScriptRoot "..\..") "xui11.sh.fixed.sh"),
+        (Join-Path (Join-Path $PSScriptRoot "..\dist") "xui11.sh.fixed.sh")
+    )
+    foreach ($p in $candidatePaths) {
+        if (-not [string]::IsNullOrWhiteSpace($p) -and (Test-Path $p -PathType Leaf)) {
+            return (Resolve-Path $p).Path
+        }
+    }
+
+    try {
+        $near = Get-ChildItem -Path $BaseRoot -Filter "xui11.sh.fixed.sh" -File -Recurse -ErrorAction SilentlyContinue |
+            Sort-Object LastWriteTime -Descending |
+            Select-Object -First 1
+        if ($near -and (Test-Path $near.FullName -PathType Leaf)) {
+            return $near.FullName
+        }
+    } catch {
+    }
+
+    $branches = @($Branch, "Windows", "Main-XUI", "main")
+    $cacheDir = Join-Path $env:TEMP "xui-win-installer-cache"
+    New-Item -Path $cacheDir -ItemType Directory -Force | Out-Null
+    foreach ($b in $branches) {
+        if ([string]::IsNullOrWhiteSpace($b)) { continue }
+        $url = "https://raw.githubusercontent.com/afitler79-alt/XUI-X360-FRONTEND/$b/xui11.sh.fixed.sh"
+        $dst = Join-Path $cacheDir ("xui11.sh.fixed." + $b + ".sh")
+        try {
+            Invoke-WebRequest -Uri $url -OutFile $dst -TimeoutSec 30 -ErrorAction Stop
+            if ((Test-Path $dst -PathType Leaf) -and ((Get-Item $dst).Length -gt 4096)) {
+                Write-Host "[INFO] Downloaded source installer from branch: $b"
+                return $dst
+            }
+        } catch {
+        }
+    }
+
+    return ""
+}
+
 $xuiAssets = Join-Path $XuiHome "assets"
 $xuiBin = Join-Path $XuiHome "bin"
 $xuiDash = Join-Path $XuiHome "dashboard"
@@ -904,10 +952,12 @@ $xuiLogs = Join-Path $XuiHome "logs"
     New-Item -Path $_ -ItemType Directory -Force | Out-Null
 }
 
-$sourceScript = Join-Path $SourceRoot "xui11.sh.fixed.sh"
-if (-not (Test-Path $sourceScript)) {
-    throw "Source installer not found: $sourceScript"
+$sourceScript = Resolve-SourceInstallerPath -BaseRoot $SourceRoot -Branch $UpdateBranch
+if ([string]::IsNullOrWhiteSpace($sourceScript) -or (-not (Test-Path $sourceScript -PathType Leaf))) {
+    throw "Source installer not found. Looked in: $SourceRoot and nearby bundle folders. Expected xui11.sh.fixed.sh"
 }
+$resolvedSourceRoot = (Split-Path -Parent $sourceScript)
+Write-Host "[INFO] SourceScript: $sourceScript"
 
 $extractPy = Join-Path $PSScriptRoot "extract_xui_payload.py"
 if (-not (Test-Path $extractPy)) {
@@ -953,7 +1003,10 @@ if (Test-Path $updateCheckerSrc) {
 }
 
 $assetSources = @(
+    $resolvedSourceRoot,
     $SourceRoot,
+    (Join-Path $resolvedSourceRoot "assets"),
+    (Join-Path $resolvedSourceRoot "user_sounds"),
     (Join-Path $SourceRoot "assets"),
     (Join-Path $SourceRoot "user_sounds")
 )
@@ -980,14 +1033,14 @@ if (Test-Path $launcherTemplate) {
 Write-Host "[INFO] Launcher: $launcherDest"
 
 if ([string]::IsNullOrWhiteSpace($UpdateBranch)) {
-    $UpdateBranch = "windows"
+    $UpdateBranch = "Windows"
 }
 $channelPath = Join-Path $xuiData "update_channel.json"
 $channelData = @{
     platform = "windows"
     branch = "$UpdateBranch"
     repo = "afitler79-alt/XUI-X360-FRONTEND"
-    source_dir = "$SourceRoot"
+    source_dir = "$resolvedSourceRoot"
     updated_at_epoch = [DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
 }
 $channelData | ConvertTo-Json -Depth 4 | Set-Content -Path $channelPath -Encoding UTF8
@@ -1204,7 +1257,7 @@ Optional:
 Use a custom Windows update branch:
 
 ```powershell
-.\install_xui_windows.ps1 -UpdateBranch windows
+.\install_xui_windows.ps1 -UpdateBranch Windows
 ```
 
 One-click from cmd:
@@ -8818,6 +8871,7 @@ class Dashboard(QtWidgets.QMainWindow):
         self._last_hover_at = 0.0
         self._tab_animating = False
         self._tab_anim_group = None
+        self._tab_anim_watchdog = None
         self._visible_page_idx = 0
         self._last_responsive_key = None
         self._web_windows = []
@@ -8935,7 +8989,8 @@ class Dashboard(QtWidgets.QMainWindow):
         self.page_stack = QtWidgets.QStackedWidget()
         sl = self.page_stack.layout()
         if isinstance(sl, QtWidgets.QStackedLayout):
-            sl.setStackingMode(QtWidgets.QStackedLayout.StackAll)
+            # Keep a single visible page in steady state; StackAll is used only during tab animation.
+            sl.setStackingMode(QtWidgets.QStackedLayout.StackOne)
         for tab_name in self.tabs:
             page = DashboardPage(tab_name, self.page_specs[tab_name], self)
             page.actionTriggered.connect(self.handle_action)
@@ -9124,15 +9179,59 @@ class Dashboard(QtWidgets.QMainWindow):
         if idx is None:
             idx = self.page_stack.currentIndex()
         idx = max(0, min(int(idx), len(self.pages) - 1))
-        if (not self._tab_animating) and int(getattr(self, '_visible_page_idx', -1)) == idx:
-            page = self.pages[idx]
-            if page.pos() != QtCore.QPoint(0, 0):
-                page.move(0, 0)
-            return
+        try:
+            self.page_stack.setCurrentIndex(idx)
+        except Exception:
+            pass
+        sl = self.page_stack.layout()
+        if hasattr(sl, 'setStackingMode'):
+            try:
+                sl.setStackingMode(QtWidgets.QStackedLayout.StackOne)
+            except Exception:
+                pass
         for i, page in enumerate(self.pages):
             page.move(0, 0)
             page.setVisible(i == idx)
+            if i == idx:
+                page.raise_()
+            else:
+                try:
+                    page.setGraphicsEffect(None)
+                except Exception:
+                    pass
         self._visible_page_idx = idx
+
+    def _finish_tab_animation(self, to_idx, from_w=None, to_w=None, from_fx=None, to_fx=None):
+        to_idx = max(0, min(int(to_idx), len(self.pages) - 1))
+        try:
+            self.page_stack.setCurrentIndex(to_idx)
+        except Exception:
+            pass
+        self._normalize_page_visibility(to_idx)
+        try:
+            if from_w is not None:
+                from_w.setGraphicsEffect(None)
+        except Exception:
+            pass
+        try:
+            if to_w is not None:
+                to_w.setGraphicsEffect(None)
+        except Exception:
+            pass
+        self._tab_animating = False
+        self._tab_anim_group = None
+        wd = self._tab_anim_watchdog
+        self._tab_anim_watchdog = None
+        if wd is not None:
+            try:
+                wd.stop()
+            except Exception:
+                pass
+            try:
+                wd.deleteLater()
+            except Exception:
+                pass
+        self.update_focus()
 
     def _animate_tab_transition(self, from_idx, to_idx):
         if from_idx == to_idx:
@@ -9149,6 +9248,12 @@ class Dashboard(QtWidgets.QMainWindow):
         from_w = self.page_stack.widget(from_idx)
         to_w = self.page_stack.widget(to_idx)
         rect = self.page_stack.rect()
+        sl = self.page_stack.layout()
+        if hasattr(sl, 'setStackingMode'):
+            try:
+                sl.setStackingMode(QtWidgets.QStackedLayout.StackAll)
+            except Exception:
+                pass
         direction = 1 if to_idx > from_idx else -1
         # Xbox-like side blade movement, but compact to keep GPU/CPU cost low.
         travel = int(max(56, rect.width() * (0.20 if self._low_power_ui else 0.28)))
@@ -9209,18 +9314,16 @@ class Dashboard(QtWidgets.QMainWindow):
             self._tab_anim_group.addAnimation(fade_to)
 
         def done():
-            self.page_stack.setCurrentIndex(to_idx)
-            self._normalize_page_visibility(to_idx)
-            if from_fx is not None:
-                from_w.setGraphicsEffect(None)
-            if to_fx is not None:
-                to_w.setGraphicsEffect(None)
-            self._tab_animating = False
-            self._tab_anim_group = None
-            self.update_focus()
+            self._finish_tab_animation(to_idx, from_w, to_w, from_fx, to_fx)
 
         self._tab_anim_group.finished.connect(done)
         self._tab_anim_group.start(QtCore.QAbstractAnimation.DeleteWhenStopped)
+        watchdog = QtCore.QTimer(self)
+        watchdog.setSingleShot(True)
+        watchdog.setInterval(max(280, duration + 220))
+        watchdog.timeout.connect(lambda: self._finish_tab_animation(to_idx, from_w, to_w, from_fx, to_fx))
+        self._tab_anim_watchdog = watchdog
+        watchdog.start()
 
     def _switch_tab(self, idx, animate=True, keep_tabs_focus=False):
         idx = max(0, min(idx, len(self.tabs) - 1))
@@ -9249,6 +9352,8 @@ class Dashboard(QtWidgets.QMainWindow):
         self._play_sfx('open')
 
     def update_focus(self):
+        if not self._tab_animating:
+            self._normalize_page_visibility(self.tab_idx)
         self.top_tabs.set_current(self.tab_idx)
         tab_name = self.tabs[self.tab_idx]
         page = self._current_page()
@@ -20652,7 +20757,7 @@ SRC="${XUI_SOURCE_DIR:-$HOME/.xui/src/XUI-X360-FRONTEND}"
 INSTALLER_NAME="${XUI_UPDATE_INSTALLER:-xui11.sh.fixed.sh}"
 STATE_FILE="$HOME/.xui/data/update_state.json"
 CHANNEL_FILE="$HOME/.xui/data/update_channel.json"
-DEFAULT_BRANCH="${XUI_DEFAULT_UPDATE_BRANCH:-linux}"
+DEFAULT_BRANCH="${XUI_DEFAULT_UPDATE_BRANCH:-Main-XUI}"
 mkdir -p "$(dirname "$STATE_FILE")"
 
 require_cmd(){
@@ -27311,7 +27416,7 @@ finish_setup(){
   chmod +x "$BIN_DIR/xui_joy_listener.py" || true
   touch "$XUI_DIR/.xui_4_0xv_setup_done"
   if command -v python3 >/dev/null 2>&1; then
-    python3 - "$DATA_DIR/update_channel.json" "${XUI_LINUX_UPDATE_BRANCH:-linux}" <<'PY' >/dev/null 2>&1 || true
+    python3 - "$DATA_DIR/update_channel.json" "${XUI_LINUX_UPDATE_BRANCH:-Main-XUI}" <<'PY' >/dev/null 2>&1 || true
 import json,sys,time,pathlib
 path=pathlib.Path(sys.argv[1])
 branch=str(sys.argv[2] or "linux").strip() or "linux"

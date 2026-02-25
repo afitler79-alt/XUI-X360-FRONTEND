@@ -1,7 +1,7 @@
 Param(
     [string]$SourceRoot = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path,
     [string]$XuiHome = "$HOME\.xui",
-    [string]$UpdateBranch = "windows",
+    [string]$UpdateBranch = "Windows",
     [switch]$EnableAutostart,
     [switch]$SkipPip
 )
@@ -29,6 +29,54 @@ Write-Host "[INFO] XUI Windows installer"
 Write-Host "[INFO] SourceRoot: $SourceRoot"
 Write-Host "[INFO] XuiHome: $XuiHome"
 
+function Resolve-SourceInstallerPath {
+    param(
+        [Parameter(Mandatory = $true)][string]$BaseRoot,
+        [string]$Branch = "Windows"
+    )
+
+    $candidatePaths = @(
+        (Join-Path $BaseRoot "xui11.sh.fixed.sh"),
+        (Join-Path (Join-Path $PSScriptRoot "..") "xui11.sh.fixed.sh"),
+        (Join-Path (Join-Path $PSScriptRoot "..\..") "xui11.sh.fixed.sh"),
+        (Join-Path (Join-Path $PSScriptRoot "..\dist") "xui11.sh.fixed.sh")
+    )
+    foreach ($p in $candidatePaths) {
+        if (-not [string]::IsNullOrWhiteSpace($p) -and (Test-Path $p -PathType Leaf)) {
+            return (Resolve-Path $p).Path
+        }
+    }
+
+    try {
+        $near = Get-ChildItem -Path $BaseRoot -Filter "xui11.sh.fixed.sh" -File -Recurse -ErrorAction SilentlyContinue |
+            Sort-Object LastWriteTime -Descending |
+            Select-Object -First 1
+        if ($near -and (Test-Path $near.FullName -PathType Leaf)) {
+            return $near.FullName
+        }
+    } catch {
+    }
+
+    $branches = @($Branch, "Windows", "Main-XUI", "main")
+    $cacheDir = Join-Path $env:TEMP "xui-win-installer-cache"
+    New-Item -Path $cacheDir -ItemType Directory -Force | Out-Null
+    foreach ($b in $branches) {
+        if ([string]::IsNullOrWhiteSpace($b)) { continue }
+        $url = "https://raw.githubusercontent.com/afitler79-alt/XUI-X360-FRONTEND/$b/xui11.sh.fixed.sh"
+        $dst = Join-Path $cacheDir ("xui11.sh.fixed." + $b + ".sh")
+        try {
+            Invoke-WebRequest -Uri $url -OutFile $dst -TimeoutSec 30 -ErrorAction Stop
+            if ((Test-Path $dst -PathType Leaf) -and ((Get-Item $dst).Length -gt 4096)) {
+                Write-Host "[INFO] Downloaded source installer from branch: $b"
+                return $dst
+            }
+        } catch {
+        }
+    }
+
+    return ""
+}
+
 $xuiAssets = Join-Path $XuiHome "assets"
 $xuiBin = Join-Path $XuiHome "bin"
 $xuiDash = Join-Path $XuiHome "dashboard"
@@ -40,10 +88,12 @@ $xuiLogs = Join-Path $XuiHome "logs"
     New-Item -Path $_ -ItemType Directory -Force | Out-Null
 }
 
-$sourceScript = Join-Path $SourceRoot "xui11.sh.fixed.sh"
-if (-not (Test-Path $sourceScript)) {
-    throw "Source installer not found: $sourceScript"
+$sourceScript = Resolve-SourceInstallerPath -BaseRoot $SourceRoot -Branch $UpdateBranch
+if ([string]::IsNullOrWhiteSpace($sourceScript) -or (-not (Test-Path $sourceScript -PathType Leaf))) {
+    throw "Source installer not found. Looked in: $SourceRoot and nearby bundle folders. Expected xui11.sh.fixed.sh"
 }
+$resolvedSourceRoot = (Split-Path -Parent $sourceScript)
+Write-Host "[INFO] SourceScript: $sourceScript"
 
 $extractPy = Join-Path $PSScriptRoot "extract_xui_payload.py"
 if (-not (Test-Path $extractPy)) {
@@ -89,7 +139,10 @@ if (Test-Path $updateCheckerSrc) {
 }
 
 $assetSources = @(
+    $resolvedSourceRoot,
     $SourceRoot,
+    (Join-Path $resolvedSourceRoot "assets"),
+    (Join-Path $resolvedSourceRoot "user_sounds"),
     (Join-Path $SourceRoot "assets"),
     (Join-Path $SourceRoot "user_sounds")
 )
@@ -116,14 +169,14 @@ if (Test-Path $launcherTemplate) {
 Write-Host "[INFO] Launcher: $launcherDest"
 
 if ([string]::IsNullOrWhiteSpace($UpdateBranch)) {
-    $UpdateBranch = "windows"
+    $UpdateBranch = "Windows"
 }
 $channelPath = Join-Path $xuiData "update_channel.json"
 $channelData = @{
     platform = "windows"
     branch = "$UpdateBranch"
     repo = "afitler79-alt/XUI-X360-FRONTEND"
-    source_dir = "$SourceRoot"
+    source_dir = "$resolvedSourceRoot"
     updated_at_epoch = [DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
 }
 $channelData | ConvertTo-Json -Depth 4 | Set-Content -Path $channelPath -Encoding UTF8

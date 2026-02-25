@@ -4,6 +4,7 @@ This folder is generated from the master installer `xui11.sh.fixed.sh`.
 
 ## Files
 
+- `install_xui_master.bat`: master installer (dependency bootstrap + XUI install)
 - `install_xui_windows.ps1`: installs XUI on Windows under `%USERPROFILE%\.xui`
 - `install_xui_windows.bat`: one-click launcher for the PowerShell installer
 - `xui_start_windows.bat`: launcher used by the installer
@@ -12,7 +13,13 @@ This folder is generated from the master installer `xui11.sh.fixed.sh`.
 - `build_win.ps1`: creates a distributable ZIP bundle with everything needed
 - `build_win.bat`: one-click launcher for `build_win.ps1`
 
-## Install (PowerShell)
+## Install (Recommended)
+
+```bat
+install_xui_master.bat
+```
+
+## Install (PowerShell direct)
 
 ```powershell
 Set-ExecutionPolicy -Scope Process Bypass -Force

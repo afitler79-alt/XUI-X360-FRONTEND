@@ -17,7 +17,7 @@ STATE_FILE = DATA_HOME / "update_state.json"
 CHANNEL_FILE = DATA_HOME / "update_channel.json"
 SRC = Path(os.environ.get("XUI_SOURCE_DIR", str(XUI_HOME / "src" / "XUI-X360-FRONTEND"))).expanduser()
 INSTALLER_NAME = os.environ.get("XUI_UPDATE_INSTALLER", "win/install_xui_windows.ps1").strip() or "win/install_xui_windows.ps1"
-DEFAULT_BRANCH = os.environ.get("XUI_DEFAULT_UPDATE_BRANCH", "windows").strip() or "windows"
+DEFAULT_BRANCH = os.environ.get("XUI_DEFAULT_UPDATE_BRANCH", "Windows").strip() or "Windows"
 
 
 def ensure_data_home() -> None:
