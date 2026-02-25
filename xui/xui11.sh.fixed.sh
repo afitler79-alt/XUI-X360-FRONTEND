@@ -26,24 +26,30 @@ run_as_root(){
         "$@"
         return $?
     fi
+    if check_cmd sudo && sudo -n true >/dev/null 2>&1; then
+        sudo -n "$@"
+        return $?
+    fi
     if [ "${XUI_NONINTERACTIVE:-0}" = "1" ] || [ ! -t 0 ]; then
-        if check_cmd pkexec; then
+        if [ "${XUI_ALLOW_NONINTERACTIVE_PKEXEC:-0}" = "1" ] && check_cmd pkexec; then
             pkexec "$@"
             return $?
         fi
-        if check_cmd sudo; then
+        warn "non-interactive root unavailable (no cached sudo); skipping: $*"
+        return 1
+    fi
+    if check_cmd sudo; then
+        sudo -v >/dev/null 2>&1 || true
+        if sudo -n true >/dev/null 2>&1; then
             sudo -n "$@"
             return $?
         fi
-    else
-        if check_cmd sudo; then
-            sudo "$@"
-            return $?
-        fi
-        if check_cmd pkexec; then
-            pkexec "$@"
-            return $?
-        fi
+        sudo "$@"
+        return $?
+    fi
+    if check_cmd pkexec; then
+        pkexec "$@"
+        return $?
     fi
     warn "root privileges unavailable; cannot run: $*"
     return 1
@@ -112,6 +118,12 @@ apt_safe_install(){
 apt_install_each_best_effort(){
     local pkg
     local failed=0
+    if [ "${XUI_NONINTERACTIVE:-0}" = "1" ] || [ ! -t 0 ]; then
+        if ! check_cmd sudo || ! sudo -n true >/dev/null 2>&1; then
+            warn "Skipping per-package apt retries to avoid repeated auth popups (cached sudo not available)"
+            return 1
+        fi
+    fi
     for pkg in "$@"; do
         if ! apt_safe_install "$pkg"; then
             warn "Failed apt package: $pkg"
@@ -296,6 +308,8 @@ parse_args(){
     XUI_APT_WAIT_SECONDS="${XUI_APT_WAIT_SECONDS:-180}"
     XUI_ONLY_REFRESH_STORE=0
     XUI_ONLY_REFRESH_CONTROLLERS=0
+    XUI_EXPORT_WIN=0
+    XUI_ONLY_EXPORT_WIN=0
     while [ "$#" -gt 0 ]; do
         case "$1" in
             --yes-install|-y)
@@ -333,19 +347,892 @@ parse_args(){
                 XUI_ONLY_REFRESH_CONTROLLERS=1
                 shift
                 ;;
+            --export-win|--windows-bundle)
+                XUI_EXPORT_WIN=1
+                shift
+                ;;
+            --export-win-only|--windows-only)
+                XUI_EXPORT_WIN=1
+                XUI_ONLY_EXPORT_WIN=1
+                shift
+                ;;
             --help|-h)
-                echo "Usage: $0 [--yes-install|-y] [--no-auto-install] [--use-external-dashboard] [--skip-apt-wait] [--apt-wait-seconds N] [--refresh-store-ui] [--refresh-controllers]"; exit 0 ;;
+                echo "Usage: $0 [--yes-install|-y] [--no-auto-install] [--use-external-dashboard] [--skip-apt-wait] [--apt-wait-seconds N] [--refresh-store-ui] [--refresh-controllers] [--export-win] [--export-win-only]"; exit 0 ;;
             *)
                 warn "Ignoring unknown argument: $1"
                 shift
                 ;;
         esac
     done
-    export AUTO_INSTALL_TOOLS XUI_INSTALL_SYSTEM XUI_USE_EXTERNAL_DASHBOARD XUI_SKIP_APT_WAIT XUI_APT_WAIT_SECONDS XUI_ONLY_REFRESH_STORE XUI_ONLY_REFRESH_CONTROLLERS
+    export AUTO_INSTALL_TOOLS XUI_INSTALL_SYSTEM XUI_USE_EXTERNAL_DASHBOARD XUI_SKIP_APT_WAIT XUI_APT_WAIT_SECONDS XUI_ONLY_REFRESH_STORE XUI_ONLY_REFRESH_CONTROLLERS XUI_EXPORT_WIN XUI_ONLY_EXPORT_WIN
 }
 
 ensure_dirs(){
   mkdir -p "$ASSETS_DIR" "$BIN_DIR" "$DASH_DIR" "$DATA_DIR" "$SYSTEMD_USER_DIR" "$AUTOSTART_DIR" || true
+}
+
+write_windows_bundle(){
+    local script_dir win_dir
+    script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+    win_dir="$script_dir/win"
+    mkdir -p "$win_dir"
+    info "Writing Windows bundle to $win_dir"
+
+    cat > "$win_dir/extract_xui_payload.py" <<'PY'
+#!/usr/bin/env python3
+import argparse
+import json
+import re
+import sys
+from pathlib import Path
+
+TARGETS = [
+    ("$DASH_DIR/pyqt_dashboard_improved.py", "pyqt_dashboard_improved.py", True),
+    ("$BIN_DIR/xui_webhub.py", "xui_webhub.py", True),
+    ("$BIN_DIR/xui_social_chat.py", "xui_social_chat.py", True),
+    ("$GAMES_DIR/store.py", "xui_store_modern.py", True),
+    ("$BIN_DIR/xui_global_guide.py", "xui_global_guide.py", True),
+    ("$BIN_DIR/xui_first_setup.py", "xui_first_setup.py", False),
+    ("$BIN_DIR/xui_game_lib.py", "xui_game_lib.py", False),
+    ("$BIN_DIR/xui_web_api.py", "xui_web_api.py", False),
+]
+
+
+def extract_last_heredoc(src_text: str, target_path: str):
+    pattern = re.compile(
+        r'cat > "' + re.escape(target_path) + r'" <<\'([^\']+)\'\n',
+        re.MULTILINE,
+    )
+    matches = list(pattern.finditer(src_text))
+    if not matches:
+        return None
+    m = matches[-1]
+    marker = m.group(1)
+    start = m.end()
+    end_token = f"\n{marker}\n"
+    end = src_text.find(end_token, start)
+    if end < 0:
+        raise RuntimeError(f"Heredoc marker not closed for {target_path} ({marker})")
+    payload = src_text[start:end]
+    if payload and not payload.endswith("\n"):
+        payload += "\n"
+    return payload
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser(description="Extract Windows payload from xui11.sh.fixed.sh")
+    ap.add_argument("--source", required=True, help="Path to xui11.sh.fixed.sh")
+    ap.add_argument("--out", required=True, help="Output directory")
+    args = ap.parse_args()
+
+    src = Path(args.source).expanduser().resolve()
+    out = Path(args.out).expanduser().resolve()
+    if not src.exists():
+        print(f"[ERROR] source not found: {src}", file=sys.stderr)
+        return 2
+    out.mkdir(parents=True, exist_ok=True)
+
+    text = src.read_text(encoding="utf-8", errors="replace")
+    extracted = {}
+    missing_required = []
+    for bash_target, out_name, required in TARGETS:
+        block = extract_last_heredoc(text, bash_target)
+        if block is None:
+            if required:
+                missing_required.append(bash_target)
+            continue
+        dst = out / out_name
+        dst.write_text(block, encoding="utf-8")
+        extracted[out_name] = {
+            "source_target": bash_target,
+            "size": len(block),
+            "lines": block.count("\n"),
+        }
+        print(f"[OK] extracted {out_name}")
+
+    if missing_required:
+        print("[ERROR] required targets were not found:", file=sys.stderr)
+        for item in missing_required:
+            print(f" - {item}", file=sys.stderr)
+        return 3
+
+    manifest = {
+        "source": str(src),
+        "files": extracted,
+        "count": len(extracted),
+    }
+    (out / "manifest.json").write_text(json.dumps(manifest, indent=2), encoding="utf-8")
+    print(f"[OK] manifest: {out / 'manifest.json'}")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
+PY
+    chmod +x "$win_dir/extract_xui_payload.py" || true
+
+    cat > "$win_dir/xui_update_check.py" <<'PY'
+#!/usr/bin/env python3
+import argparse
+import json
+import os
+import shutil
+import subprocess
+import sys
+import time
+import urllib.error
+import urllib.request
+from pathlib import Path
+
+REPO = os.environ.get("XUI_UPDATE_REPO", "afitler79-alt/XUI-X360-FRONTEND").strip() or "afitler79-alt/XUI-X360-FRONTEND"
+XUI_HOME = Path.home() / ".xui"
+DATA_HOME = XUI_HOME / "data"
+STATE_FILE = DATA_HOME / "update_state.json"
+CHANNEL_FILE = DATA_HOME / "update_channel.json"
+SRC = Path(os.environ.get("XUI_SOURCE_DIR", str(XUI_HOME / "src" / "XUI-X360-FRONTEND"))).expanduser()
+INSTALLER_NAME = os.environ.get("XUI_UPDATE_INSTALLER", "win/install_xui_windows.ps1").strip() or "win/install_xui_windows.ps1"
+DEFAULT_BRANCH = os.environ.get("XUI_DEFAULT_UPDATE_BRANCH", "windows").strip() or "windows"
+
+
+def ensure_data_home() -> None:
+    DATA_HOME.mkdir(parents=True, exist_ok=True)
+
+
+def read_state_commit() -> str:
+    if not STATE_FILE.exists():
+        return ""
+    try:
+        data = json.loads(STATE_FILE.read_text(encoding="utf-8"))
+    except Exception:
+        return ""
+    return str(data.get("installed_commit", "") or "").strip()
+
+
+def read_channel_branch() -> str:
+    if not CHANNEL_FILE.exists():
+        return ""
+    try:
+        data = json.loads(CHANNEL_FILE.read_text(encoding="utf-8"))
+    except Exception:
+        return ""
+    return str(data.get("branch", "") or "").strip()
+
+
+def resolve_branch() -> str:
+    env_branch = str(os.environ.get("XUI_UPDATE_BRANCH", "") or "").strip()
+    if env_branch:
+        return env_branch
+    file_branch = read_channel_branch()
+    if file_branch:
+        return file_branch
+    return DEFAULT_BRANCH
+
+
+TARGET_BRANCH = resolve_branch()
+
+
+def write_state(commit: str, branch: str, remote_date: str, src: Path) -> None:
+    ensure_data_home()
+    payload = {
+        "installed_commit": str(commit or ""),
+        "branch": str(branch or ""),
+        "remote_date": str(remote_date or ""),
+        "installed_at_epoch": int(time.time()),
+        "source_dir": str(src),
+        "version": 2,
+    }
+    STATE_FILE.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
+    print("state-updated")
+
+
+def fetch_json(url: str, timeout: int = 12):
+    req = urllib.request.Request(
+        url,
+        headers={
+            "Accept": "application/vnd.github+json",
+            "User-Agent": "xui-update-checker-win",
+        },
+    )
+    with urllib.request.urlopen(req, timeout=timeout) as resp:
+        raw = resp.read().decode("utf-8", errors="ignore")
+    return json.loads(raw)
+
+
+def remote_meta():
+    try:
+        branch = TARGET_BRANCH
+        commit = fetch_json(f"https://api.github.com/repos/{REPO}/commits/{branch}")
+        sha = str(commit.get("sha", "") or "").strip()
+        date = str((((commit.get("commit") or {}).get("committer") or {}).get("date")) or "")
+        html = str(commit.get("html_url", "") or "")
+        if not sha:
+            return {"ok": False, "error": "missing-remote-sha", "branch": branch}
+        return {
+            "ok": True,
+            "branch": branch,
+            "sha": sha,
+            "date": date,
+            "url": html,
+        }
+    except Exception as exc:
+        return {"ok": False, "error": str(exc), "branch": TARGET_BRANCH}
+
+
+def emit_json(checked: bool, required: bool, reason: str, branch: str, local_commit: str, remote_commit: str, remote_date: str, remote_url: str) -> None:
+    obj = {
+        "checked": bool(checked),
+        "mandatory": True,
+        "update_required": bool(required),
+        "reason": str(reason or ""),
+        "repo": REPO,
+        "branch": str(branch or ""),
+        "local_commit": str(local_commit or ""),
+        "remote_commit": str(remote_commit or ""),
+        "remote_date": str(remote_date or ""),
+        "remote_url": str(remote_url or ""),
+    }
+    print(json.dumps(obj, ensure_ascii=False))
+
+
+def compute_status(json_out: bool = False) -> int:
+    local_commit = read_state_commit()
+    if not local_commit and (SRC / ".git").exists() and shutil.which("git"):
+        try:
+            local_commit = subprocess.check_output(
+                ["git", "-C", str(SRC), "rev-parse", "HEAD"],
+                stderr=subprocess.DEVNULL,
+                text=True,
+            ).strip()
+        except Exception:
+            local_commit = ""
+
+    meta = remote_meta()
+    if not meta.get("ok"):
+        checked = False
+        required = False
+        reason = f"remote-unavailable:{meta.get('error', 'unknown')}"
+        branch = str(meta.get("branch") or TARGET_BRANCH)
+        remote_commit = ""
+        remote_date = ""
+        remote_url = ""
+    else:
+        checked = True
+        branch = str(meta.get("branch") or TARGET_BRANCH)
+        remote_commit = str(meta.get("sha") or "")
+        remote_date = str(meta.get("date") or "")
+        remote_url = str(meta.get("url") or "")
+        if not local_commit:
+            required = True
+            reason = "missing-local-version"
+        elif local_commit != remote_commit:
+            required = True
+            reason = "outdated"
+        else:
+            required = False
+            reason = "up-to-date"
+
+    if json_out:
+        emit_json(checked, required, reason, branch, local_commit, remote_commit, remote_date, remote_url)
+    else:
+        print(f"Repo: {REPO}")
+        print(f"Branch: {branch}")
+        print(f"Checked: {'yes' if checked else 'no'}")
+        print("Mandatory: yes")
+        print(f"Local commit: {local_commit or '<none>'}")
+        print(f"Remote commit: {remote_commit or '<unknown>'}")
+        if remote_date:
+            print(f"Remote date: {remote_date}")
+        if remote_url:
+            print(f"Remote URL: {remote_url}")
+        print(f"Update required: {'yes' if required else 'no'}")
+        print(f"Reason: {reason}")
+
+    return 10 if required else 0
+
+
+def run_stream(cmd, cwd=None) -> int:
+    proc = subprocess.Popen(
+        cmd,
+        cwd=str(cwd) if cwd else None,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+    )
+    assert proc.stdout is not None
+    for line in proc.stdout:
+        print(line.rstrip("\n"))
+    return int(proc.wait())
+
+
+def find_installer() -> Path:
+    candidates = [
+        INSTALLER_NAME,
+        "win/install_xui_windows.ps1",
+        "install_xui_windows.ps1",
+        "win/install_xui_windows.bat",
+        "install_xui_windows.bat",
+    ]
+    for item in candidates:
+        p = Path(item)
+        if not p.is_absolute():
+            p = SRC / p
+        if p.exists() and p.is_file():
+            return p
+    raise FileNotFoundError(f"Installer not found in repo: {SRC}")
+
+
+def apply_update() -> int:
+    git = shutil.which("git")
+    if not git:
+        print("git is required for apply mode")
+        return 1
+
+    meta = remote_meta()
+    if not meta.get("ok"):
+        print(f"Cannot reach GitHub metadata: {meta.get('error', 'unknown')}")
+        return 1
+    branch = str(meta.get("branch") or TARGET_BRANCH)
+    remote_commit = str(meta.get("sha") or "")
+    remote_date = str(meta.get("date") or "")
+
+    SRC.parent.mkdir(parents=True, exist_ok=True)
+    if not (SRC / ".git").exists():
+        print("step=git-clone")
+        rc = run_stream([git, "clone", f"https://github.com/{REPO}.git", str(SRC)])
+        if rc != 0:
+            return rc
+
+    print("step=git-fetch")
+    rc = run_stream([git, "-C", str(SRC), "fetch", "--all", "--prune"])
+    if rc != 0:
+        return rc
+    rc = run_stream([git, "-C", str(SRC), "checkout", "-B", branch, f"origin/{branch}"])
+    if rc != 0:
+        return rc
+    rc = run_stream([git, "-C", str(SRC), "reset", "--hard", f"origin/{branch}"])
+    if rc != 0:
+        return rc
+    run_stream([git, "-C", str(SRC), "clean", "-fd"])
+
+    installer = find_installer()
+    print("step=installer-start")
+    if installer.suffix.lower() == ".ps1":
+        ps = shutil.which("pwsh") or shutil.which("powershell")
+        if not ps:
+            print("PowerShell is required to run Windows installer")
+            return 1
+        cmd = [
+            ps,
+            "-NoProfile",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-File",
+            str(installer),
+            "-SourceRoot",
+            str(SRC),
+            "-SkipPip",
+        ]
+    elif installer.suffix.lower() in (".bat", ".cmd"):
+        cmd = ["cmd.exe", "/c", str(installer)]
+    else:
+        cmd = [str(installer)]
+    rc = run_stream(cmd, cwd=SRC)
+    print("step=installer-done")
+    if rc != 0:
+        print(f"Installer failed with code {rc}")
+        return rc
+
+    installed_commit = ""
+    try:
+        installed_commit = subprocess.check_output(
+            [git, "-C", str(SRC), "rev-parse", "HEAD"],
+            stderr=subprocess.DEVNULL,
+            text=True,
+        ).strip()
+    except Exception:
+        installed_commit = remote_commit
+
+    try:
+        write_state(installed_commit, branch, remote_date, SRC)
+        print("step=state-written")
+    except Exception:
+        print("warning=state-write-failed")
+
+    print("update-applied")
+    print(f"installed_commit={installed_commit}")
+    return 0
+
+
+def pull_only() -> int:
+    git = shutil.which("git")
+    if not git:
+        print("git is required for pull mode")
+        return 1
+    if not (SRC / ".git").exists():
+        print(f"No git repo at {SRC}")
+        return 1
+    rc = run_stream([git, "-C", str(SRC), "fetch", "--all", "--prune"])
+    if rc != 0:
+        return rc
+    return run_stream([git, "-C", str(SRC), "checkout", "-B", TARGET_BRANCH, f"origin/{TARGET_BRANCH}"])
+
+
+def release_info() -> int:
+    try:
+        info = fetch_json(f"https://api.github.com/repos/{REPO}/releases/latest")
+        print("Latest release:", str(info.get("tag_name") or "unknown"))
+        return 0
+    except Exception as exc:
+        print("Could not query latest release:", exc)
+        return 1
+
+
+def mark_current() -> int:
+    git = shutil.which("git")
+    if not git:
+        print("git is required for mark mode")
+        return 1
+    if not (SRC / ".git").exists():
+        print(f"No git repo at {SRC}")
+        return 1
+    commit = subprocess.check_output([git, "-C", str(SRC), "rev-parse", "HEAD"], text=True).strip()
+    branch = subprocess.check_output([git, "-C", str(SRC), "rev-parse", "--abbrev-ref", "HEAD"], text=True).strip()
+    write_state(commit, branch, "", SRC)
+    print(f"marked-installed={commit}")
+    return 0
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(add_help=False)
+    parser.add_argument("mode", nargs="?", default="status")
+    parser.add_argument("--json", action="store_true", dest="json_out")
+    args, _extra = parser.parse_known_args()
+    ensure_data_home()
+    mode = str(args.mode or "status").strip().lower()
+    if mode in ("status", "mandatory"):
+        return compute_status(json_out=bool(args.json_out))
+    if mode == "pull":
+        return pull_only()
+    if mode == "apply":
+        return apply_update()
+    if mode == "release":
+        return release_info()
+    if mode == "mark":
+        return mark_current()
+    print("Usage: xui_update_check.py {status|mandatory|pull|apply|release|mark} [--json]")
+    return 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
+PY
+    chmod +x "$win_dir/xui_update_check.py" || true
+
+    cat > "$win_dir/xui_start_windows.bat" <<'BAT'
+@echo off
+setlocal
+set "XUI_HOME=%USERPROFILE%\.xui"
+set "DASH_PY=%XUI_HOME%\dashboard\pyqt_dashboard_improved.py"
+
+if not exist "%DASH_PY%" (
+  echo [XUI] Missing dashboard: %DASH_PY%
+  exit /b 1
+)
+
+set "QTWEBENGINE_CHROMIUM_FLAGS=--renderer-process-limit=2 --disk-cache-size=16777216 --media-cache-size=8388608 --disable-background-networking --disable-component-update --enable-low-end-device-mode"
+set "QTWEBENGINE_DISABLE_SANDBOX=1"
+set "QT_OPENGL=software"
+
+where py >nul 2>nul
+if %errorlevel%==0 (
+  py -3 "%DASH_PY%" %*
+  exit /b %errorlevel%
+)
+
+where python >nul 2>nul
+if %errorlevel%==0 (
+  python "%DASH_PY%" %*
+  exit /b %errorlevel%
+)
+
+echo [XUI] Python 3 not found. Install Python 3.10+ and run install_xui_windows.ps1 again.
+exit /b 1
+BAT
+
+    cat > "$win_dir/install_xui_windows.ps1" <<'PS1'
+Param(
+    [string]$SourceRoot = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path,
+    [string]$XuiHome = "$HOME\.xui",
+    [string]$UpdateBranch = "windows",
+    [switch]$EnableAutostart,
+    [switch]$SkipPip
+)
+
+$ErrorActionPreference = "Stop"
+
+function Invoke-Python {
+    param([string[]]$Args)
+    if (Get-Command py -ErrorAction SilentlyContinue) {
+        & py -3 @Args
+        return $LASTEXITCODE
+    }
+    if (Get-Command python -ErrorAction SilentlyContinue) {
+        & python @Args
+        return $LASTEXITCODE
+    }
+    if (Get-Command python3 -ErrorAction SilentlyContinue) {
+        & python3 @Args
+        return $LASTEXITCODE
+    }
+    throw "Python 3 not found in PATH."
+}
+
+Write-Host "[INFO] XUI Windows installer"
+Write-Host "[INFO] SourceRoot: $SourceRoot"
+Write-Host "[INFO] XuiHome: $XuiHome"
+
+$xuiAssets = Join-Path $XuiHome "assets"
+$xuiBin = Join-Path $XuiHome "bin"
+$xuiDash = Join-Path $XuiHome "dashboard"
+$xuiData = Join-Path $XuiHome "data"
+$xuiGames = Join-Path $XuiHome "games"
+$xuiLogs = Join-Path $XuiHome "logs"
+
+@($XuiHome, $xuiAssets, $xuiBin, $xuiDash, $xuiData, $xuiGames, $xuiLogs) | ForEach-Object {
+    New-Item -Path $_ -ItemType Directory -Force | Out-Null
+}
+
+$sourceScript = Join-Path $SourceRoot "xui11.sh.fixed.sh"
+if (-not (Test-Path $sourceScript)) {
+    throw "Source installer not found: $sourceScript"
+}
+
+$extractPy = Join-Path $PSScriptRoot "extract_xui_payload.py"
+if (-not (Test-Path $extractPy)) {
+    throw "Extractor not found: $extractPy"
+}
+
+$payloadDir = Join-Path $PSScriptRoot "payload"
+if (Test-Path $payloadDir) {
+    Remove-Item -Path $payloadDir -Recurse -Force
+}
+New-Item -Path $payloadDir -ItemType Directory -Force | Out-Null
+
+Write-Host "[INFO] Extracting payload from master installer..."
+$rc = Invoke-Python @($extractPy, "--source", $sourceScript, "--out", $payloadDir)
+if ($rc -ne 0) {
+    throw "Payload extraction failed with code $rc"
+}
+
+$fileMap = @{
+    "pyqt_dashboard_improved.py" = (Join-Path $xuiDash "pyqt_dashboard_improved.py")
+    "xui_webhub.py" = (Join-Path $xuiBin "xui_webhub.py")
+    "xui_social_chat.py" = (Join-Path $xuiBin "xui_social_chat.py")
+    "xui_store_modern.py" = (Join-Path $xuiBin "xui_store_modern.py")
+    "xui_global_guide.py" = (Join-Path $xuiBin "xui_global_guide.py")
+    "xui_first_setup.py" = (Join-Path $xuiBin "xui_first_setup.py")
+    "xui_game_lib.py" = (Join-Path $xuiBin "xui_game_lib.py")
+    "xui_web_api.py" = (Join-Path $xuiBin "xui_web_api.py")
+}
+
+foreach ($name in $fileMap.Keys) {
+    $src = Join-Path $payloadDir $name
+    if (Test-Path $src) {
+        Copy-Item -Path $src -Destination $fileMap[$name] -Force
+        Write-Host "[OK] $name"
+    }
+}
+
+$updateCheckerSrc = Join-Path $PSScriptRoot "xui_update_check.py"
+$updateCheckerDst = Join-Path $xuiBin "xui_update_check.py"
+if (Test-Path $updateCheckerSrc) {
+    Copy-Item -Path $updateCheckerSrc -Destination $updateCheckerDst -Force
+    Write-Host "[OK] xui_update_check.py"
+}
+
+$assetSources = @(
+    $SourceRoot,
+    (Join-Path $SourceRoot "assets"),
+    (Join-Path $SourceRoot "user_sounds")
+)
+$assetPatterns = @("*.png", "*.mp3", "*.mp4", "*.webp", "*.jpg", "*.jpeg", "*.gif", "*.svg", "*.wav")
+foreach ($srcDir in $assetSources) {
+    if (-not (Test-Path $srcDir)) {
+        continue
+    }
+    foreach ($pat in $assetPatterns) {
+        Get-ChildItem -Path $srcDir -Filter $pat -File -ErrorAction SilentlyContinue | ForEach-Object {
+            Copy-Item -Path $_.FullName -Destination $xuiAssets -Force
+        }
+    }
+}
+Write-Host "[INFO] Assets synced to $xuiAssets"
+
+$launcherTemplate = Join-Path $PSScriptRoot "xui_start_windows.bat"
+$launcherDest = Join-Path $xuiBin "xui_start.bat"
+if (Test-Path $launcherTemplate) {
+    Copy-Item -Path $launcherTemplate -Destination $launcherDest -Force
+} else {
+    "@echo off`r`npy -3 `"%USERPROFILE%\.xui\dashboard\pyqt_dashboard_improved.py`"" | Set-Content -Path $launcherDest -Encoding ASCII
+}
+Write-Host "[INFO] Launcher: $launcherDest"
+
+if ([string]::IsNullOrWhiteSpace($UpdateBranch)) {
+    $UpdateBranch = "windows"
+}
+$channelPath = Join-Path $xuiData "update_channel.json"
+$channelData = @{
+    platform = "windows"
+    branch = "$UpdateBranch"
+    repo = "afitler79-alt/XUI-X360-FRONTEND"
+    source_dir = "$SourceRoot"
+    updated_at_epoch = [DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
+}
+$channelData | ConvertTo-Json -Depth 4 | Set-Content -Path $channelPath -Encoding UTF8
+Write-Host "[INFO] Update channel configured: $UpdateBranch"
+
+if (-not $SkipPip) {
+    Write-Host "[INFO] Installing Python dependencies..."
+    $rc = Invoke-Python @("-m", "pip", "install", "--upgrade", "pip", "setuptools", "wheel")
+    if ($rc -ne 0) { Write-Warning "pip bootstrap failed ($rc)" }
+    $rc = Invoke-Python @("-m", "pip", "install", "PyQt5", "PyQtWebEngine", "Pillow", "pygame", "requests", "psutil")
+    if ($rc -ne 0) { Write-Warning "some Python deps could not be installed ($rc)" }
+}
+
+try {
+    $desktop = [Environment]::GetFolderPath("Desktop")
+    $shortcutPath = Join-Path $desktop "XUI Dashboard.lnk"
+    $wsh = New-Object -ComObject WScript.Shell
+    $shortcut = $wsh.CreateShortcut($shortcutPath)
+    $shortcut.TargetPath = $launcherDest
+    $shortcut.WorkingDirectory = $xuiBin
+    $shortcut.IconLocation = "$env:SystemRoot\System32\shell32.dll,220"
+    $shortcut.Save()
+    Write-Host "[INFO] Desktop shortcut created: $shortcutPath"
+} catch {
+    Write-Warning "Could not create desktop shortcut: $($_.Exception.Message)"
+}
+
+if ($EnableAutostart) {
+    $runKey = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Run"
+    New-ItemProperty -Path $runKey -Name "XUI-Dashboard" -Value "`"$launcherDest`"" -PropertyType String -Force | Out-Null
+    Write-Host "[INFO] Autostart enabled."
+}
+
+Write-Host ""
+Write-Host "[DONE] XUI Windows integration installed."
+Write-Host "Run: $launcherDest"
+PS1
+
+    cat > "$win_dir/install_xui_windows.bat" <<'BAT'
+@echo off
+setlocal
+set "SELF_DIR=%~dp0"
+set "PS1=%SELF_DIR%install_xui_windows.ps1"
+
+if not exist "%PS1%" (
+  echo [XUI] Missing installer: %PS1%
+  exit /b 1
+)
+
+where pwsh >nul 2>nul
+if %errorlevel%==0 (
+  pwsh -NoProfile -ExecutionPolicy Bypass -File "%PS1%" %*
+  exit /b %errorlevel%
+)
+
+powershell -NoProfile -ExecutionPolicy Bypass -File "%PS1%" %*
+exit /b %errorlevel%
+BAT
+
+    cat > "$win_dir/build_win.ps1" <<'PS1'
+Param(
+    [string]$SourceRoot = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path,
+    [string]$OutDir = (Join-Path $PSScriptRoot "dist"),
+    [string]$BundleName = "XUI-Windows-Bundle"
+)
+
+$ErrorActionPreference = "Stop"
+
+function Copy-IfExists {
+    param(
+        [Parameter(Mandatory = $true)][string]$Path,
+        [Parameter(Mandatory = $true)][string]$Destination
+    )
+    if (Test-Path $Path) {
+        Copy-Item -Path $Path -Destination $Destination -Recurse -Force
+        return $true
+    }
+    return $false
+}
+
+Write-Host "[INFO] Building Windows distribution bundle..."
+Write-Host "[INFO] SourceRoot: $SourceRoot"
+Write-Host "[INFO] OutDir: $OutDir"
+
+$required = @("xui11.sh.fixed.sh")
+foreach ($f in $required) {
+    $p = Join-Path $SourceRoot $f
+    if (-not (Test-Path $p)) {
+        throw "Missing required file: $p"
+    }
+}
+
+$stageDir = Join-Path $OutDir "_stage"
+$bundleDir = Join-Path $stageDir $BundleName
+$bundleWinDir = Join-Path $bundleDir "win"
+
+if (Test-Path $bundleDir) {
+    Remove-Item -Path $bundleDir -Recurse -Force
+}
+New-Item -Path $bundleWinDir -ItemType Directory -Force | Out-Null
+
+Copy-Item -Path (Join-Path $SourceRoot "xui11.sh.fixed.sh") -Destination (Join-Path $bundleDir "xui11.sh.fixed.sh") -Force
+
+$topAssetPatterns = @("*.png", "*.mp3", "*.mp4", "*.webp", "*.jpg", "*.jpeg", "*.gif", "*.svg", "*.wav")
+foreach ($pat in $topAssetPatterns) {
+    Get-ChildItem -Path $SourceRoot -Filter $pat -File -ErrorAction SilentlyContinue | ForEach-Object {
+        Copy-Item -Path $_.FullName -Destination $bundleDir -Force
+    }
+}
+
+foreach ($dirName in @("assets", "user_sounds")) {
+    $srcDir = Join-Path $SourceRoot $dirName
+    $dstDir = Join-Path $bundleDir $dirName
+    if (Test-Path $srcDir) {
+        Copy-Item -Path $srcDir -Destination $dstDir -Recurse -Force
+    }
+}
+
+$winFiles = @(
+    "install_xui_windows.ps1",
+    "install_xui_windows.bat",
+    "xui_start_windows.bat",
+    "xui_update_check.py",
+    "extract_xui_payload.py",
+    "README.md",
+    "build_win.ps1",
+    "build_win.bat"
+)
+foreach ($f in $winFiles) {
+    $src = Join-Path $PSScriptRoot $f
+    if (-not (Test-Path $src)) {
+        throw "Missing win file: $src"
+    }
+    Copy-Item -Path $src -Destination (Join-Path $bundleWinDir $f) -Force
+}
+
+$rootInstallBat = Join-Path $bundleDir "install_xui_windows.bat"
+@'
+@echo off
+setlocal
+call "%~dp0win\install_xui_windows.bat" %*
+'@ | Set-Content -Path $rootInstallBat -Encoding ASCII
+
+$rootReadme = Join-Path $bundleDir "README-WINDOWS.txt"
+@'
+XUI Windows Bundle
+==================
+
+1) Install Python 3.10+ (Add to PATH).
+2) Run install_xui_windows.bat (in this folder).
+3) After installation, launch %USERPROFILE%\.xui\bin\xui_start.bat
+'@ | Set-Content -Path $rootReadme -Encoding ASCII
+
+New-Item -Path $OutDir -ItemType Directory -Force | Out-Null
+$timestamp = Get-Date -Format "yyyyMMdd-HHmmss"
+$zipPath = Join-Path $OutDir "$BundleName-$timestamp.zip"
+if (Test-Path $zipPath) {
+    Remove-Item -Path $zipPath -Force
+}
+
+Compress-Archive -Path $bundleDir -DestinationPath $zipPath -CompressionLevel Optimal -Force
+Write-Host "[DONE] Bundle created: $zipPath"
+PS1
+
+    cat > "$win_dir/build_win.bat" <<'BAT'
+@echo off
+setlocal
+set "SELF_DIR=%~dp0"
+set "PS1=%SELF_DIR%build_win.ps1"
+
+if not exist "%PS1%" (
+  echo [XUI] Missing build script: %PS1%
+  exit /b 1
+)
+
+where pwsh >nul 2>nul
+if %errorlevel%==0 (
+  pwsh -NoProfile -ExecutionPolicy Bypass -File "%PS1%" %*
+  exit /b %errorlevel%
+)
+
+powershell -NoProfile -ExecutionPolicy Bypass -File "%PS1%" %*
+exit /b %errorlevel%
+BAT
+
+    cat > "$win_dir/README.md" <<'MD'
+# XUI Windows Integration
+
+This folder is generated from the master installer `xui11.sh.fixed.sh`.
+
+## Files
+
+- `install_xui_windows.ps1`: installs XUI on Windows under `%USERPROFILE%\.xui`
+- `install_xui_windows.bat`: one-click launcher for the PowerShell installer
+- `xui_start_windows.bat`: launcher used by the installer
+- `xui_update_check.py`: mandatory update checker for Windows branch
+- `extract_xui_payload.py`: extracts Python payloads from `xui11.sh.fixed.sh`
+- `build_win.ps1`: creates a distributable ZIP bundle with everything needed
+- `build_win.bat`: one-click launcher for `build_win.ps1`
+
+## Install (PowerShell)
+
+```powershell
+Set-ExecutionPolicy -Scope Process Bypass -Force
+.\install_xui_windows.ps1
+```
+
+Optional:
+
+```powershell
+.\install_xui_windows.ps1 -EnableAutostart
+```
+
+Use a custom Windows update branch:
+
+```powershell
+.\install_xui_windows.ps1 -UpdateBranch windows
+```
+
+One-click from cmd:
+
+```bat
+install_xui_windows.bat
+```
+
+## Build distributable ZIP (Windows)
+
+```powershell
+.\build_win.ps1
+```
+
+or:
+
+```bat
+build_win.bat
+```
+
+## Regenerate this folder from Linux master
+
+```bash
+bash xui11.sh.fixed.sh --export-win-only
+```
+MD
+
+    info "Windows bundle ready in: $win_dir"
 }
 
 # Minimal safe stubs for functions that may be referenced later in the script but
@@ -435,17 +1322,30 @@ fi
 BASH
     chmod +x "$BIN_DIR/xui_run_x86.sh"
 
-    cat > "$BIN_DIR/xui_install_box64.sh" <<'BASH'
+cat > "$BIN_DIR/xui_install_box64.sh" <<'BASH'
 #!/usr/bin/env bash
 set -euo pipefail
 as_root(){
   if [ "$(id -u)" -eq 0 ]; then "$@"; return $?; fi
+  if command -v sudo >/dev/null 2>&1 && sudo -n true >/dev/null 2>&1; then
+    sudo -n "$@"; return $?
+  fi
   if [ "${XUI_NONINTERACTIVE:-0}" = "1" ] || [ ! -t 0 ]; then
-    if command -v pkexec >/dev/null 2>&1; then pkexec "$@"; return $?; fi
-    if command -v sudo >/dev/null 2>&1; then sudo -n "$@"; return $?; fi
-  else
-    if command -v sudo >/dev/null 2>&1; then sudo "$@"; return $?; fi
-    if command -v pkexec >/dev/null 2>&1; then pkexec "$@"; return $?; fi
+    if [ "${XUI_ALLOW_NONINTERACTIVE_PKEXEC:-0}" = "1" ] && command -v pkexec >/dev/null 2>&1; then
+      pkexec "$@"; return $?
+    fi
+    echo "non-interactive root unavailable (no cached sudo): $*" >&2
+    return 1
+  fi
+  if command -v sudo >/dev/null 2>&1; then
+    sudo -v >/dev/null 2>&1 || true
+    if sudo -n true >/dev/null 2>&1; then
+      sudo -n "$@"; return $?
+    fi
+    sudo "$@"; return $?
+  fi
+  if command -v pkexec >/dev/null 2>&1; then
+    pkexec "$@"; return $?
   fi
   echo "root privileges unavailable: $*" >&2
   return 1
@@ -490,17 +1390,30 @@ exit 1
 BASH
     chmod +x "$BIN_DIR/xui_install_box64.sh"
 
-    cat > "$BIN_DIR/xui_install_steam.sh" <<'BASH'
+cat > "$BIN_DIR/xui_install_steam.sh" <<'BASH'
 #!/usr/bin/env bash
 set -euo pipefail
 as_root(){
   if [ "$(id -u)" -eq 0 ]; then "$@"; return $?; fi
+  if command -v sudo >/dev/null 2>&1 && sudo -n true >/dev/null 2>&1; then
+    sudo -n "$@"; return $?
+  fi
   if [ "${XUI_NONINTERACTIVE:-0}" = "1" ] || [ ! -t 0 ]; then
-    if command -v pkexec >/dev/null 2>&1; then pkexec "$@"; return $?; fi
-    if command -v sudo >/dev/null 2>&1; then sudo -n "$@"; return $?; fi
-  else
-    if command -v sudo >/dev/null 2>&1; then sudo "$@"; return $?; fi
-    if command -v pkexec >/dev/null 2>&1; then pkexec "$@"; return $?; fi
+    if [ "${XUI_ALLOW_NONINTERACTIVE_PKEXEC:-0}" = "1" ] && command -v pkexec >/dev/null 2>&1; then
+      pkexec "$@"; return $?
+    fi
+    echo "non-interactive root unavailable (no cached sudo): $*" >&2
+    return 1
+  fi
+  if command -v sudo >/dev/null 2>&1; then
+    sudo -v >/dev/null 2>&1 || true
+    if sudo -n true >/dev/null 2>&1; then
+      sudo -n "$@"; return $?
+    fi
+    sudo "$@"; return $?
+  fi
+  if command -v pkexec >/dev/null 2>&1; then
+    pkexec "$@"; return $?
   fi
   echo "root privileges unavailable: $*" >&2
   return 1
@@ -653,17 +1566,30 @@ exit 1
 BASH
     chmod +x "$BIN_DIR/xui_steam.sh"
 
-    cat > "$BIN_DIR/xui_install_wine.sh" <<'BASH'
+cat > "$BIN_DIR/xui_install_wine.sh" <<'BASH'
 #!/usr/bin/env bash
 set -euo pipefail
 as_root(){
   if [ "$(id -u)" -eq 0 ]; then "$@"; return $?; fi
+  if command -v sudo >/dev/null 2>&1 && sudo -n true >/dev/null 2>&1; then
+    sudo -n "$@"; return $?
+  fi
   if [ "${XUI_NONINTERACTIVE:-0}" = "1" ] || [ ! -t 0 ]; then
-    if command -v pkexec >/dev/null 2>&1; then pkexec "$@"; return $?; fi
-    if command -v sudo >/dev/null 2>&1; then sudo -n "$@"; return $?; fi
-  else
-    if command -v sudo >/dev/null 2>&1; then sudo "$@"; return $?; fi
-    if command -v pkexec >/dev/null 2>&1; then pkexec "$@"; return $?; fi
+    if [ "${XUI_ALLOW_NONINTERACTIVE_PKEXEC:-0}" = "1" ] && command -v pkexec >/dev/null 2>&1; then
+      pkexec "$@"; return $?
+    fi
+    echo "non-interactive root unavailable (no cached sudo): $*" >&2
+    return 1
+  fi
+  if command -v sudo >/dev/null 2>&1; then
+    sudo -v >/dev/null 2>&1 || true
+    if sudo -n true >/dev/null 2>&1; then
+      sudo -n "$@"; return $?
+    fi
+    sudo "$@"; return $?
+  fi
+  if command -v pkexec >/dev/null 2>&1; then
+    pkexec "$@"; return $?
   fi
   echo "root privileges unavailable: $*" >&2
   return 1
@@ -1079,6 +2005,9 @@ import time
 import re
 import hashlib
 import shlex
+import base64
+import tempfile
+import gc
 import queue
 import socket
 import threading
@@ -1108,6 +2037,12 @@ WORLD_CHAT_FILE = DATA_HOME / 'world_chat.json'
 SOCIAL_MESSAGES_FILE = DATA_HOME / 'social_messages_recent.json'
 FRIEND_REQUESTS_FILE = DATA_HOME / 'friend_requests.json'
 BEACONS_FILE = DATA_HOME / 'beacons.json'
+SOCIAL_PROFILE_FILE = DATA_HOME / 'social_profile.json'
+PARTY_STATE_FILE = DATA_HOME / 'party_state.json'
+VOICE_INBOX_FILE = DATA_HOME / 'voice_inbox.json'
+VOICE_DIR = DATA_HOME / 'voice'
+_SOUND_LOOKUP_CACHE = {}
+_TILE_ICON_CACHE = {}
 
 sys.path.insert(0, str(XUI_HOME / 'bin'))
 try:
@@ -1124,8 +2059,20 @@ def play_media(path, video=False, blocking=False):
     p = Path(path)
     if not p.exists():
         return False
+    probes = getattr(play_media, '_probes', None)
+    if probes is None:
+        probes = {
+            'mpv': bool(shutil.which('mpv')),
+            'ffplay': bool(shutil.which('ffplay')),
+            'gst_play': bool(shutil.which('gst-play-1.0')),
+            'cvlc': bool(shutil.which('cvlc')),
+            'vlc': bool(shutil.which('vlc')),
+            'paplay': bool(shutil.which('paplay')),
+            'aplay': bool(shutil.which('aplay')),
+        }
+        play_media._probes = probes
     try:
-        if shutil.which('mpv'):
+        if probes.get('mpv'):
             cmd = ['mpv', '--really-quiet', '--no-terminal']
             if video:
                 cmd.extend(['--fullscreen', '--ontop'])
@@ -1140,13 +2087,31 @@ def play_media(path, video=False, blocking=False):
     except Exception:
         pass
     if video:
+        video_cmds = []
+        if probes.get('ffplay'):
+            video_cmds.append(['ffplay', '-autoexit', '-fs', '-loglevel', 'quiet', str(p)])
+        if probes.get('gst_play'):
+            video_cmds.append(['gst-play-1.0', '--no-interactive', str(p)])
+        if probes.get('cvlc'):
+            video_cmds.append(['cvlc', '--play-and-exit', '--fullscreen', '--quiet', str(p)])
+        elif probes.get('vlc'):
+            video_cmds.append(['vlc', '--play-and-exit', '--fullscreen', '--quiet', str(p)])
+        for cmd in video_cmds:
+            try:
+                if blocking:
+                    subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False)
+                else:
+                    subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                return True
+            except Exception:
+                continue
         return False
     fallback_cmds = []
-    if shutil.which('ffplay'):
+    if probes.get('ffplay'):
         fallback_cmds.append(['ffplay', '-nodisp', '-autoexit', '-loglevel', 'quiet', str(p)])
-    if shutil.which('paplay'):
+    if probes.get('paplay'):
         fallback_cmds.append(['paplay', str(p)])
-    if shutil.which('aplay'):
+    if probes.get('aplay'):
         fallback_cmds.append(['aplay', '-q', str(p)])
     for cmd in fallback_cmds:
         try:
@@ -1166,6 +2131,11 @@ def ensure_audio_output_ready(min_volume=35):
     except Exception:
         v = 35
     v = max(1, min(120, v))
+    now = time.monotonic()
+    last_ts = float(getattr(ensure_audio_output_ready, '_last_ts', 0.0))
+    last_vol = int(getattr(ensure_audio_output_ready, '_last_vol', 0))
+    if (now - last_ts) < 6.0 and v <= last_vol:
+        return
     cmds = [
         f'pactl set-sink-mute @DEFAULT_SINK@ 0 || true; pactl set-sink-volume @DEFAULT_SINK@ {v}% || true',
         f'wpctl set-mute @DEFAULT_AUDIO_SINK@ 0 || true; wpctl set-volume @DEFAULT_AUDIO_SINK@ {v}% || true',
@@ -1177,27 +2147,22 @@ def ensure_audio_output_ready(min_volume=35):
             subprocess.run(['/bin/sh', '-c', cmd], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False)
         except Exception:
             pass
+    ensure_audio_output_ready._last_ts = now
+    ensure_audio_output_ready._last_vol = v
 
 
 def play_startup_video():
     if os.environ.get('XUI_SKIP_STARTUP_VIDEO', '0') == '1':
         return
-    once_flag = DATA_HOME / 'startup_video_once.flag'
-    try:
-        sid = os.environ.get('XDG_SESSION_ID', '').strip() or str(os.getpid())
-        if once_flag.exists():
-            prev = once_flag.read_text(encoding='utf-8', errors='ignore').strip()
-            if prev == sid:
-                return
-        once_flag.parent.mkdir(parents=True, exist_ok=True)
-        once_flag.write_text(sid, encoding='utf-8')
-    except Exception:
-        pass
-    play_media(ASSETS / 'startup.mp4', video=True, blocking=True)
+    startup_path = ASSETS / 'startup.mp4'
+    if not startup_path.exists():
+        return
+    play_media(startup_path, video=True, blocking=True)
 
 
 def ensure_data():
     DATA_HOME.mkdir(parents=True, exist_ok=True)
+    VOICE_DIR.mkdir(parents=True, exist_ok=True)
     if not RECENT_FILE.exists():
         RECENT_FILE.write_text('[]')
     if not FRIENDS_FILE.exists():
@@ -1211,11 +2176,108 @@ def ensure_data():
         FRIEND_REQUESTS_FILE.write_text('[]')
     if not BEACONS_FILE.exists():
         BEACONS_FILE.write_text('[]')
+    if not SOCIAL_PROFILE_FILE.exists():
+        SOCIAL_PROFILE_FILE.write_text('{}')
+    if not PARTY_STATE_FILE.exists():
+        PARTY_STATE_FILE.write_text('{}')
+    if not VOICE_INBOX_FILE.exists():
+        VOICE_INBOX_FILE.write_text('[]')
+
+
+def _safe_read_text(path, limit=4096):
+    try:
+        txt = Path(path).read_text(encoding='utf-8', errors='ignore')
+    except Exception:
+        return ''
+    if limit and len(txt) > int(limit):
+        return txt[: int(limit)]
+    return txt
+
+
+def detect_runtime_profile():
+    forced = str(os.environ.get('XUI_DEVICE_PROFILE', '')).strip().lower()
+    if forced:
+        return forced
+    marker = (
+        _safe_read_text('/proc/device-tree/model', 512)
+        + ' '
+        + _safe_read_text('/sys/firmware/devicetree/base/model', 512)
+        + ' '
+        + _safe_read_text('/proc/cpuinfo', 8192)
+    ).lower()
+    if any(token in marker for token in ('nintendo', 'switch', 'tegra', 'l4t')):
+        return 'switch'
+    if any(token in marker for token in ('steam deck', 'neptune', 'jupiter')):
+        return 'steamdeck'
+    return 'pc'
+
+
+def detect_total_ram_mb():
+    forced = str(os.environ.get('XUI_RAM_MB', '')).strip()
+    if forced:
+        try:
+            return max(0, int(float(forced)))
+        except Exception:
+            pass
+    try:
+        for raw in Path('/proc/meminfo').read_text(encoding='utf-8', errors='ignore').splitlines():
+            line = str(raw).strip()
+            if not line.lower().startswith('memtotal:'):
+                continue
+            parts = line.split()
+            if len(parts) >= 2:
+                kb = int(parts[1])
+                return max(0, kb // 1024)
+    except Exception:
+        pass
+    return 0
+
+
+def ultra_low_ram_mode(screen=None):
+    mode = str(os.environ.get('XUI_RAM_MODE', 'auto')).strip().lower()
+    if mode in ('1', 'true', 'on', 'yes', '2g', '2gb', 'ultra', 'low'):
+        return True
+    if mode in ('0', 'false', 'off', 'no', 'full', 'normal'):
+        return False
+    mb = int(detect_total_ram_mb() or 0)
+    profile = detect_runtime_profile()
+    if profile == 'switch':
+        if mb <= 0:
+            return True
+        return mb <= 3072
+    return bool(mb and mb <= 2304)
+
+
+def use_low_power_ui(screen=None):
+    mode = str(os.environ.get('XUI_UI_PERF', 'auto')).strip().lower()
+    if mode in ('1', 'true', 'on', 'yes', 'low', 'eco', 'battery'):
+        return True
+    if mode in ('0', 'false', 'off', 'no', 'high', 'full'):
+        return False
+    profile = detect_runtime_profile()
+    if profile in ('switch', 'steamdeck'):
+        return True
+    if screen is not None:
+        try:
+            g = screen.availableGeometry()
+            if g.width() <= 1366 or g.height() <= 768:
+                return True
+        except Exception:
+            pass
+    c = os.cpu_count() or 0
+    return bool(c and c <= 4)
 
 
 def pick_existing_sound(candidates):
     if not candidates:
         return None
+    key = tuple(str(fn) for fn in candidates if fn)
+    if key:
+        cached = _SOUND_LOOKUP_CACHE.get(key)
+        if cached:
+            cp = Path(cached)
+            if cp.exists():
+                return cp
     search_dirs = [
         ASSETS / 'SONIDOS',
         ASSETS / 'sonidos',
@@ -1230,6 +2292,8 @@ def pick_existing_sound(candidates):
         for d in search_dirs:
             p = d / fn
             if p.exists():
+                if key:
+                    _SOUND_LOOKUP_CACHE[key] = str(p)
                 return p
     return None
 
@@ -1316,8 +2380,11 @@ def parse_peer_id(text):
 
 
 class InlineSocialEngine:
-    def __init__(self, nickname, chat_base=38600, discovery_port=38655):
+    def __init__(self, nickname, user_id='', chat_base=38600, discovery_port=38655):
         self.nickname = nickname
+        raw_uid = str(user_id or '').strip()
+        raw_uid = ''.join(ch for ch in raw_uid if ch.isalnum() or ch in ('-', '_'))
+        self.user_id = raw_uid[:40] if raw_uid else uuid.uuid4().hex[:16]
         self.node_id = uuid.uuid4().hex[:12]
         self.chat_port = self._find_open_port(chat_base, 24)
         self.discovery_port = int(discovery_port)
@@ -1333,6 +2400,7 @@ class InlineSocialEngine:
         self.lock = threading.Lock()
         self.local_ips = set(local_ipv4_addresses())
         self._seen_world_ids = set()
+        self._presence_tick = 0
 
     def _sanitize_topic(self, text):
         raw = ''.join(ch.lower() if ch.isalnum() or ch in ('-', '_', '.') else '-' for ch in str(text or '').strip())
@@ -1379,6 +2447,7 @@ class InlineSocialEngine:
             self._udp_discovery_sender,
             self._peer_gc_loop,
             self._world_recv_loop,
+            self._world_presence_loop,
         ):
             t = threading.Thread(target=fn, daemon=True)
             self.threads.append(t)
@@ -1403,6 +2472,7 @@ class InlineSocialEngine:
         payload = {
             'type': 'chat',
             'node_id': self.node_id,
+            'user_id': self.user_id,
             'from': self.nickname,
             'text': str(text),
             'ts': time.time(),
@@ -1414,6 +2484,7 @@ class InlineSocialEngine:
         payload = {
             'type': 'private_message',
             'node_id': self.node_id,
+            'user_id': self.user_id,
             'from': self.nickname,
             'text': str(text),
             'ts': time.time(),
@@ -1425,8 +2496,23 @@ class InlineSocialEngine:
         payload = {
             'type': 'friend_request',
             'node_id': self.node_id,
+            'user_id': self.user_id,
             'from': self.nickname,
             'note': str(note or 'XUI friend request'),
+            'ts': time.time(),
+            'reply_port': int(self.chat_port or 0),
+        }
+        self._send_packet(host, port, payload)
+
+    def send_voice_message(self, host, port, mime, duration, encoded_audio):
+        payload = {
+            'type': 'voice_message',
+            'node_id': self.node_id,
+            'user_id': self.user_id,
+            'from': self.nickname,
+            'mime': str(mime or 'audio/ogg'),
+            'duration': float(duration or 0.0),
+            'audio': str(encoded_audio or ''),
             'ts': time.time(),
             'reply_port': int(self.chat_port or 0),
         }
@@ -1436,16 +2522,8 @@ class InlineSocialEngine:
         topic = urllib.parse.quote(self.world_topic, safe='')
         return f'{self.world_relay}/{topic}{suffix}'
 
-    def send_world_chat(self, text):
-        msg = {
-            'kind': 'xui_world_chat',
-            'node_id': self.node_id,
-            'from': self.nickname,
-            'text': str(text or ''),
-            'room': self.world_topic,
-            'ts': time.time(),
-        }
-        data = json.dumps(msg, ensure_ascii=False).encode('utf-8', errors='ignore')
+    def _post_world_payload(self, payload):
+        data = json.dumps(payload, ensure_ascii=False).encode('utf-8', errors='ignore')
         req = urllib.request.Request(
             self._world_url(''),
             data=data,
@@ -1453,11 +2531,102 @@ class InlineSocialEngine:
             headers={
                 'Content-Type': 'text/plain; charset=utf-8',
                 'User-Agent': 'xui-dashboard-world-chat',
-                'X-Title': f'XUI:{self.nickname}',
+                'X-Title': f'XUI:{self.nickname}:{self.user_id}',
             },
         )
         with urllib.request.urlopen(req, timeout=8) as r:
             _ = r.read(256)
+
+    def send_world_event(self, kind, **extra):
+        payload = {
+            'kind': str(kind or ''),
+            'node_id': self.node_id,
+            'user_id': self.user_id,
+            'from': self.nickname,
+            'room': self.world_topic,
+            'ts': time.time(),
+        }
+        payload.update(extra or {})
+        self._post_world_payload(payload)
+
+    def send_world_chat(self, text):
+        self.send_world_event('xui_world_chat', text=str(text or ''))
+
+    def send_world_private_message(self, to_user_id, text):
+        to_uid = str(to_user_id or '').strip()
+        if not to_uid:
+            raise RuntimeError('missing target user id')
+        self.send_world_event(
+            'xui_world_pm',
+            to_user_id=to_uid,
+            text=str(text or ''),
+        )
+
+    def send_world_friend_request(self, to_user_id, note=''):
+        to_uid = str(to_user_id or '').strip()
+        if not to_uid:
+            raise RuntimeError('missing target user id')
+        self.send_world_event(
+            'xui_friend_request',
+            to_user_id=to_uid,
+            note=str(note or 'XUI friend request'),
+        )
+
+    def send_world_friend_accept(self, to_user_id):
+        to_uid = str(to_user_id or '').strip()
+        if not to_uid:
+            raise RuntimeError('missing target user id')
+        self.send_world_event('xui_friend_accept', to_user_id=to_uid)
+
+    def send_world_party_invite(self, to_user_id, party_id, party_name=''):
+        to_uid = str(to_user_id or '').strip()
+        pid = str(party_id or '').strip()
+        if not to_uid or not pid:
+            raise RuntimeError('missing party invite data')
+        self.send_world_event(
+            'xui_party_invite',
+            to_user_id=to_uid,
+            party_id=pid,
+            party_name=str(party_name or ''),
+        )
+
+    def send_world_party_state(self, party_id, state='join'):
+        pid = str(party_id or '').strip()
+        if not pid:
+            return
+        self.send_world_event(
+            'xui_party_state',
+            party_id=pid,
+            state=str(state or 'join'),
+        )
+
+    def send_world_voice_message(self, to_user_id, mime, duration, encoded_audio, party_id=''):
+        to_uid = str(to_user_id or '').strip()
+        pid = str(party_id or '').strip()
+        if not to_uid and not pid:
+            raise RuntimeError('missing voice target')
+        self.send_world_event(
+            'xui_voice_msg',
+            to_user_id=to_uid,
+            party_id=pid,
+            mime=str(mime or 'audio/ogg'),
+            duration=float(duration or 0.0),
+            audio=str(encoded_audio or ''),
+        )
+
+    def _world_presence_loop(self):
+        while self.running:
+            if self.world_enabled:
+                self._presence_tick += 1
+                try:
+                    self.send_world_event(
+                        'xui_presence',
+                        chat_port=int(self.chat_port or 0),
+                        tick=int(self._presence_tick),
+                    )
+                except Exception:
+                    pass
+            time.sleep(12.0)
 
     def _peer_key(self, host, port):
         return f'{host}:{int(port)}'
@@ -1645,12 +2814,19 @@ class InlineSocialEngine:
                 except Exception:
                     continue
                 mtype = str(msg.get('type') or '')
-                if mtype not in ('chat', 'private_message', 'friend_request'):
+                if mtype not in ('chat', 'private_message', 'friend_request', 'voice_message'):
                     continue
                 sender = str(msg.get('from') or host)
                 text = str(msg.get('text') or '').strip()
                 note = str(msg.get('note') or '').strip()
                 sender_node = str(msg.get('node_id') or '')
+                sender_user_id = str(msg.get('user_id') or '').strip()
+                mime = str(msg.get('mime') or 'audio/ogg')
+                voice_blob = str(msg.get('audio') or '').strip()
+                try:
+                    voice_dur = float(msg.get('duration') or 0.0)
+                except Exception:
+                    voice_dur = 0.0
                 try:
                     reply_port = int(msg.get('reply_port') or 0)
                 except Exception:
@@ -1658,7 +2834,11 @@ class InlineSocialEngine:
                 if reply_port > 0:
                     self._upsert_peer(sender, host, reply_port, 'LAN', sender_node)
                 if mtype == 'friend_request':
-                    self.events.put(('friend_request', sender, host, int(reply_port or 0), note))
+                    self.events.put(('friend_request', sender, host, int(reply_port or 0), note, sender_user_id))
+                    continue
+                if mtype == 'voice_message':
+                    if voice_blob:
+                        self.events.put(('voice_message', sender, host, int(reply_port or 0), mime, voice_dur, voice_blob, sender_user_id))
                     continue
                 if text and mtype == 'private_message':
                     self.events.put(('private_message', sender, text))
@@ -1719,16 +2899,92 @@ class InlineSocialEngine:
                                 'room': self.world_topic,
                                 'ts': evt.get('time', time.time()),
                             }
-                        if str(payload.get('kind') or '') != 'xui_world_chat':
-                            continue
+                        kind = str(payload.get('kind') or 'xui_world_chat')
                         if str(payload.get('room') or self.world_topic) != self.world_topic:
                             continue
                         if str(payload.get('node_id') or '') == self.node_id:
                             continue
+                        from_user_id = str(payload.get('user_id') or '').strip()
+                        if from_user_id and from_user_id == self.user_id:
+                            continue
                         who = str(payload.get('from') or 'WORLD')
                         txt = str(payload.get('text') or '').strip()
-                        if txt:
-                            self.events.put(('world_chat', who, txt))
+
+                        if kind == 'xui_world_chat':
+                            if txt:
+                                self.events.put(('world_chat', who, txt))
+                            continue
+                        if kind == 'xui_presence':
+                            try:
+                                chat_port = int(payload.get('chat_port') or 0)
+                            except Exception:
+                                chat_port = 0
+                            self.events.put((
+                                'world_presence',
+                                {
+                                    'name': who,
+                                    'user_id': from_user_id,
+                                    'node_id': str(payload.get('node_id') or ''),
+                                    'chat_port': chat_port,
+                                    'ts': float(payload.get('ts') or time.time()),
+                                },
+                            ))
+                            continue
+                        if kind == 'xui_world_pm':
+                            to_user = str(payload.get('to_user_id') or '').strip()
+                            if to_user and to_user == self.user_id and txt:
+                                self.events.put(('world_private_message', who, from_user_id, txt))
+                            continue
+                        if kind == 'xui_friend_request':
+                            to_user = str(payload.get('to_user_id') or '').strip()
+                            if to_user and to_user == self.user_id:
+                                note = str(payload.get('note') or '').strip()
+                                self.events.put(('global_friend_request', who, from_user_id, note))
+                            continue
+                        if kind == 'xui_friend_accept':
+                            to_user = str(payload.get('to_user_id') or '').strip()
+                            if to_user and to_user == self.user_id:
+                                self.events.put(('global_friend_accept', who, from_user_id))
+                            continue
+                        if kind == 'xui_party_invite':
+                            to_user = str(payload.get('to_user_id') or '').strip()
+                            if to_user and to_user == self.user_id:
+                                self.events.put((
+                                    'party_invite',
+                                    {
+                                        'from': who,
+                                        'from_user_id': from_user_id,
+                                        'party_id': str(payload.get('party_id') or '').strip(),
+                                        'party_name': str(payload.get('party_name') or '').strip(),
+                                        'ts': int(time.time()),
+                                    },
+                                ))
+                            continue
+                        if kind == 'xui_party_state':
+                            self.events.put((
+                                'party_state',
+                                {
+                                    'from': who,
+                                    'from_user_id': from_user_id,
+                                    'party_id': str(payload.get('party_id') or '').strip(),
+                                    'state': str(payload.get('state') or '').strip(),
+                                    'ts': int(time.time()),
+                                },
+                            ))
+                            continue
+                        if kind == 'xui_voice_msg':
+                            to_user = str(payload.get('to_user_id') or '').strip()
+                            party_id = str(payload.get('party_id') or '').strip()
+                            if (to_user and to_user == self.user_id) or party_id:
+                                mime = str(payload.get('mime') or 'audio/ogg')
+                                audio = str(payload.get('audio') or '').strip()
+                                try:
+                                    duration = float(payload.get('duration') or 0.0)
+                                except Exception:
+                                    duration = 0.0
+                                if audio:
+                                    self.events.put(('world_voice_message', who, from_user_id, party_id, mime, duration, audio))
+                            continue
             except Exception as exc:
                 self.events.put(('status', f'World relay reconnecting: {exc}'))
                 time.sleep(min(8.0, backoff))
@@ -1739,11 +2995,21 @@ class SocialOverlay(QtWidgets.QDialog):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.nickname = current_gamertag()
-        self.engine = InlineSocialEngine(self.nickname)
+        self.social_profile = self._load_social_profile()
+        self.user_id = str(self.social_profile.get('user_id') or uuid.uuid4().hex[:16])
+        self.engine = InlineSocialEngine(self.nickname, self.user_id)
         self.peer_items = {}
         self.peer_data = {}
+        self.global_players = {}
         self.friends = []
         self.friend_requests = []
+        self.voice_inbox = []
+        self.last_party_invite = None
+        self.party_state = {
+            'party_id': '',
+            'party_name': '',
+            'members': {},
+        }
         self._community_mode = 'messages'
         self._focus_zone = 0
         self.setModal(True)
@@ -1752,15 +3018,27 @@ class SocialOverlay(QtWidgets.QDialog):
         self._build()
         self._load_friends()
         self._load_friend_requests()
+        self._load_voice_inbox()
+        self._load_party_state()
         self._load_manual_peers()
         self._load_world_settings()
         self.engine.start()
+        try:
+            self.engine.send_world_event('xui_presence', chat_port=int(self.engine.chat_port or 0), tick=0)
+        except Exception:
+            pass
+        if str(self.party_state.get('party_id') or '').strip():
+            try:
+                self.engine.send_world_party_state(str(self.party_state.get('party_id')), state='join')
+            except Exception:
+                pass
         self._refresh_world_peer()
         self.timer = QtCore.QTimer(self)
         self.timer.timeout.connect(self._poll_events)
         self.timer.start(120)
-        self._append_system('LAN autodiscovery enabled (broadcast + probe). Add peer for Internet P2P.')
+        self._append_system('LAN autodiscovery enabled (broadcast + probe).')
         self._append_system(f"World chat ready via relay ({self.engine.world_relay}) room: {self.engine.world_topic}")
+        self._append_system(f'Global social ID: {self.user_id}')
 
     def _build(self):
         self._vk_opening = False
@@ -1768,22 +3046,27 @@ class SocialOverlay(QtWidgets.QDialog):
         self._action_items = {}
         self.setStyleSheet('''
             QFrame#social_panel {
-                background:qlineargradient(x1:0,y1:0,x2:1,y2:1, stop:0 #313740, stop:1 #1a2028);
-                border:2px solid rgba(214,223,235,0.52);
-                border-radius:7px;
+                background:#d2d7dc;
+                border:2px solid rgba(239,244,248,0.78);
+                border-radius:0px;
+            }
+            QFrame#social_header {
+                background:qlineargradient(x1:0,y1:0,x2:1,y2:0, stop:0 #1a2028, stop:1 #0f141b);
+                border:none;
             }
             QFrame#social_col {
-                background:rgba(52,61,72,0.92);
-                border:1px solid rgba(196,208,222,0.32);
+                background:#cad0d6;
+                border:1px solid rgba(111,120,129,0.46);
             }
-            QLabel#social_title { color:#f3f7f7; font-size:28px; font-weight:800; }
-            QLabel#social_hint { color:rgba(237,243,247,0.82); font-size:15px; }
-            QLabel#social_col_title { color:#ecf3f8; font-size:20px; font-weight:800; }
+            QLabel#social_title { color:#f4f8fb; font-size:40px; font-weight:900; }
+            QLabel#social_hint { color:#23303d; font-size:16px; font-weight:700; }
+            QLabel#social_col_title { color:#1f2a35; font-size:20px; font-weight:900; }
             QListWidget {
-                background:rgba(236,239,242,0.92);
+                background:#d7dde2;
                 color:#20252b;
-                border:1px solid rgba(0,0,0,0.26);
-                font-size:24px;
+                border:1px solid rgba(0,0,0,0.30);
+                font-size:21px;
+                font-weight:700;
                 outline:none;
             }
             QListWidget::item {
@@ -1793,31 +3076,32 @@ class SocialOverlay(QtWidgets.QDialog):
             QListWidget::item:selected {
                 color:#f3fff2;
                 background:qlineargradient(x1:0,y1:0,x2:1,y2:0, stop:0 #4ea93f, stop:1 #2f8832);
-                border:1px solid rgba(255,255,255,0.25);
+                border:1px solid rgba(255,255,255,0.35);
             }
             QPlainTextEdit {
-                background:rgba(228,233,238,0.96);
-                border:1px solid rgba(32,39,48,0.28);
+                background:#dce2e7;
+                border:1px solid rgba(32,39,48,0.35);
                 color:#17202a;
-                font-size:18px;
+                font-size:16px;
+                font-weight:700;
             }
             QLineEdit {
-                background:#eef2f6;
-                border:1px solid #8fa0b1;
+                background:#e8edf2;
+                border:1px solid #7f8f9f;
                 color:#17202a;
-                font-size:21px;
+                font-size:20px;
                 font-weight:700;
                 padding:8px;
             }
             QPushButton {
-                background:qlineargradient(x1:0,y1:0,x2:1,y2:0, stop:0 #4ea93f, stop:1 #2f8832);
-                color:#efffee;
-                border:1px solid rgba(255,255,255,0.2);
-                font-size:17px;
+                background:qlineargradient(x1:0,y1:0,x2:0,y2:1, stop:0 #58d53e, stop:1 #34af2e);
+                color:#f6fff3;
+                border:1px solid rgba(250,255,248,0.42);
+                font-size:18px;
                 font-weight:700;
                 padding:8px 12px;
             }
-            QPushButton:hover { background:#58b449; }
+            QPushButton:hover { background:qlineargradient(x1:0,y1:0,x2:0,y2:1, stop:0 #66df4b, stop:1 #3dba35); }
         ''')
         outer = QtWidgets.QVBoxLayout(self)
         outer.setContentsMargins(0, 0, 0, 0)
@@ -1828,7 +3112,10 @@ class SocialOverlay(QtWidgets.QDialog):
         root.setContentsMargins(16, 14, 16, 12)
         root.setSpacing(10)
 
-        top = QtWidgets.QHBoxLayout()
+        header = QtWidgets.QFrame()
+        header.setObjectName('social_header')
+        top = QtWidgets.QHBoxLayout(header)
+        top.setContentsMargins(14, 8, 14, 8)
         self.title_lbl = QtWidgets.QLabel('community / messages')
         self.title_lbl.setObjectName('social_title')
         hint = QtWidgets.QLabel(f'gamertag: {self.nickname}')
@@ -1840,7 +3127,7 @@ class SocialOverlay(QtWidgets.QDialog):
         top.addWidget(hint)
         top.addSpacing(14)
         top.addWidget(btn_close)
-        root.addLayout(top)
+        root.addWidget(header, 0)
 
         tabs_row = QtWidgets.QHBoxLayout()
         tabs_row.setSpacing(8)
@@ -1922,8 +3209,10 @@ class SocialOverlay(QtWidgets.QDialog):
         self._add_action_item('friend_request', 'Send Friend Request')
         self._add_action_item('friend_requests', 'Friend Requests')
         self._add_action_item('friends', 'Friends List')
-        self._add_action_item('voice_call_hub', 'Voice/Call Hub')
-        self._add_action_item('add_peer', 'Add Peer ID')
+        self._add_action_item('party_hub', 'Party Hub')
+        self._add_action_item('voice_hub', 'Voice/Call Hub')
+        self._add_action_item('players_hub', 'Global Players')
+        self._add_action_item('add_peer', 'Add Peer ID (Advanced)')
         self._add_action_item('peer_ids', 'My Peer IDs')
         self._add_action_item('lan_status', 'LAN Status')
         self._add_action_item('world_toggle', 'World Chat: ON')
@@ -1984,9 +3273,10 @@ class SocialOverlay(QtWidgets.QDialog):
 
     def _refresh_community_tabs(self):
         friends_n = len(self.friends)
-        party_n = len([f for f in self.friends if bool(f.get('online'))])
+        party_rows = self._party_member_rows()
+        party_n = len(party_rows) if party_rows else len([f for f in self.friends if bool(f.get('online'))])
         messages_n = len([p for p in self.peer_data.values() if str(p.get('source')) != 'WORLD'])
-        players_n = len(self._recent_players())
+        players_n = len(self.global_players) if self.global_players else len(self._recent_players())
         counts = {
             'friends': friends_n,
             'party': party_n,
@@ -2056,6 +3346,7 @@ class SocialOverlay(QtWidgets.QDialog):
         ):
             rows.append({
                 'name': str(f.get('name') or 'Friend'),
+                'user_id': str(f.get('user_id') or ''),
                 'host': str(f.get('host') or ''),
                 'port': int(f.get('port') or 0),
                 'source': 'FRIEND',
@@ -2065,26 +3356,46 @@ class SocialOverlay(QtWidgets.QDialog):
         return rows
 
     def _community_party_rows(self):
-        rows = []
+        rows = self._party_member_rows()
+        if rows:
+            return rows
+        fallback = []
         for f in self._community_friends_rows():
             if bool(f.get('online')):
-                rows.append(dict(f))
-        if not rows:
-            rows = self._community_friends_rows()[:12]
-        return rows
+                fallback.append(dict(f))
+        if not fallback:
+            fallback = self._community_friends_rows()[:12]
+        return fallback
 
     def _community_players_rows(self):
+        rows = []
+        for uid, p in sorted(self.global_players.items(), key=lambda kv: str(kv[1].get('name') or '').lower()):
+            if not str(uid or '').strip():
+                continue
+            rows.append({
+                'name': str(p.get('name') or 'Player'),
+                'user_id': str(uid),
+                'host': '',
+                'port': 0,
+                'source': 'GLOBAL',
+                'online': bool(p.get('online', True)),
+                'last_seen': int(p.get('last_seen') or int(time.time())),
+                'last': str(p.get('status') or 'online'),
+            })
+        if rows:
+            return rows
         return self._recent_players()
 
     def _community_row_text(self, row):
         name = str(row.get('name') or 'Player')
         src = str(row.get('source') or '')
-        if src in ('FRIEND', 'PARTY'):
+        if src in ('FRIEND', 'PARTY', 'GLOBAL'):
             status = 'Online' if bool(row.get('online')) else 'Offline'
             host = str(row.get('host') or '')
             port = int(row.get('port') or 0)
             endpoint = f' [{host}:{port}]' if host and port > 0 else ''
-            return f'{name}  -  {status}{endpoint}'
+            tag = 'GLOBAL' if src == 'GLOBAL' else src
+            return f'{name}  -  {status}{endpoint} ({tag})'
         if src == 'RECENT':
             last = str(row.get('last') or '').strip()
             return f'{name}  -  {last}' if last else name
@@ -2116,7 +3427,11 @@ class SocialOverlay(QtWidgets.QDialog):
         self.peer_items = {}
         ordered = sorted(
             self.peer_data.items(),
-            key=lambda kv: (0 if str(kv[1].get('source')) == 'WORLD' else 1, str(kv[1].get('name') or '').lower()),
+            key=lambda kv: (
+                0 if str(kv[1].get('source')) == 'WORLD'
+                else (1 if str(kv[1].get('source')) == 'GLOBAL' else 2),
+                str(kv[1].get('name') or '').lower(),
+            ),
         )
         for key, row in ordered:
             it = QtWidgets.QListWidgetItem(self._peer_row(row))
@@ -2136,6 +3451,40 @@ class SocialOverlay(QtWidgets.QDialog):
             self.input.setFocus(QtCore.Qt.OtherFocusReason)
         else:
             self.btn_send.setFocus(QtCore.Qt.OtherFocusReason)
+
+    def _show_notice(self, title, text):
+        d = GuidePromptDialog(
+            str(title or 'Notice'),
+            str(text or ''),
+            ['OK'],
+            self,
+            default_choice='OK',
+            cancel_choice='OK',
+        )
+        d.exec_()
+
+    def _pick_from_menu(self, title, options, descriptions=None):
+        opts = [str(x).strip() for x in (options or []) if str(x).strip()]
+        if not opts:
+            return None
+        desc = descriptions or {}
+        detail_lines = []
+        for k in opts[:8]:
+            v = str(desc.get(k, '')).strip()
+            if v:
+                detail_lines.append(f'{k}: {v}')
+        body = '\n'.join(detail_lines) if detail_lines else 'Select an option.'
+        d = GuidePromptDialog(
+            str(title or 'Menu'),
+            body,
+            opts,
+            self,
+            default_choice=opts[0],
+            cancel_choice='Cancel' if 'Cancel' in opts else ('Back' if 'Back' in opts else opts[-1]),
+        )
+        if d.exec_() == QtWidgets.QDialog.Accepted:
+            return d.selected_choice()
+        return None
 
     def _move_in_list(self, listw, delta):
         n = int(listw.count())
@@ -2191,8 +3540,14 @@ class SocialOverlay(QtWidgets.QDialog):
         if key == 'friends':
             self._show_friends()
             return
-        if key == 'voice_call_hub':
-            self._open_voice_call_hub()
+        if key == 'party_hub':
+            self._open_party_hub()
+            return
+        if key == 'voice_hub':
+            self._open_voice_hub()
+            return
+        if key == 'players_hub':
+            self._set_community_mode('players')
             return
         if key == 'add_peer':
             self._add_peer()
@@ -2216,7 +3571,7 @@ class SocialOverlay(QtWidgets.QDialog):
             self.peer_meta.setText('Select a peer to chat.')
             return
         src = str(peer.get('source') or '').upper()
-        if src in ('FRIEND', 'PARTY', 'RECENT'):
+        if src in ('FRIEND', 'PARTY', 'RECENT', 'GLOBAL'):
             name = str(peer.get('name') or 'Player')
             online = bool(peer.get('online', False))
             host = str(peer.get('host') or '')
@@ -2225,6 +3580,9 @@ class SocialOverlay(QtWidgets.QDialog):
             if src == 'RECENT':
                 last = str(peer.get('last') or '').strip()
                 self.peer_meta.setText(f'{name}{endpoint}  (RECENT){(" - " + last) if last else ""}')
+            elif src == 'GLOBAL':
+                uid = str(peer.get('user_id') or '').strip()
+                self.peer_meta.setText(f'{name}  (GLOBAL)  {"Online" if online else "Offline"}  id:{uid or "-"}')
             else:
                 self.peer_meta.setText(f'{name}{endpoint}  ({src})  {"Online" if online else "Offline"}')
             return
@@ -2367,6 +3725,420 @@ class SocialOverlay(QtWidgets.QDialog):
         arr.insert(0, {'ts': int(time.time()), 'from': who_txt[:48], 'text': body[:320]})
         safe_json_write(SOCIAL_MESSAGES_FILE, arr[:80])
 
+    def _load_social_profile(self):
+        data = safe_json_read(SOCIAL_PROFILE_FILE, {})
+        if not isinstance(data, dict):
+            data = {}
+        uid = ''.join(ch for ch in str(data.get('user_id') or '').strip() if ch.isalnum() or ch in ('-', '_'))
+        if not uid:
+            uid = uuid.uuid4().hex[:16]
+        data['user_id'] = uid[:40]
+        data['gamertag'] = str(self.nickname or 'Player1').strip() or 'Player1'
+        safe_json_write(SOCIAL_PROFILE_FILE, data)
+        return data
+
+    def _load_party_state(self):
+        raw = safe_json_read(PARTY_STATE_FILE, {})
+        if not isinstance(raw, dict):
+            raw = {}
+        pid = str(raw.get('party_id') or '').strip()
+        pname = str(raw.get('party_name') or '').strip()
+        members = raw.get('members') if isinstance(raw.get('members'), dict) else {}
+        norm = {}
+        for uid, row in members.items():
+            k = str(uid or '').strip()
+            if not k:
+                continue
+            if isinstance(row, dict):
+                norm[k] = {
+                    'name': str(row.get('name') or 'Player'),
+                    'online': bool(row.get('online', False)),
+                    'last_seen': int(row.get('last_seen') or int(time.time())),
+                }
+        if self.user_id not in norm:
+            norm[self.user_id] = {
+                'name': self.nickname,
+                'online': True,
+                'last_seen': int(time.time()),
+            }
+        self.party_state = {
+            'party_id': pid,
+            'party_name': pname or (f'{self.nickname} Party' if pid else ''),
+            'members': norm,
+        }
+
+    def _save_party_state(self):
+        safe_json_write(PARTY_STATE_FILE, self.party_state)
+
+    def _load_voice_inbox(self):
+        arr = safe_json_read(VOICE_INBOX_FILE, [])
+        if not isinstance(arr, list):
+            arr = []
+        out = []
+        for raw in arr:
+            if not isinstance(raw, dict):
+                continue
+            path = str(raw.get('path') or '').strip()
+            if path and not Path(path).exists():
+                continue
+            out.append({
+                'sender': str(raw.get('sender') or 'Unknown'),
+                'sender_user_id': str(raw.get('sender_user_id') or ''),
+                'mime': str(raw.get('mime') or 'audio/ogg'),
+                'duration': float(raw.get('duration') or 0.0),
+                'path': path,
+                'ts': int(raw.get('ts') or int(time.time())),
+                'party_id': str(raw.get('party_id') or ''),
+            })
+        self.voice_inbox = out[:120]
+
+    def _save_voice_inbox(self):
+        safe_json_write(VOICE_INBOX_FILE, self.voice_inbox[:120])
+
+    def _voice_file_suffix(self, mime):
+        m = str(mime or '').lower()
+        if 'wav' in m:
+            return '.wav'
+        if 'ogg' in m or 'opus' in m:
+            return '.ogg'
+        return '.bin'
+
+    def _save_voice_blob(self, sender, sender_user_id, mime, duration, blob_bytes, party_id=''):
+        try:
+            data = bytes(blob_bytes or b'')
+        except Exception:
+            data = b''
+        if not data:
+            return None
+        safe_sender = ''.join(ch if ch.isalnum() or ch in ('-', '_') else '_' for ch in str(sender or 'peer'))[:28]
+        p = VOICE_DIR / f'voice_{int(time.time())}_{safe_sender}{self._voice_file_suffix(mime)}'
+        try:
+            p.write_bytes(data)
+        except Exception:
+            return None
+        item = {
+            'sender': str(sender or 'Unknown'),
+            'sender_user_id': str(sender_user_id or ''),
+            'mime': str(mime or 'audio/ogg'),
+            'duration': float(duration or 0.0),
+            'path': str(p),
+            'ts': int(time.time()),
+            'party_id': str(party_id or ''),
+        }
+        self.voice_inbox.insert(0, item)
+        self.voice_inbox = self.voice_inbox[:120]
+        self._save_voice_inbox()
+        return item
+
+    def _play_voice_file(self, path):
+        p = str(path or '').strip()
+        if not p or not Path(p).exists():
+            self.status.setText('Voice file not found.')
+            return
+        if shutil.which('mpv'):
+            subprocess.Popen(['mpv', '--really-quiet', '--no-terminal', p], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            return
+        if shutil.which('ffplay'):
+            subprocess.Popen(['ffplay', '-nodisp', '-autoexit', '-loglevel', 'quiet', p], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            return
+        if shutil.which('aplay'):
+            subprocess.Popen(['aplay', p], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            return
+        self.status.setText('No audio player found (mpv/ffplay/aplay).')
+
+    def _record_voice_clip(self, duration_sec):
+        secs = max(1, min(int(duration_sec), 6))
+        tmp_ogg = Path(tempfile.mktemp(prefix='xui_voice_', suffix='.ogg'))
+        tmp_wav = Path(tempfile.mktemp(prefix='xui_voice_', suffix='.wav'))
+        try:
+            if shutil.which('ffmpeg'):
+                cmds = [
+                    ['ffmpeg', '-hide_banner', '-loglevel', 'error', '-y', '-f', 'pulse', '-i', 'default',
+                     '-t', str(secs), '-ac', '1', '-ar', '12000', '-c:a', 'libopus', '-b:a', '12k', str(tmp_ogg)],
+                    ['ffmpeg', '-hide_banner', '-loglevel', 'error', '-y', '-f', 'alsa', '-i', 'default',
+                     '-t', str(secs), '-ac', '1', '-ar', '12000', '-c:a', 'libopus', '-b:a', '12k', str(tmp_ogg)],
+                ]
+                for cmd in cmds:
+                    rc = subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode
+                    if rc == 0 and tmp_ogg.exists() and tmp_ogg.stat().st_size > 256:
+                        return (tmp_ogg.read_bytes(), 'audio/ogg', float(secs), '')
+            if shutil.which('arecord'):
+                cmd = ['arecord', '-q', '-d', str(secs), '-f', 'S16_LE', '-r', '8000', '-c', '1', str(tmp_wav)]
+                rc = subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode
+                if rc == 0 and tmp_wav.exists() and tmp_wav.stat().st_size > 1024:
+                    return (tmp_wav.read_bytes(), 'audio/wav', float(secs), '')
+            return (b'', '', 0.0, 'No recording backend (ffmpeg/arecord).')
+        except Exception as exc:
+            return (b'', '', 0.0, str(exc))
+        finally:
+            try:
+                tmp_ogg.unlink(missing_ok=True)
+            except Exception:
+                pass
+            try:
+                tmp_wav.unlink(missing_ok=True)
+            except Exception:
+                pass
+
+    def _open_voice_inbox(self):
+        if not self.voice_inbox:
+            self._show_notice('Voice Inbox', 'No voice messages yet.')
+            return
+        options = []
+        desc = {}
+        for i, msg in enumerate(self.voice_inbox[:40], 1):
+            hh = time.strftime('%H:%M:%S', time.localtime(int(msg.get('ts') or time.time())))
+            who = str(msg.get('sender') or 'Unknown')
+            dur = float(msg.get('duration') or 0.0)
+            party_id = str(msg.get('party_id') or '').strip()
+            label = f'{i:02d}. {who} ({dur:.0f}s) [{hh}]'
+            options.append(label)
+            info = f'MIME: {msg.get("mime", "audio")} | Duration: {dur:.0f}s'
+            if party_id:
+                info += f' | Party: {party_id}'
+            desc[label] = info
+        options.append('Cancel')
+        pick = self._pick_from_menu('Voice Inbox', options, desc)
+        if not pick or pick == 'Cancel':
+            return
+        try:
+            idx = int(str(pick).split('.', 1)[0]) - 1
+        except Exception:
+            return
+        if idx < 0 or idx >= len(self.voice_inbox):
+            return
+        sel = self.voice_inbox[idx]
+        self._play_voice_file(sel.get('path'))
+        self.status.setText(f"Playing voice from {sel.get('sender', 'Unknown')}")
+
+    def _send_voice_message(self, peer=None, to_party=False):
+        target = dict(peer or (self._selected_peer() or {}))
+        if to_party:
+            if not str(self.party_state.get('party_id') or '').strip():
+                self.status.setText('No active party.')
+                return
+        else:
+            if not target:
+                self._show_notice('Voice Message', 'Select a user first.')
+                return
+            if str(target.get('source') or '').upper() == 'WORLD':
+                self._show_notice('Voice Message', 'Select a player/friend, not WORLD room.')
+                return
+
+        pick = self._pick_from_menu(
+            'Voice Message',
+            ['2', '3', '4', '5', '6', 'Cancel'],
+            {'2': 'Record 2s', '3': 'Record 3s', '4': 'Record 4s', '5': 'Record 5s', '6': 'Record 6s'},
+        )
+        if not pick or pick == 'Cancel':
+            return
+        try:
+            seconds = int(str(pick).strip())
+        except Exception:
+            return
+
+        self.status.setText(f'Recording voice message ({seconds}s)...')
+        QtWidgets.QApplication.processEvents()
+        blob, mime, duration, err = self._record_voice_clip(seconds)
+        if not blob:
+            self.status.setText(f'Voice record failed: {err}')
+            return
+        b64 = base64.b64encode(blob).decode('ascii', errors='ignore')
+
+        if to_party:
+            party_id = str(self.party_state.get('party_id') or '').strip()
+            if len(b64) > 3200:
+                self.status.setText('Party voice too large for relay. Try 2s.')
+                return
+            try:
+                self.engine.send_world_voice_message('', mime, duration, b64, party_id=party_id)
+                self._append_line(f"[{time.strftime('%H:%M:%S')}] You -> PARTY [{duration:.0f}s]")
+                self.status.setText('Party voice message sent.')
+            except Exception as exc:
+                self.status.setText(f'Party voice send failed: {exc}')
+            return
+
+        source = str(target.get('source') or '').upper()
+        user_id = str(target.get('user_id') or '').strip()
+        if not user_id:
+            low_name = str(target.get('name') or '').strip().lower()
+            for uid, row in self.global_players.items():
+                if str(row.get('name') or '').strip().lower() == low_name:
+                    user_id = str(uid)
+                    break
+        if user_id and source in ('GLOBAL', 'FRIEND', 'PARTY', 'RECENT'):
+            if len(b64) > 3200:
+                self.status.setText('Voice clip too large for global relay. Try 2s.')
+                return
+            try:
+                self.engine.send_world_voice_message(user_id, mime, duration, b64, party_id='')
+                self._append_line(f"[{time.strftime('%H:%M:%S')}] You -> {target.get('name','User')} [VOICE {duration:.0f}s]")
+                self.status.setText(f"Voice sent to {target.get('name', 'user')}")
+                return
+            except Exception as exc:
+                self.status.setText(f'Global voice send failed: {exc}')
+                return
+
+        candidates = self._send_candidates(target)
+        last_err = None
+        for host, port, _key in candidates:
+            try:
+                self.engine.send_voice_message(host, port, mime, duration, b64)
+                self._append_line(f"[{time.strftime('%H:%M:%S')}] You -> {target.get('name','peer')} [VOICE {duration:.0f}s]")
+                self.status.setText(f'Voice sent to {host}:{port}')
+                return
+            except Exception as exc:
+                last_err = exc
+        self.status.setText(f'Voice send failed: {last_err or "no route"}')
+
+    def _open_voice_hub(self):
+        options = [
+            'Send Voice Message',
+            'Voice Inbox',
+            'Send Party Voice',
+            'Open Party Hub',
+            'Cancel',
+        ]
+        desc = {
+            'Send Voice Message': 'Send global voice message to selected user (no IP manual).',
+            'Voice Inbox': 'Play received voice messages.',
+            'Send Party Voice': 'Send voice note to current party room.',
+            'Open Party Hub': 'Open party controls and invites.',
+            'Cancel': 'Back.',
+        }
+        pick = self._pick_from_menu('Voice/Call Hub', options, desc)
+        if not pick or pick == 'Cancel':
+            return
+        if pick == 'Send Voice Message':
+            self._send_voice_message()
+        elif pick == 'Voice Inbox':
+            self._open_voice_inbox()
+        elif pick == 'Send Party Voice':
+            self._send_voice_message(to_party=True)
+        elif pick == 'Open Party Hub':
+            self._open_party_hub()
+
+    def _party_member_rows(self):
+        members = self.party_state.get('members') if isinstance(self.party_state, dict) else {}
+        if not isinstance(members, dict):
+            members = {}
+        rows = []
+        for uid, row in members.items():
+            if not isinstance(row, dict):
+                continue
+            gp = self.global_players.get(str(uid), {})
+            online = bool(row.get('online', False))
+            if isinstance(gp, dict) and gp:
+                online = bool(gp.get('online', online))
+            rows.append({
+                'name': str(row.get('name') or 'Player'),
+                'user_id': str(uid or ''),
+                'source': 'PARTY',
+                'online': online,
+                'host': '',
+                'port': 0,
+                'last_seen': int(row.get('last_seen') or int(time.time())),
+            })
+        rows.sort(key=lambda x: (0 if x.get('online') else 1, str(x.get('name') or '').lower()))
+        return rows
+
+    def _open_party_hub(self):
+        pid = str(self.party_state.get('party_id') or '').strip()
+        options = ['Create Party', 'Invite Selected User', 'Party Members', 'Join Last Invite', 'Leave Party', 'Cancel']
+        desc = {
+            'Create Party': 'Create/refresh a global party room.',
+            'Invite Selected User': 'Invite selected global player or friend.',
+            'Party Members': 'Show current party roster.',
+            'Join Last Invite': 'Join latest incoming party invite.',
+            'Leave Party': 'Leave current party room.',
+            'Cancel': 'Back.',
+        }
+        pick = self._pick_from_menu('Party Hub', options, desc)
+        if not pick or pick == 'Cancel':
+            return
+        if pick == 'Create Party':
+            party_id = pid or f'party-{self.user_id[:6]}-{uuid.uuid4().hex[:6]}'
+            members = self.party_state.get('members') if isinstance(self.party_state.get('members'), dict) else {}
+            self.party_state['party_id'] = party_id
+            self.party_state['party_name'] = f'{self.nickname} Party'
+            members[self.user_id] = {'name': self.nickname, 'online': True, 'last_seen': int(time.time())}
+            self.party_state['members'] = members
+            self._save_party_state()
+            self.engine.send_world_party_state(party_id, state='join')
+            self.status.setText(f'Party ready: {party_id}')
+            self._append_system(f'Party ready: {party_id}')
+            self._set_community_mode('party')
+            return
+        if pick == 'Invite Selected User':
+            peer = self._selected_peer() or {}
+            user_id = str(peer.get('user_id') or '').strip()
+            if not user_id:
+                low_name = str(peer.get('name') or '').strip().lower()
+                for uid, row in self.global_players.items():
+                    if str(row.get('name') or '').strip().lower() == low_name:
+                        user_id = str(uid)
+                        break
+            if not user_id:
+                self.status.setText('Select a global user to invite.')
+                return
+            if user_id == self.user_id:
+                self.status.setText('Cannot invite yourself.')
+                return
+            party_id = pid or f'party-{self.user_id[:6]}-{uuid.uuid4().hex[:6]}'
+            members = self.party_state.get('members') if isinstance(self.party_state.get('members'), dict) else {}
+            if not pid:
+                self.party_state['party_id'] = party_id
+                self.party_state['party_name'] = f'{self.nickname} Party'
+            members[self.user_id] = {'name': self.nickname, 'online': True, 'last_seen': int(time.time())}
+            self.party_state['members'] = members
+            try:
+                self.engine.send_world_party_invite(user_id, party_id, self.party_state.get('party_name', 'XUI Party'))
+                self.engine.send_world_party_state(party_id, state='join')
+                self._save_party_state()
+                self.status.setText(f"Party invite sent to {peer.get('name', 'user')}")
+                self._append_system(f"Party invite sent to {peer.get('name', 'user')}")
+            except Exception as exc:
+                self.status.setText(f'Party invite failed: {exc}')
+            return
+        if pick == 'Party Members':
+            rows = self._party_member_rows()
+            if not rows:
+                self._show_notice('Party Members', 'No members in party.')
+                return
+            txt = '\n'.join([f"- {r.get('name')} ({'Online' if r.get('online') else 'Offline'})" for r in rows[:48]])
+            self._show_notice('Party Members', txt)
+            return
+        if pick == 'Join Last Invite':
+            inv = self.last_party_invite or {}
+            party_id = str(inv.get('party_id') or '').strip()
+            if not party_id:
+                self.status.setText('No incoming party invite yet.')
+                return
+            members = self.party_state.get('members') if isinstance(self.party_state.get('members'), dict) else {}
+            self.party_state['party_id'] = party_id
+            self.party_state['party_name'] = str(inv.get('party_name') or f'Party {party_id}')
+            members[self.user_id] = {'name': self.nickname, 'online': True, 'last_seen': int(time.time())}
+            inv_uid = str(inv.get('from_user_id') or '').strip()
+            inv_name = str(inv.get('from') or 'Player')
+            if inv_uid and inv_uid != self.user_id:
+                members[inv_uid] = {'name': inv_name, 'online': True, 'last_seen': int(time.time())}
+            self.party_state['members'] = members
+            self._save_party_state()
+            self.engine.send_world_party_state(party_id, state='join')
+            self.status.setText(f'Joined party {party_id}')
+            self._append_system(f'Joined party {party_id}')
+            self._set_community_mode('party')
+            return
+        if pick == 'Leave Party':
+            party_id = str(self.party_state.get('party_id') or '').strip()
+            if party_id:
+                self.engine.send_world_party_state(party_id, state='leave')
+            self.party_state = {'party_id': '', 'party_name': '', 'members': {}}
+            self._save_party_state()
+            self.status.setText('Party closed.')
+            self._append_system('Party closed.')
+            self._set_community_mode('messages')
+
     def _friend_endpoint_key(self, host, port):
         h = str(host or '').strip().lower()
         try:
@@ -2391,10 +4163,12 @@ class SocialOverlay(QtWidgets.QDialog):
                 port = 0
             out.append({
                 'name': name or host or 'Friend',
+                'user_id': str(raw.get('user_id') or '').strip(),
                 'host': host,
                 'port': int(port),
                 'online': bool(raw.get('online', False)),
                 'accepted': bool(raw.get('accepted', True)),
+                'source': str(raw.get('source') or 'GLOBAL'),
                 'last_seen': int(raw.get('last_seen', int(time.time()))),
             })
         self.friends = out
@@ -2403,6 +4177,10 @@ class SocialOverlay(QtWidgets.QDialog):
         safe_json_write(FRIENDS_FILE, self.friends)
 
     def _friend_matches_peer(self, friend, peer):
+        fu = str(friend.get('user_id') or '').strip()
+        pu = str(peer.get('user_id') or '').strip()
+        if fu and pu and fu == pu:
+            return True
         fh = str(friend.get('host') or '').strip().lower()
         ph = str(peer.get('host') or '').strip().lower()
         fp = int(friend.get('port') or 0)
@@ -2427,33 +4205,42 @@ class SocialOverlay(QtWidgets.QDialog):
                 if f.get('online') != bool(online):
                     f['online'] = bool(online)
                     changed = True
-                f['last_seen'] = now
-                changed = True
+                prev_seen = int(f.get('last_seen') or 0)
+                if abs(now - prev_seen) >= 20:
+                    f['last_seen'] = now
+                    changed = True
         if changed:
             self._save_friends()
 
-    def _upsert_friend(self, name, host, port):
+    def _upsert_friend(self, name, host, port, user_id='', source='GLOBAL'):
         host = str(host or '').strip()
+        user_id = str(user_id or '').strip()
         try:
             port = int(port or 0)
         except Exception:
             port = 0
-        key = self._friend_endpoint_key(host, port)
+        key = self._friend_endpoint_key(host, port) if (host or port > 0) else ''
         now = int(time.time())
         for f in self.friends:
-            if self._friend_endpoint_key(f.get('host'), f.get('port')) == key:
+            same_uid = bool(user_id and str(f.get('user_id') or '').strip() == user_id)
+            same_ep = bool(key and self._friend_endpoint_key(f.get('host'), f.get('port')) == key)
+            if same_uid or same_ep:
                 f['name'] = str(name or f.get('name') or host or 'Friend')
+                f['user_id'] = user_id or str(f.get('user_id') or '')
                 f['online'] = True
                 f['accepted'] = True
+                f['source'] = str(source or f.get('source') or 'GLOBAL')
                 f['last_seen'] = now
                 self._save_friends()
                 return
         self.friends.append({
             'name': str(name or host or 'Friend'),
+            'user_id': user_id,
             'host': host,
             'port': int(port),
             'online': True,
             'accepted': True,
+            'source': str(source or 'GLOBAL'),
             'last_seen': now,
         })
         self._save_friends()
@@ -2468,9 +4255,11 @@ class SocialOverlay(QtWidgets.QDialog):
                 continue
             out.append({
                 'name': str(raw.get('name') or 'Unknown').strip() or 'Unknown',
+                'user_id': str(raw.get('user_id') or '').strip(),
                 'host': str(raw.get('host') or '').strip(),
                 'port': int(raw.get('port') or 0),
                 'note': str(raw.get('note') or '').strip(),
+                'kind': str(raw.get('kind') or 'lan').strip().lower(),
                 'ts': int(raw.get('ts') or int(time.time())),
             })
         self.friend_requests = out
@@ -2478,20 +4267,28 @@ class SocialOverlay(QtWidgets.QDialog):
     def _save_friend_requests(self):
         safe_json_write(FRIEND_REQUESTS_FILE, self.friend_requests)
 
-    def _queue_friend_request(self, name, host, port, note=''):
-        key = self._friend_endpoint_key(host, port)
+    def _queue_friend_request(self, name, host, port, note='', user_id='', kind='lan'):
+        key = self._friend_endpoint_key(host, port) if (str(host or '').strip() or int(port or 0) > 0) else ''
+        uid = str(user_id or '').strip()
         for req in self.friend_requests:
-            if self._friend_endpoint_key(req.get('host'), req.get('port')) == key:
+            req_uid = str(req.get('user_id') or '').strip()
+            same_uid = bool(uid and req_uid == uid)
+            same_ep = bool(key and self._friend_endpoint_key(req.get('host'), req.get('port')) == key)
+            if same_uid or same_ep:
                 req['name'] = str(name or req.get('name') or 'Unknown')
+                req['user_id'] = uid or req_uid
                 req['note'] = str(note or req.get('note') or '')
+                req['kind'] = str(kind or req.get('kind') or 'lan').strip().lower()
                 req['ts'] = int(time.time())
                 self._save_friend_requests()
                 return
         self.friend_requests.insert(0, {
             'name': str(name or 'Unknown'),
+            'user_id': uid,
             'host': str(host or ''),
             'port': int(port or 0),
             'note': str(note or ''),
+            'kind': str(kind or 'lan').strip().lower(),
             'ts': int(time.time()),
         })
         self.friend_requests = self.friend_requests[:120]
@@ -2504,8 +4301,28 @@ class SocialOverlay(QtWidgets.QDialog):
     def _send_friend_request(self):
         peer = self._selected_peer()
         if not peer or str(peer.get('source')) == 'WORLD':
-            QtWidgets.QMessageBox.information(self, 'Friend Request', 'Select a LAN/P2P peer first.')
+            self._show_notice('Friend Request', 'Select a player first.')
             return
+        peer_name = str(peer.get('name') or 'player')
+        peer_uid = str(peer.get('user_id') or '').strip()
+        if self._is_friend(peer):
+            self.status.setText(f'{peer_name} is already your friend.')
+            return
+        if not peer_uid:
+            low_name = peer_name.strip().lower()
+            for uid, row in self.global_players.items():
+                if str(row.get('name') or '').strip().lower() == low_name:
+                    peer_uid = str(uid)
+                    break
+        if peer_uid:
+            try:
+                self.engine.send_world_friend_request(peer_uid, f'Add {self.nickname} as friend')
+                self.status.setText(f'Friend request sent to {peer_name}')
+                self._append_system(f'Global friend request sent to {peer_name}')
+                return
+            except Exception as exc:
+                self.status.setText(f'Friend request failed: {exc}')
+                return
         candidates = self._send_candidates(peer)
         err = None
         sent = None
@@ -2524,20 +4341,24 @@ class SocialOverlay(QtWidgets.QDialog):
 
     def _open_friend_requests(self):
         if not self.friend_requests:
-            QtWidgets.QMessageBox.information(self, 'Friend Requests', 'No pending requests.')
+            self._show_notice('Friend Requests', 'No pending requests.')
             return
         options = []
         descriptions = {}
         for i, req in enumerate(self.friend_requests[:40], 1):
             name = str(req.get('name') or 'Unknown')
+            uid = str(req.get('user_id') or '').strip()
             host = str(req.get('host') or '-')
             port = int(req.get('port') or 0)
             note = str(req.get('note') or '').strip()
             op = f'{i:02d}. {name}'
             options.append(op)
-            descriptions[op] = f'{host}:{port}' + (f' | {note}' if note else '')
+            if uid:
+                descriptions[op] = f'global user: {uid}' + (f' | {note}' if note else '')
+            else:
+                descriptions[op] = f'{host}:{port}' + (f' | {note}' if note else '')
         options.append('Back')
-        pick = self.parent()._choose_from_menu('Friend Requests', options, descriptions) if self.parent() else None
+        pick = self._pick_from_menu('Friend Requests', options, descriptions)
         if not pick or pick == 'Back':
             return
         try:
@@ -2547,7 +4368,7 @@ class SocialOverlay(QtWidgets.QDialog):
         if idx < 0 or idx >= len(self.friend_requests):
             return
         req = self.friend_requests[idx]
-        ask = self.parent()._choose_from_menu(
+        ask = self._pick_from_menu(
             'Friend Request',
             ['Accept', 'Reject', 'Cancel'],
             {
@@ -2555,11 +4376,26 @@ class SocialOverlay(QtWidgets.QDialog):
                 'Reject': f"Reject request from {req.get('name','Unknown')}.",
                 'Cancel': 'Go back.',
             },
-        ) if self.parent() else None
+        )
         if not ask or ask == 'Cancel':
             return
         if ask == 'Accept':
-            self._upsert_friend(req.get('name'), req.get('host'), req.get('port'))
+            self._upsert_friend(
+                req.get('name'),
+                req.get('host'),
+                req.get('port'),
+                user_id=req.get('user_id'),
+                source='GLOBAL' if str(req.get('kind') or '').lower() == 'global' else 'LAN',
+            )
+            req_uid = str(req.get('user_id') or '').strip()
+            if req_uid:
+                self._touch_global_player(req_uid, req.get('name'), 'friend')
+            to_uid = str(req.get('user_id') or '').strip()
+            if to_uid:
+                try:
+                    self.engine.send_world_friend_accept(to_uid)
+                except Exception:
+                    pass
             self._append_system(f"Friend added: {req.get('name', 'Unknown')}")
             self.status.setText(f"Friend added: {req.get('name', 'Unknown')}")
         else:
@@ -2568,23 +4404,36 @@ class SocialOverlay(QtWidgets.QDialog):
         self._save_friend_requests()
 
     def _peer_row(self, peer):
-        if str(peer.get('source')) == 'WORLD':
+        src = str(peer.get('source') or '').upper()
+        if src == 'WORLD':
             return f"{peer['name']}  [global relay]  (WORLD)"
+        if src == 'GLOBAL':
+            st = 'online' if bool(peer.get('online', True)) else 'offline'
+            return f"{peer['name']}  [global {st}]  (GLOBAL)"
+        if src == 'FRIEND':
+            return f"{peer['name']}  [friend]  (FRIEND)"
         return f"{peer['name']}  [{peer['host']}:{peer['port']}]  ({peer['source']})"
 
     def _upsert_peer(self, peer, persist=False):
-        key = f"{peer['host']}:{int(peer.get('port', 0) or 0)}:{peer.get('source', '')}"
+        source = str(peer.get('source') or 'LAN')
+        uid = str(peer.get('user_id') or '').strip()
+        if uid:
+            key = f'uid:{uid}:{source}'
+        else:
+            key = f"{peer['host']}:{int(peer.get('port', 0) or 0)}:{source}"
         data = {
             'name': str(peer.get('name') or peer.get('host')),
             'host': str(peer.get('host')),
             'port': int(peer.get('port') or 0),
-            'source': str(peer.get('source') or 'LAN'),
+            'source': source,
             'node_id': str(peer.get('node_id') or ''),
+            'user_id': uid,
+            'online': bool(peer.get('online', True)),
             '_world': bool(peer.get('_world', False)),
         }
-        if not data['host']:
+        if not data['host'] and not uid:
             return
-        if data['source'] != 'WORLD' and data['port'] <= 0:
+        if data['source'] not in ('WORLD', 'GLOBAL', 'FRIEND', 'PARTY', 'RECENT') and data['port'] <= 0:
             return
         if key in self.peer_data:
             self.peer_data[key].update(data)
@@ -2705,7 +4554,7 @@ class SocialOverlay(QtWidgets.QDialog):
             return
         parsed = parse_peer_id(d.textValue())
         if not parsed:
-            QtWidgets.QMessageBox.warning(self, 'Invalid peer', 'Use alias@host:port or host:port')
+            self._show_notice('Invalid peer', 'Use alias@host:port or host:port')
             return
         self._upsert_peer(parsed, persist=True)
         self._append_system(f"Manual peer added: {parsed['host']}:{parsed['port']}")
@@ -2717,31 +4566,18 @@ class SocialOverlay(QtWidgets.QDialog):
             lines += ['', 'Warning: chat TCP server is not active on this dashboard.']
         if ips and all(str(ip).startswith('10.0.2.') for ip in ips):
             lines += ['', 'VirtualBox NAT detected (10.0.2.x only).', 'Use Bridged or Host-Only Adapter for VM-to-VM LAN chat.']
-        QtWidgets.QMessageBox.information(self, 'My Peer IDs', '\n'.join(lines))
+        self._show_notice('My Peer IDs', '\n'.join(lines))
 
     def _show_lan_status(self):
         out = subprocess.getoutput('ip -brief -4 addr 2>/dev/null || ip -4 addr show 2>/dev/null || true')
-        QtWidgets.QMessageBox.information(self, 'LAN Status', out or 'No network data.')
+        self._show_notice('LAN Status', out or 'No network data.')
 
     def _open_voice_call_hub(self):
-        script = XUI_HOME / 'bin' / 'xui_social_chat.py'
-        if not script.exists():
-            self.status.setText(f'Voice/Call hub missing: {script}')
-            return
-        try:
-            subprocess.Popen(
-                ['/bin/sh', '-c', f'"{script}"'],
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-            )
-            self.status.setText('Opened Voice/Call hub.')
-            self._append_system('Opened global Voice/Call hub.')
-        except Exception as exc:
-            self.status.setText(f'Cannot open Voice/Call hub: {exc}')
+        self._open_voice_hub()
 
     def _stop_call_session(self, notify=False):
         if notify:
-            self.status.setText('No active call session in inline social overlay.')
+            self.status.setText('Voice session is integrated in Social Hub.')
 
     def _load_world_settings(self):
         cfg = safe_json_read(WORLD_CHAT_FILE, {})
@@ -2815,7 +4651,7 @@ class SocialOverlay(QtWidgets.QDialog):
     def _send_current(self):
         peer = self._selected_peer()
         if not peer:
-            QtWidgets.QMessageBox.information(self, 'Peer required', 'Select a peer first.')
+            self._show_notice('Peer required', 'Select a peer first.')
             return
         txt = self.input.text().strip()
         if not txt:
@@ -2830,6 +4666,19 @@ class SocialOverlay(QtWidgets.QDialog):
             except Exception as e:
                 self.status.setText(f'World send failed: {e}')
             return
+        peer_uid = str(peer.get('user_id') or '').strip()
+        peer_src = str(peer.get('source') or '').upper()
+        if peer_uid and peer_src in ('GLOBAL', 'FRIEND', 'PARTY', 'RECENT'):
+            try:
+                self.engine.send_world_private_message(peer_uid, txt)
+                self._append_line(f"[{time.strftime('%H:%M:%S')}] You -> {peer.get('name', 'User')} [PM]: {txt}")
+                self._push_recent_message(f"You -> {peer.get('name', 'User')} [PM]", txt)
+                self.status.setText(f"PM sent to {peer.get('name', 'user')}")
+                self.input.clear()
+                return
+            except Exception as exc:
+                self.status.setText(f'Global PM failed: {exc}')
+                return
         is_friend = self._is_friend(peer)
         last_err = None
         used = None
@@ -2866,6 +4715,72 @@ class SocialOverlay(QtWidgets.QDialog):
         err_txt = str(last_err) if last_err is not None else 'No reachable peer endpoint.'
         self.status.setText(f'Cannot send: {err_txt}')
 
+    def _touch_global_player(self, user_id, name, status='online'):
+        uid = str(user_id or '').strip()
+        if not uid or uid == self.user_id:
+            return
+        now = int(time.time())
+        row = self.global_players.get(uid, {})
+        row.update({
+            'name': str(name or row.get('name') or 'Player'),
+            'status': str(status or 'online'),
+            'online': True,
+            'last_seen': now,
+        })
+        self.global_players[uid] = row
+        members = self.party_state.get('members') if isinstance(self.party_state.get('members'), dict) else {}
+        if uid in members:
+            m = dict(members.get(uid) or {})
+            m['name'] = row.get('name', m.get('name', 'Player'))
+            m['online'] = True
+            m['last_seen'] = now
+            members[uid] = m
+            self.party_state['members'] = members
+        self._upsert_peer(
+            {
+                'name': row.get('name', 'Player'),
+                'host': 'global',
+                'port': 0,
+                'source': 'GLOBAL',
+                'node_id': str(row.get('node_id') or ''),
+                'user_id': uid,
+                'online': bool(row.get('online', True)),
+            },
+            persist=False,
+        )
+        self._mark_friend_online({'user_id': uid, 'name': row.get('name')}, True)
+
+    def _expire_global_players(self):
+        now = int(time.time())
+        changed = False
+        for uid, row in list(self.global_players.items()):
+            last_seen = int(row.get('last_seen') or 0)
+            online = bool(row.get('online', False))
+            if online and (now - last_seen) > 80:
+                row['online'] = False
+                self.global_players[uid] = row
+                members = self.party_state.get('members') if isinstance(self.party_state.get('members'), dict) else {}
+                if uid in members:
+                    m = dict(members.get(uid) or {})
+                    m['online'] = False
+                    members[uid] = m
+                    self.party_state['members'] = members
+                self._upsert_peer(
+                    {
+                        'name': row.get('name', 'Player'),
+                        'host': 'global',
+                        'port': 0,
+                        'source': 'GLOBAL',
+                        'node_id': str(row.get('node_id') or ''),
+                        'user_id': uid,
+                        'online': False,
+                    },
+                    persist=False,
+                )
+                self._mark_friend_online({'user_id': uid, 'name': row.get('name')}, False)
+                changed = True
+        return changed
+
     def _poll_events(self):
         while True:
             try:
@@ -2892,15 +4807,112 @@ class SocialOverlay(QtWidgets.QDialog):
                 _kind, sender, text = evt
                 self._append_line(f"[{time.strftime('%H:%M:%S')}] {sender} [PM]: {text}")
                 self._push_recent_message(f'{sender} [PM]', text)
+            elif kind == 'world_private_message':
+                _kind, sender, sender_user_id, text = evt
+                self._append_line(f"[{time.strftime('%H:%M:%S')}] {sender} [GLOBAL PM]: {text}")
+                self._push_recent_message(f'{sender} [PM]', text)
+                self._touch_global_player(sender_user_id, sender, 'pm')
+                self.status.setText(f'Private message from {sender}')
             elif kind == 'friend_request':
-                _kind, sender, host, port, note = evt
-                self._queue_friend_request(sender, host, port, note)
+                sender = str(evt[1] if len(evt) > 1 else 'Unknown')
+                host = str(evt[2] if len(evt) > 2 else '')
+                try:
+                    port = int(evt[3] if len(evt) > 3 else 0)
+                except Exception:
+                    port = 0
+                note = str(evt[4] if len(evt) > 4 else '')
+                sender_user_id = str(evt[5] if len(evt) > 5 else '').strip()
+                self._queue_friend_request(sender, host, port, note, user_id=sender_user_id, kind='lan')
                 self._append_system(f"Friend request from {sender} [{host}:{port}]")
                 self.status.setText(f"Pending friend requests: {len(self.friend_requests)}")
+            elif kind == 'global_friend_request':
+                _kind, sender, sender_user_id, note = evt
+                self._queue_friend_request(sender, '', 0, note, user_id=sender_user_id, kind='global')
+                self._touch_global_player(sender_user_id, sender, 'friend request')
+                self._append_system(f"Global friend request from {sender}")
+                self.status.setText(f"Pending friend requests: {len(self.friend_requests)}")
+            elif kind == 'global_friend_accept':
+                _kind, sender, sender_user_id = evt
+                self._upsert_friend(sender, '', 0, user_id=sender_user_id, source='GLOBAL')
+                self._touch_global_player(sender_user_id, sender, 'friend')
+                self._append_system(f'{sender} accepted your friend request.')
+                self.status.setText(f'Friend added: {sender}')
             elif kind == 'world_chat':
                 _kind, sender, text = evt
                 self._append_line(f"[{time.strftime('%H:%M:%S')}] {sender} [WORLD]: {text}")
                 self._push_recent_message(f'{sender} [WORLD]', text)
+            elif kind == 'world_presence':
+                _kind, data = evt
+                if isinstance(data, dict):
+                    uid = str(data.get('user_id') or '').strip()
+                    name = str(data.get('name') or 'Player')
+                    if uid and uid != self.user_id:
+                        self._touch_global_player(uid, name, 'online')
+            elif kind == 'party_invite':
+                _kind, data = evt
+                if isinstance(data, dict):
+                    self.last_party_invite = dict(data)
+                    who = str(data.get('from') or 'Player')
+                    who_uid = str(data.get('from_user_id') or '').strip()
+                    pid = str(data.get('party_id') or '')
+                    if who_uid:
+                        self._touch_global_player(who_uid, who, 'party invite')
+                    self._append_system(f'Party invite from {who} ({pid})')
+                    self.status.setText(f'Party invite: {who}')
+            elif kind == 'party_state':
+                _kind, data = evt
+                if not isinstance(data, dict):
+                    continue
+                uid = str(data.get('from_user_id') or '').strip()
+                who = str(data.get('from') or 'Player')
+                pid = str(data.get('party_id') or '').strip()
+                state = str(data.get('state') or '').strip().lower()
+                if uid and pid and (pid == str(self.party_state.get('party_id') or '').strip()):
+                    members = self.party_state.get('members') if isinstance(self.party_state.get('members'), dict) else {}
+                    if state == 'leave':
+                        members.pop(uid, None)
+                    else:
+                        members[uid] = {'name': who, 'online': True, 'last_seen': int(time.time())}
+                    self.party_state['members'] = members
+                    self._save_party_state()
+                    self._touch_global_player(uid, who, 'party')
+            elif kind == 'voice_message':
+                sender = str(evt[1] if len(evt) > 1 else 'Unknown')
+                mime = str(evt[4] if len(evt) > 4 else 'audio/ogg')
+                try:
+                    duration = float(evt[5] if len(evt) > 5 else 0.0)
+                except Exception:
+                    duration = 0.0
+                encoded_audio = str(evt[6] if len(evt) > 6 else '')
+                sender_user_id = str(evt[7] if len(evt) > 7 else '').strip()
+                try:
+                    blob = base64.b64decode(str(encoded_audio or '').encode('ascii', errors='ignore'), validate=False)
+                except Exception:
+                    blob = b''
+                if blob:
+                    item = self._save_voice_blob(sender, sender_user_id, mime, duration, blob, party_id='')
+                    if item is not None:
+                        self._append_line(f"[{time.strftime('%H:%M:%S')}] {sender} [VOICE {float(duration):.0f}s]")
+                        self._push_recent_message(f'{sender} [VOICE]', f'Voice message ({float(duration):.0f}s)')
+                        if sender_user_id:
+                            self._touch_global_player(sender_user_id, sender, 'voice')
+                        self.status.setText(f'New voice message from {sender}')
+            elif kind == 'world_voice_message':
+                _kind, sender, sender_user_id, party_id, mime, duration, encoded_audio = evt
+                if party_id and party_id != str(self.party_state.get('party_id') or '').strip():
+                    continue
+                try:
+                    blob = base64.b64decode(str(encoded_audio or '').encode('ascii', errors='ignore'), validate=False)
+                except Exception:
+                    blob = b''
+                if blob:
+                    item = self._save_voice_blob(sender, sender_user_id, mime, duration, blob, party_id=party_id)
+                    if item is not None:
+                        tag = 'PARTY VOICE' if party_id else 'VOICE'
+                        self._append_line(f"[{time.strftime('%H:%M:%S')}] {sender} [{tag} {float(duration):.0f}s]")
+                        self._push_recent_message(f'{sender} [{tag}]', f'Voice message ({float(duration):.0f}s)')
+                        self._touch_global_player(sender_user_id, sender, 'voice')
+                        self.status.setText(f'New voice message from {sender}')
             elif kind == 'world_status':
                 _kind, enabled, room = evt
                 self._update_world_toggle_button()
@@ -2913,6 +4925,7 @@ class SocialOverlay(QtWidgets.QDialog):
                 _kind, room = evt
                 self._refresh_world_peer()
                 self.status.setText(f'World room: {room}')
+        self._expire_global_players()
         self._refresh_community_tabs()
         if self._community_mode != 'messages':
             if self._community_mode == 'friends':
@@ -2927,8 +4940,15 @@ class SocialOverlay(QtWidgets.QDialog):
             self.timer.stop()
         except Exception:
             pass
+        try:
+            if self._gp_timer is not None:
+                self._gp_timer.stop()
+        except Exception:
+            pass
         self._stop_call_session(notify=False)
         self._save_world_settings()
+        self._save_party_state()
+        self._save_voice_inbox()
         self.engine.stop()
         super().closeEvent(e)
 
@@ -2949,12 +4969,15 @@ class TopTabs(QtWidgets.QWidget):
         self.names = list(names)
         self.labels = []
         self.current = 0
+        self._active_px = None
+        self._idle_px = None
         self._scale = 1.0
         self._compact = False
         h = QtWidgets.QHBoxLayout(self)
         self._layout = h
         h.setContentsMargins(0, 0, 0, 0)
-        h.setSpacing(28)
+        h.setSpacing(16)
+        h.addStretch(1)
         for i, n in enumerate(self.names):
             lbl = TabLabel(n)
             lbl.setCursor(QtGui.QCursor(QtCore.Qt.PointingHandCursor))
@@ -2968,23 +4991,54 @@ class TopTabs(QtWidgets.QWidget):
     def apply_scale(self, scale=1.0, compact=False):
         self._scale = max(0.62, float(scale))
         self._compact = bool(compact)
-        spacing = int(28 * self._scale * (0.75 if self._compact else 1.0))
+        spacing = int(16 * self._scale * (0.90 if self._compact else 1.0))
         self._layout.setSpacing(max(8, spacing))
         self.set_current(self.current)
 
     def set_current(self, idx):
-        self.current = max(0, min(idx, len(self.labels)-1))
-        active_px = max(20, int((42 if not self._compact else 30) * self._scale))
-        idle_px = max(16, int((34 if not self._compact else 24) * self._scale))
-        for i, lbl in enumerate(self.labels):
-            if i == self.current:
-                lbl.setStyleSheet(f'color:#f3f7f7; font-size:{active_px}px; font-weight:700;')
-            else:
-                lbl.setStyleSheet(f'color:rgba(230,236,240,0.64); font-size:{idle_px}px; font-weight:600;')
+        new_idx = max(0, min(idx, len(self.labels) - 1))
+        active_px = max(16, int((30 if not self._compact else 24) * self._scale))
+        idle_px = max(12, int((24 if not self._compact else 19) * self._scale))
+        old_idx = int(self.current)
+        sizes_changed = (active_px != self._active_px) or (idle_px != self._idle_px)
+        self._active_px = active_px
+        self._idle_px = idle_px
+        self.current = new_idx
+
+        if sizes_changed:
+            for i, lbl in enumerate(self.labels):
+                if i == self.current:
+                    lbl.setStyleSheet(
+                        f'color:#f4f6f8; font-size:{active_px}px; font-weight:700; '
+                        'font-family:"Segoe UI","Noto Sans",sans-serif;'
+                    )
+                else:
+                    lbl.setStyleSheet(
+                        f'color:rgba(210,217,224,0.82); font-size:{idle_px}px; font-weight:600; '
+                        'font-family:"Segoe UI","Noto Sans",sans-serif;'
+                    )
+            return
+
+        if old_idx == self.current:
+            return
+
+        if 0 <= old_idx < len(self.labels):
+            self.labels[old_idx].setStyleSheet(
+                f'color:rgba(210,217,224,0.82); font-size:{idle_px}px; font-weight:600; '
+                'font-family:"Segoe UI","Noto Sans",sans-serif;'
+            )
+        if 0 <= self.current < len(self.labels):
+            self.labels[self.current].setStyleSheet(
+                f'color:#f4f6f8; font-size:{active_px}px; font-weight:700; '
+                'font-family:"Segoe UI","Noto Sans",sans-serif;'
+            )
 
 
 def tile_icon(action, text=''):
     key = f'{action} {text}'.lower()
+    cached = _TILE_ICON_CACHE.get(key)
+    if cached is not None and not cached.isNull():
+        return cached
     style = QtWidgets.QApplication.style()
 
     def themed(names, fallback):
@@ -2995,22 +5049,25 @@ def tile_icon(action, text=''):
         return style.standardIcon(fallback)
 
     if any(token in key for token in ('steam', 'retroarch', 'lutris', 'heroic', 'runner', 'casino', 'mission', 'game')):
-        return themed(['steam', 'applications-games', 'input-gaming'], QtWidgets.QStyle.SP_MediaPlay)
-    if any(token in key for token in ('store', 'avatar')):
-        return themed(['folder-downloads', 'applications-other'], QtWidgets.QStyle.SP_DirIcon)
-    if any(token in key for token in ('music', 'audio', 'playlist', 'visualizer', 'startup sound')):
-        return themed(['audio-x-generic', 'multimedia-volume-control'], QtWidgets.QStyle.SP_MediaVolume)
-    if any(token in key for token in ('tv', 'movie', 'media', 'youtube', 'netflix', 'kodi', 'video')):
-        return themed(['video-x-generic', 'applications-multimedia'], QtWidgets.QStyle.SP_MediaPlay)
-    if any(token in key for token in ('social', 'friend', 'message', 'party', 'gamer')):
-        return themed(['user-available', 'im-user-online'], QtWidgets.QStyle.SP_DirHomeIcon)
-    if any(token in key for token in ('settings', 'system', 'service', 'developer', 'battery', 'power', 'profile')):
-        return themed(['preferences-system', 'applications-system'], QtWidgets.QStyle.SP_ComputerIcon)
-    if any(token in key for token in ('web', 'browser', 'network', 'lan')):
-        return themed(['internet-web-browser', 'network-workgroup'], QtWidgets.QStyle.SP_DriveNetIcon)
-    if any(token in key for token in ('turn off', 'exit', 'shutdown')):
-        return themed(['system-shutdown', 'application-exit'], QtWidgets.QStyle.SP_TitleBarCloseButton)
-    return themed(['applications-other'], QtWidgets.QStyle.SP_FileIcon)
+        icon = themed(['steam', 'applications-games', 'input-gaming'], QtWidgets.QStyle.SP_MediaPlay)
+    elif any(token in key for token in ('store', 'avatar')):
+        icon = themed(['folder-downloads', 'applications-other'], QtWidgets.QStyle.SP_DirIcon)
+    elif any(token in key for token in ('music', 'audio', 'playlist', 'visualizer', 'startup sound')):
+        icon = themed(['audio-x-generic', 'multimedia-volume-control'], QtWidgets.QStyle.SP_MediaVolume)
+    elif any(token in key for token in ('tv', 'movie', 'media', 'youtube', 'netflix', 'kodi', 'video')):
+        icon = themed(['video-x-generic', 'applications-multimedia'], QtWidgets.QStyle.SP_MediaPlay)
+    elif any(token in key for token in ('social', 'friend', 'message', 'party', 'gamer')):
+        icon = themed(['user-available', 'im-user-online'], QtWidgets.QStyle.SP_DirHomeIcon)
+    elif any(token in key for token in ('settings', 'system', 'service', 'developer', 'battery', 'power', 'profile')):
+        icon = themed(['preferences-system', 'applications-system'], QtWidgets.QStyle.SP_ComputerIcon)
+    elif any(token in key for token in ('web', 'browser', 'network', 'lan')):
+        icon = themed(['internet-web-browser', 'network-workgroup'], QtWidgets.QStyle.SP_DriveNetIcon)
+    elif any(token in key for token in ('turn off', 'exit', 'shutdown')):
+        icon = themed(['system-shutdown', 'application-exit'], QtWidgets.QStyle.SP_TitleBarCloseButton)
+    else:
+        icon = themed(['applications-other'], QtWidgets.QStyle.SP_FileIcon)
+    _TILE_ICON_CACHE[key] = icon
+    return icon
 
 
 class GreenTile(QtWidgets.QFrame):
@@ -3024,54 +5081,83 @@ class GreenTile(QtWidgets.QFrame):
         self.icon_scale = max(0.55, float(icon_scale))
         self.text_scale = max(0.65, float(text_scale))
         self.dense = bool(dense)
+        self._selected = None
+        self._scale_key = None
+        self._last_icon_px = None
+        self._last_label_px = None
         self.setObjectName('green_tile')
         self.setFocusPolicy(QtCore.Qt.StrongFocus)
         v = QtWidgets.QVBoxLayout(self)
         self._layout = v
-        v.setContentsMargins(14, 10, 14, 10)
+        v.setContentsMargins(10, 8, 10, 8)
         top = QtWidgets.QHBoxLayout()
         self._top_layout = top
         top.setContentsMargins(0, 0, 0, 0)
         self.icon = QtWidgets.QLabel()
         self.icon.setObjectName('tile_icon')
-        self.icon.setFixedSize(36, 36)
+        self.icon.setFixedSize(30, 30)
         self.icon.setAlignment(QtCore.Qt.AlignCenter)
         icon = tile_icon(action, text)
-        self.icon.setPixmap(icon.pixmap(22, 22))
+        self.icon.setPixmap(icon.pixmap(18, 18))
         top.addWidget(self.icon, 0, alignment=QtCore.Qt.AlignLeft | QtCore.Qt.AlignTop)
         top.addStretch(1)
         v.addLayout(top)
         v.addStretch(1)
         self.lbl = QtWidgets.QLabel(text)
-        self.lbl.setStyleSheet('color:#f4fff3; font-size:24px; font-weight:700;')
+        self.lbl.setStyleSheet('color:#f4fff3; font-size:17px; font-weight:700; font-family:"Segoe UI","Noto Sans",sans-serif;')
         v.addWidget(self.lbl, alignment=QtCore.Qt.AlignLeft | QtCore.Qt.AlignBottom)
         self.apply_scale(1.0, False)
         self.set_selected(False)
 
     def apply_scale(self, scale=1.0, compact=False):
-        s = max(0.62, float(scale))
-        compact_factor = 0.85 if compact else 1.0
+        s = max(0.58, float(scale))
+        compact_factor = 0.96 if compact else 1.0
         if self.dense:
-            compact_factor *= 0.92
-        w = max(170, int(self.base_size[0] * s * compact_factor))
-        h = max(90, int(self.base_size[1] * s * compact_factor))
-        self.setFixedSize(w, h)
-        pad_x = max(7, int((13 if self.dense else 16) * s * compact_factor))
-        pad_y = max(5, int((8 if self.dense else 12) * s * compact_factor))
-        self._layout.setContentsMargins(pad_x, pad_y, pad_x, pad_y)
-        icon_sz = max(18, int(36 * s * compact_factor * self.icon_scale))
-        pix_sz = max(13, int(22 * s * compact_factor * self.icon_scale))
-        self.icon.setFixedSize(icon_sz, icon_sz)
-        icon = tile_icon(self.action, self.text)
-        self.icon.setPixmap(icon.pixmap(pix_sz, pix_sz))
-        font_px = max(11, int(22 * s * compact_factor * self.text_scale))
-        self.lbl.setStyleSheet(f'color:#f4fff3; font-size:{font_px}px; font-weight:700;')
+            compact_factor *= 0.93
+        w = max(120, int(self.base_size[0] * s * compact_factor))
+        h = max(72, int(self.base_size[1] * s * compact_factor))
+        pad_x = max(6, int((9 if self.dense else 12) * s * compact_factor))
+        pad_y = max(4, int((5 if self.dense else 8) * s * compact_factor))
+        icon_sz = max(16, int(30 * s * compact_factor * self.icon_scale))
+        pix_sz = max(12, int(18 * s * compact_factor * self.icon_scale))
+        font_px = max(10, int(17 * s * compact_factor * self.text_scale))
+        scale_key = (w, h, pad_x, pad_y, icon_sz, pix_sz, font_px)
+        if scale_key == self._scale_key:
+            return
+        self._scale_key = scale_key
+
+        if self.size() != QtCore.QSize(w, h):
+            self.setFixedSize(w, h)
+        margins = self._layout.contentsMargins()
+        if (
+            margins.left() != pad_x
+            or margins.top() != pad_y
+            or margins.right() != pad_x
+            or margins.bottom() != pad_y
+        ):
+            self._layout.setContentsMargins(pad_x, pad_y, pad_x, pad_y)
+        if self.icon.width() != icon_sz or self.icon.height() != icon_sz:
+            self.icon.setFixedSize(icon_sz, icon_sz)
+        if self._last_icon_px != pix_sz:
+            self._last_icon_px = pix_sz
+            icon = tile_icon(self.action, self.text)
+            self.icon.setPixmap(icon.pixmap(pix_sz, pix_sz))
+        if self._last_label_px != font_px:
+            self._last_label_px = font_px
+            self.lbl.setStyleSheet(
+                f'color:#f4fff3; font-size:{font_px}px; font-weight:700; '
+                'font-family:"Segoe UI","Noto Sans",sans-serif;'
+            )
 
     def set_selected(self, on):
-        border = 'rgba(248,255,248,0.96)' if on else 'rgba(255,255,255,0.22)'
-        width = '3px' if on else '1px'
-        bg_a = '#39d65a' if on else '#31c94f'
-        bg_b = '#2aa745' if on else '#259c3e'
+        on = bool(on)
+        if self._selected is on:
+            return
+        self._selected = on
+        border = 'rgba(249,255,249,0.98)' if on else 'rgba(244,252,246,0.32)'
+        width = '2px' if on else '1px'
+        bg_a = '#40ce55' if on else '#39c650'
+        bg_b = '#2ea63f' if on else '#2a9a3a'
         self.setStyleSheet(f'''
             QFrame#green_tile {{
                 background:qlineargradient(x1:0,y1:0,x2:0,y2:1, stop:0 {bg_a}, stop:1 {bg_b});
@@ -3098,42 +5184,77 @@ class HeroPanel(QtWidgets.QFrame):
         self.action = action
         self.title = title
         self.subtitle = subtitle
-        self.base_size = (900, 460)
+        self.base_size = (780, 320)
+        self._selected = None
+        self._scale_key = None
         self.setObjectName('hero_panel')
         v = QtWidgets.QVBoxLayout(self)
         self._layout = v
-        v.setContentsMargins(20, 16, 20, 14)
-        self.top_label = QtWidgets.QLabel(self.title)
-        self.top_label.setStyleSheet('color:#f2f6f9; font-size:34px; font-weight:700;')
+        v.setContentsMargins(16, 14, 16, 10)
+        self.top_label = QtWidgets.QLabel(str(self.title).lower())
+        self.top_label.setObjectName('hero_top')
         v.addWidget(self.top_label, 0, alignment=QtCore.Qt.AlignLeft | QtCore.Qt.AlignTop)
+        self.logo_label = QtWidgets.QLabel(str(self.title).upper())
+        self.logo_label.setObjectName('hero_logo')
+        self.logo_label.setAlignment(QtCore.Qt.AlignCenter)
+        v.addWidget(self.logo_label, 1)
         v.addStretch(1)
         self.sub_label = QtWidgets.QLabel(self.subtitle)
-        self.sub_label.setStyleSheet('color:rgba(226,234,241,0.78); font-size:22px; font-weight:600;')
+        self.sub_label.setObjectName('hero_sub')
+        self.sub_label.setWordWrap(True)
         v.addWidget(self.sub_label, 0, alignment=QtCore.Qt.AlignLeft | QtCore.Qt.AlignBottom)
         self.apply_scale(1.0, False)
         self.set_selected(False)
 
     def apply_scale(self, scale=1.0, compact=False):
-        s = max(0.62, float(scale))
-        compact_factor = 0.9 if compact else 1.0
+        s = max(0.58, float(scale))
+        compact_factor = 0.96 if compact else 1.0
         w = max(460, int(self.base_size[0] * s * compact_factor))
-        h = max(250, int(self.base_size[1] * s * compact_factor))
-        self.setFixedSize(w, h)
-        mx = max(10, int(22 * s * compact_factor))
-        my = max(8, int(18 * s * compact_factor))
-        mb = max(8, int(16 * s * compact_factor))
-        self._layout.setContentsMargins(mx, my, mx, mb)
-        title_fs = max(18, int(34 * s * compact_factor))
-        sub_fs = max(13, int(22 * s * compact_factor))
-        self.top_label.setStyleSheet(f'color:#f2f6f9; font-size:{title_fs}px; font-weight:700;')
-        self.sub_label.setStyleSheet(f'color:rgba(226,234,241,0.78); font-size:{sub_fs}px; font-weight:600;')
+        h = max(220, int(self.base_size[1] * s * compact_factor))
+        mx = max(10, int(16 * s * compact_factor))
+        my = max(8, int(14 * s * compact_factor))
+        mb = max(8, int(11 * s * compact_factor))
+        top_fs = max(12, int(18 * s * compact_factor))
+        logo_fs = max(18, int(44 * s * compact_factor))
+        sub_fs = max(10, int(14 * s * compact_factor))
+        scale_key = (w, h, mx, my, mb, top_fs, logo_fs, sub_fs)
+        if scale_key == self._scale_key:
+            return
+        self._scale_key = scale_key
+
+        if self.size() != QtCore.QSize(w, h):
+            self.setFixedSize(w, h)
+        margins = self._layout.contentsMargins()
+        if (
+            margins.left() != mx
+            or margins.top() != my
+            or margins.right() != mx
+            or margins.bottom() != mb
+        ):
+            self._layout.setContentsMargins(mx, my, mx, mb)
+        self.top_label.setStyleSheet(
+            f'color:rgba(238,244,247,0.92); font-size:{top_fs}px; font-weight:600; '
+            'font-family:"Segoe UI","Noto Sans",sans-serif;'
+        )
+        self.logo_label.setStyleSheet(
+            f'color:#f5fafb; font-size:{logo_fs}px; font-weight:700; '
+            'font-family:"Segoe UI","Noto Sans",sans-serif;'
+        )
+        self.sub_label.setStyleSheet(
+            f'color:rgba(230,238,243,0.86); font-size:{sub_fs}px; font-weight:600; '
+            'font-family:"Segoe UI","Noto Sans",sans-serif;'
+        )
 
     def set_selected(self, on):
-        border = 'rgba(240,248,255,0.92)' if on else 'rgba(255,255,255,0.2)'
-        width = '3px' if on else '1px'
+        on = bool(on)
+        if self._selected is on:
+            return
+        self._selected = on
+        border = 'rgba(244,250,255,0.9)' if on else 'rgba(240,246,252,0.28)'
+        width = '2px' if on else '1px'
         self.setStyleSheet(f'''
             QFrame#hero_panel {{
-                background:qlineargradient(x1:0,y1:0,x2:1,y2:1, stop:0 #0b1016, stop:1 #1a222c);
+                background:qlineargradient(x1:0,y1:0,x2:1,y2:1, stop:0 #1b1f25, stop:1 #101318);
                 border:{width} solid {border};
                 border-radius:0px;
             }}
@@ -3152,34 +5273,32 @@ class GamesShowcasePanel(QtWidgets.QFrame):
         self.action = action
         self.title = title
         self.subtitle = subtitle
-        self.base_size = (900, 460)
+        self.base_size = (820, 338)
+        self._selected = None
+        self._scale_key = None
         self.setObjectName('games_showcase_panel')
         self.setFocusPolicy(QtCore.Qt.StrongFocus)
-        self._cards = []
+        self._blade_buttons = []
+        self._cover_buttons = []
         self._build()
         self.apply_scale(1.0, False)
         self.set_selected(False)
 
-    def _make_mini_card(self, label):
-        card = QtWidgets.QFrame()
-        card.setObjectName('games_mini_card')
-        card_l = QtWidgets.QVBoxLayout(card)
-        card_l.setContentsMargins(8, 6, 8, 6)
-        card_l.setSpacing(0)
-        cat = QtWidgets.QLabel('GAME')
-        cat.setObjectName('games_mini_cat')
-        name = QtWidgets.QLabel(label)
-        name.setObjectName('games_mini_name')
-        card_l.addWidget(cat, 0, QtCore.Qt.AlignLeft | QtCore.Qt.AlignTop)
-        card_l.addStretch(1)
-        card_l.addWidget(name, 0, QtCore.Qt.AlignLeft | QtCore.Qt.AlignBottom)
-        return card
+    def _make_cover(self, text, action, color_a, color_b):
+        btn = QtWidgets.QPushButton(text)
+        btn.setObjectName('games_cover_tile')
+        btn.setProperty('ga', str(color_a))
+        btn.setProperty('gb', str(color_b))
+        btn.clicked.connect(lambda _=False, a=str(action): self.clicked.emit(a))
+        btn.setCursor(QtGui.QCursor(QtCore.Qt.PointingHandCursor))
+        self._cover_buttons.append(btn)
+        return btn
 
     def _build(self):
         root = QtWidgets.QVBoxLayout(self)
         self._layout = root
-        root.setContentsMargins(18, 16, 18, 12)
-        root.setSpacing(8)
+        root.setContentsMargins(12, 8, 12, 8)
+        root.setSpacing(6)
 
         title_row = QtWidgets.QHBoxLayout()
         self.top_label = QtWidgets.QLabel(self.title)
@@ -3194,127 +5313,133 @@ class GamesShowcasePanel(QtWidgets.QFrame):
         blades = QtWidgets.QFrame()
         blades.setObjectName('games_blades')
         blades_l = QtWidgets.QVBoxLayout(blades)
-        blades_l.setContentsMargins(6, 6, 6, 6)
+        blades_l.setContentsMargins(4, 4, 4, 4)
         blades_l.setSpacing(4)
         self.btn_my_games = QtWidgets.QPushButton('My Games')
         self.btn_browse_games = QtWidgets.QPushButton('Browse Games')
         self.btn_search_games = QtWidgets.QPushButton('Search Games')
         for b in (self.btn_my_games, self.btn_browse_games, self.btn_search_games):
             b.setObjectName('games_blade_btn')
+            b.setCursor(QtGui.QCursor(QtCore.Qt.PointingHandCursor))
             blades_l.addWidget(b)
+            self._blade_buttons.append(b)
         blades_l.addStretch(1)
         self.btn_my_games.clicked.connect(lambda: self.clicked.emit('My Games'))
         self.btn_browse_games.clicked.connect(lambda: self.clicked.emit('Browse Games'))
         self.btn_search_games.clicked.connect(lambda: self.clicked.emit('Search Games'))
         body.addWidget(blades, 1)
+        grid_wrap = QtWidgets.QFrame()
+        grid_wrap.setObjectName('games_grid')
+        grid = QtWidgets.QGridLayout(grid_wrap)
+        grid.setContentsMargins(0, 0, 0, 0)
+        grid.setHorizontalSpacing(4)
+        grid.setVerticalSpacing(4)
+        grid.setColumnStretch(0, 1)
+        grid.setColumnStretch(1, 1)
+        grid.setColumnStretch(2, 1)
+        grid.setRowStretch(0, 1)
+        grid.setRowStretch(1, 1)
 
-        right = QtWidgets.QVBoxLayout()
-        right.setSpacing(8)
+        self.cover_halo = self._make_cover('Halo 4', 'Showcase Halo 4', '#1f5c8d', '#113e63')
+        self.cover_cod = self._make_cover('Call of Duty: Black Ops', 'Showcase COD Black Ops', '#32353c', '#191b20')
+        self.cover_reco = self._make_cover('Gears of War:\nJudgment\nRecommended', 'Showcase Recommendations', '#f0f1f2', '#cfd2d6')
+        self.cover_fifa = self._make_cover('FIFA Soccer 13', 'Showcase FIFA Soccer 13', '#467e4d', '#315a38')
+        self.cover_nike = self._make_cover('Nike+ Kinect Training', 'Showcase Nike Kinect Training', '#7a2e30', '#541f21')
+        self.cover_all = self._make_cover('All Recommendations', 'Showcase All Recommendations', '#8e949c', '#707780')
 
-        covers = QtWidgets.QHBoxLayout()
-        covers.setSpacing(8)
-        self.featured = QtWidgets.QFrame()
-        self.featured.setObjectName('games_featured')
-        ft_l = QtWidgets.QVBoxLayout(self.featured)
-        ft_l.setContentsMargins(10, 8, 10, 8)
-        ft_l.setSpacing(2)
-        self.featured_tag = QtWidgets.QLabel('HIGHLIGHT')
-        self.featured_tag.setObjectName('games_featured_tag')
-        self.featured_name = QtWidgets.QLabel('Halo 4')
-        self.featured_name.setObjectName('games_featured_name')
-        self.featured_sub = QtWidgets.QLabel('Open your collection and continue playing')
-        self.featured_sub.setObjectName('games_featured_sub')
-        ft_l.addWidget(self.featured_tag, 0, QtCore.Qt.AlignLeft)
-        ft_l.addStretch(1)
-        ft_l.addWidget(self.featured_name, 0, QtCore.Qt.AlignLeft)
-        ft_l.addWidget(self.featured_sub, 0, QtCore.Qt.AlignLeft)
-        covers.addWidget(self.featured, 2)
-
-        mini_col = QtWidgets.QVBoxLayout()
-        mini_col.setSpacing(8)
-        for label in ('Forza 4', 'Gears', 'FIFA', 'MW3'):
-            card = self._make_mini_card(label)
-            self._cards.append(card)
-            mini_col.addWidget(card, 1)
-        covers.addLayout(mini_col, 1)
-        right.addLayout(covers, 1)
-
-        rec = QtWidgets.QFrame()
-        rec.setObjectName('games_recommend')
-        rec_l = QtWidgets.QVBoxLayout(rec)
-        rec_l.setContentsMargins(10, 6, 10, 6)
-        rec_l.setSpacing(2)
-        rec_tag = QtWidgets.QLabel('RECOMMENDATIONS')
-        rec_tag.setObjectName('games_recommend_tag')
-        rec_text = QtWidgets.QLabel('Popular now: Runner, Gem Match, FNAE')
-        rec_text.setObjectName('games_recommend_text')
-        rec_l.addWidget(rec_tag, 0, QtCore.Qt.AlignLeft)
-        rec_l.addWidget(rec_text, 0, QtCore.Qt.AlignLeft)
-        right.addWidget(rec, 0)
-
-        body.addLayout(right, 4)
+        grid.addWidget(self.cover_halo, 0, 0)
+        grid.addWidget(self.cover_cod, 0, 1)
+        grid.addWidget(self.cover_reco, 0, 2)
+        grid.addWidget(self.cover_fifa, 1, 0)
+        grid.addWidget(self.cover_nike, 1, 1)
+        grid.addWidget(self.cover_all, 1, 2)
+        body.addWidget(grid_wrap, 4)
 
         root.addLayout(body, 1)
-        self.sub_label = QtWidgets.QLabel(self.subtitle)
+        self.sub_label = QtWidgets.QLabel('A Select   X Search')
         self.sub_label.setObjectName('games_sub')
         root.addWidget(self.sub_label, 0, QtCore.Qt.AlignLeft | QtCore.Qt.AlignBottom)
 
     def apply_scale(self, scale=1.0, compact=False):
-        s = max(0.62, float(scale))
-        compact_factor = 0.88 if compact else 1.0
-        w = max(480, int(self.base_size[0] * s * compact_factor))
-        h = max(260, int(self.base_size[1] * s * compact_factor))
-        self.setFixedSize(w, h)
+        s = max(0.58, float(scale))
+        compact_factor = 0.96 if compact else 1.0
+        w = max(500, int(self.base_size[0] * s * compact_factor))
+        h = max(240, int(self.base_size[1] * s * compact_factor))
+        mx = max(8, int(12 * s * compact_factor))
+        my = max(6, int(8 * s * compact_factor))
+        mb = max(6, int(8 * s * compact_factor))
+        layout_spacing = max(4, int(6 * s * compact_factor))
 
-        mx = max(10, int(18 * s * compact_factor))
-        my = max(8, int(16 * s * compact_factor))
-        self._layout.setContentsMargins(mx, my, mx, max(8, int(12 * s * compact_factor)))
-        self._layout.setSpacing(max(6, int(8 * s * compact_factor)))
+        title_fs = max(14, int(22 * s * compact_factor))
+        sub_fs = max(9, int(12 * s * compact_factor))
+        blade_fs = max(10, int(14 * s * compact_factor))
+        blade_h = max(30, int(46 * s * compact_factor))
+        cover_fs = max(9, int(12 * s * compact_factor))
+        scale_key = (w, h, mx, my, mb, layout_spacing, title_fs, sub_fs, blade_fs, blade_h, cover_fs)
+        if scale_key == self._scale_key:
+            return
+        self._scale_key = scale_key
 
-        title_fs = max(20, int(37 * s * compact_factor))
-        sub_fs = max(13, int(22 * s * compact_factor))
-        blade_fs = max(11, int(17 * s * compact_factor))
-        self.top_label.setStyleSheet(f'color:#f2f6fa; font-size:{title_fs}px; font-weight:800;')
-        self.sub_label.setStyleSheet(f'color:rgba(235,242,244,0.78); font-size:{sub_fs}px; font-weight:600;')
+        if self.size() != QtCore.QSize(w, h):
+            self.setFixedSize(w, h)
+        margins = self._layout.contentsMargins()
+        if (
+            margins.left() != mx
+            or margins.top() != my
+            or margins.right() != mx
+            or margins.bottom() != mb
+        ):
+            self._layout.setContentsMargins(mx, my, mx, mb)
+        if self._layout.spacing() != layout_spacing:
+            self._layout.setSpacing(layout_spacing)
+        self.top_label.setStyleSheet(
+            f'color:rgba(240,246,249,0.93); font-size:{title_fs}px; font-weight:700; '
+            'font-family:"Segoe UI","Noto Sans",sans-serif;'
+        )
+        self.sub_label.setStyleSheet(
+            f'color:rgba(232,239,242,0.86); font-size:{sub_fs}px; font-weight:600; '
+            'font-family:"Segoe UI","Noto Sans",sans-serif;'
+        )
 
-        blade_h = max(40, int(58 * s * compact_factor))
-        for b in (self.btn_my_games, self.btn_browse_games, self.btn_search_games):
+        for b in self._blade_buttons:
             b.setMinimumHeight(blade_h)
             b.setStyleSheet(
                 'QPushButton#games_blade_btn {'
-                'text-align:left; padding:6px 8px;'
+                'text-align:left; padding:4px 7px;'
                 f'font-size:{blade_fs}px; font-weight:700;'
-                'color:#f3fff2; background:qlineargradient(x1:0,y1:0,x2:0,y2:1, stop:0 #35cb51, stop:1 #279f3f);'
-                'border:1px solid rgba(250,255,250,0.3); border-radius:0px; }'
-                'QPushButton#games_blade_btn:hover { background:#3ed35a; }'
+                'font-family:"Segoe UI","Noto Sans",sans-serif;'
+                'color:#f6fff6; background:qlineargradient(x1:0,y1:0,x2:0,y2:1, stop:0 #3ecf55, stop:1 #2ca43f);'
+                'border:1px solid rgba(248,255,248,0.34); border-radius:0px; }'
+                'QPushButton#games_blade_btn:hover { background:#45d75d; }'
             )
 
-        feat_name_fs = max(14, int(31 * s * compact_factor))
-        feat_sub_fs = max(10, int(16 * s * compact_factor))
-        self.featured_tag.setStyleSheet(f'color:rgba(220,231,236,0.92); font-size:{max(9, int(12 * s))}px; font-weight:700;')
-        self.featured_name.setStyleSheet(f'color:#eff4f8; font-size:{feat_name_fs}px; font-weight:800;')
-        self.featured_sub.setStyleSheet(f'color:rgba(234,241,246,0.86); font-size:{feat_sub_fs}px; font-weight:600;')
-
-        mini_h = max(54, int(88 * s * compact_factor))
-        mini_cat_fs = max(8, int(11 * s * compact_factor))
-        mini_name_fs = max(10, int(17 * s * compact_factor))
-        for c in self._cards:
-            c.setMinimumHeight(mini_h)
-            c.setStyleSheet(
-                'QFrame#games_mini_card {'
-                'background:qlineargradient(x1:0,y1:0,x2:1,y2:1, stop:0 #707b84, stop:1 #4f5962);'
-                'border:1px solid rgba(223,232,239,0.5); border-radius:0px; }'
-                f'QLabel#games_mini_cat {{ color:rgba(229,236,241,0.82); font-size:{mini_cat_fs}px; font-weight:700; }}'
-                f'QLabel#games_mini_name {{ color:#f3f7f9; font-size:{mini_name_fs}px; font-weight:700; }}'
+        for b in self._cover_buttons:
+            ga = str(b.property('ga') or '#4f5962')
+            gb = str(b.property('gb') or '#3b444d')
+            dark_text = ga.lower().startswith('#f')
+            txt_color = '#27313a' if dark_text else '#f2f7fa'
+            b.setStyleSheet(
+                'QPushButton#games_cover_tile {'
+                'text-align:left; padding:6px 8px; '
+                f'font-size:{cover_fs}px; font-weight:700; color:{txt_color}; '
+                'font-family:"Segoe UI","Noto Sans",sans-serif; '
+                f'background:qlineargradient(x1:0,y1:0,x2:1,y2:1, stop:0 {ga}, stop:1 {gb}); '
+                'border:1px solid rgba(241,248,252,0.35); border-radius:0px;'
+                '}'
+                'QPushButton#games_cover_tile:hover { border:1px solid rgba(255,255,255,0.65); }'
             )
 
     def set_selected(self, on):
-        border = 'rgba(240,248,255,0.92)' if on else 'rgba(255,255,255,0.2)'
-        width = '3px' if on else '1px'
+        on = bool(on)
+        if self._selected is on:
+            return
+        self._selected = on
+        border = 'rgba(242,248,254,0.9)' if on else 'rgba(246,252,255,0.30)'
+        width = '2px' if on else '1px'
         self.setStyleSheet(
             f'''
             QFrame#games_showcase_panel {{
-                background:qlineargradient(x1:0,y1:0,x2:1,y2:1, stop:0 #0b1016, stop:1 #1a222c);
+                background:qlineargradient(x1:0,y1:0,x2:1,y2:1, stop:0 #20242a, stop:1 #15181d);
                 border:{width} solid {border};
                 border-radius:0px;
             }}
@@ -3322,25 +5447,9 @@ class GamesShowcasePanel(QtWidgets.QFrame):
                 background:transparent;
                 border:0px solid transparent;
             }}
-            QFrame#games_featured {{
-                background:qlineargradient(x1:0,y1:0,x2:1,y2:1, stop:0 #4f5962, stop:1 #3b444d);
-                border:1px solid rgba(223,232,239,0.5);
-                border-radius:0px;
-            }}
-            QFrame#games_recommend {{
-                background:qlineargradient(x1:0,y1:0,x2:1,y2:0, stop:0 #d8dde3, stop:1 #c8ced5);
-                border:1px solid rgba(117,126,136,0.5);
-                border-radius:0px;
-            }}
-            QLabel#games_recommend_tag {{
-                color:#3f4a56;
-                font-size:11px;
-                font-weight:800;
-            }}
-            QLabel#games_recommend_text {{
-                color:#2f3944;
-                font-size:14px;
-                font-weight:700;
+            QFrame#games_grid {{
+                background:transparent;
+                border:0px solid transparent;
             }}
             '''
         )
@@ -3927,6 +6036,171 @@ class MandatoryUpdateDialog(QtWidgets.QDialog):
         super().keyPressEvent(e)
 
 
+class GuidePromptDialog(QtWidgets.QDialog):
+    def __init__(self, title, text, options=None, parent=None, default_choice='', cancel_choice=''):
+        super().__init__(parent)
+        opts = [str(x).strip() for x in (options or []) if str(x).strip()]
+        if not opts:
+            opts = ['OK']
+        self._options = opts
+        self._choice = str(default_choice or opts[0]).strip() or opts[0]
+        if self._choice not in self._options:
+            self._choice = self._options[0]
+        self._cancel_choice = str(cancel_choice or '').strip()
+        if self._cancel_choice not in self._options:
+            if 'No' in self._options:
+                self._cancel_choice = 'No'
+            elif 'Cancel' in self._options:
+                self._cancel_choice = 'Cancel'
+            else:
+                self._cancel_choice = self._options[-1]
+        self._open_anim = None
+        self.setWindowTitle(str(title or 'Menu'))
+        self.setWindowFlags(QtCore.Qt.Dialog | QtCore.Qt.FramelessWindowHint)
+        self.setAttribute(QtCore.Qt.WA_TranslucentBackground, True)
+        self.setModal(True)
+        self.resize(860, 520)
+        self.setStyleSheet('''
+            QFrame#prompt_panel {
+                background:#d7dce1;
+                border:2px solid rgba(239,244,248,0.78);
+                border-radius:4px;
+            }
+            QFrame#prompt_header {
+                background:qlineargradient(x1:0,y1:0,x2:1,y2:0, stop:0 #68717a, stop:1 #505860);
+                border:none;
+            }
+            QLabel#prompt_header_title {
+                color:#edf2f6;
+                font-size:31px;
+                font-weight:800;
+            }
+            QLabel#prompt_body_txt {
+                color:#1f2730;
+                font-size:25px;
+                font-weight:650;
+            }
+            QListWidget#prompt_choices {
+                background:#e4e8ec;
+                color:#1f252c;
+                font-size:32px;
+                border:1px solid rgba(76,86,96,0.4);
+                outline:none;
+            }
+            QListWidget#prompt_choices::item {
+                padding:7px 12px;
+                margin:1px 0px;
+            }
+            QListWidget#prompt_choices::item:selected {
+                background:qlineargradient(x1:0,y1:0,x2:1,y2:0, stop:0 #5abc3e, stop:1 #3e9132);
+                color:#f4fff1;
+                border:1px solid rgba(249,255,248,0.4);
+            }
+            QLabel#prompt_hint {
+                color:#1f252c;
+                font-size:17px;
+                font-weight:800;
+            }
+        ''')
+        outer = QtWidgets.QVBoxLayout(self)
+        outer.setContentsMargins(0, 0, 0, 0)
+        panel = QtWidgets.QFrame()
+        panel.setObjectName('prompt_panel')
+        outer.addWidget(panel)
+        root = QtWidgets.QVBoxLayout(panel)
+        root.setContentsMargins(0, 0, 0, 0)
+        root.setSpacing(0)
+
+        header = QtWidgets.QFrame()
+        header.setObjectName('prompt_header')
+        h_l = QtWidgets.QHBoxLayout(header)
+        h_l.setContentsMargins(12, 9, 12, 9)
+        title_lbl = QtWidgets.QLabel(str(title or 'Menu'))
+        title_lbl.setObjectName('prompt_header_title')
+        h_l.addWidget(title_lbl, 1)
+        root.addWidget(header, 0)
+
+        body = QtWidgets.QWidget()
+        b_l = QtWidgets.QVBoxLayout(body)
+        b_l.setContentsMargins(16, 14, 16, 12)
+        b_l.setSpacing(10)
+        msg = QtWidgets.QLabel(str(text or ''))
+        msg.setObjectName('prompt_body_txt')
+        msg.setWordWrap(True)
+        b_l.addWidget(msg, 1)
+        self.choices = QtWidgets.QListWidget()
+        self.choices.setObjectName('prompt_choices')
+        self.choices.addItems(self._options)
+        idx = self._options.index(self._choice) if self._choice in self._options else 0
+        self.choices.setCurrentRow(max(0, idx))
+        self.choices.itemActivated.connect(self._accept_current)
+        b_l.addWidget(self.choices, 0)
+        hint = QtWidgets.QLabel('A/ENTER = Select | B/ESC = Back')
+        hint.setObjectName('prompt_hint')
+        b_l.addWidget(hint, 0)
+        root.addWidget(body, 1)
+
+    def selected_choice(self):
+        return str(self._choice or '')
+
+    def _accept_current(self, *_):
+        it = self.choices.currentItem()
+        if it is not None:
+            self._choice = str(it.text()).strip() or self._choice
+        self.accept()
+
+    def showEvent(self, e):
+        super().showEvent(e)
+        parent = self.parentWidget()
+        if parent is not None:
+            w = min(max(760, int(parent.width() * 0.62)), max(760, parent.width() - 110))
+            h = min(max(460, int(parent.height() * 0.62)), max(460, parent.height() - 110))
+            self.resize(w, h)
+            x = parent.x() + (parent.width() - w) // 2
+            y = parent.y() + (parent.height() - h) // 2
+            self.move(max(0, x), max(0, y))
+        self._animate_open()
+
+    def _animate_open(self):
+        effect = QtWidgets.QGraphicsOpacityEffect(self)
+        self.setGraphicsEffect(effect)
+        effect.setOpacity(0.0)
+        end_rect = self.geometry()
+        start_rect = QtCore.QRect(
+            end_rect.x() + max(18, end_rect.width() // 24),
+            end_rect.y(),
+            end_rect.width(),
+            end_rect.height(),
+        )
+        self.setGeometry(start_rect)
+        self._open_anim = QtCore.QParallelAnimationGroup(self)
+        fade = QtCore.QPropertyAnimation(effect, b'opacity', self)
+        fade.setDuration(170)
+        fade.setStartValue(0.0)
+        fade.setEndValue(1.0)
+        fade.setEasingCurve(QtCore.QEasingCurve.OutCubic)
+        slide = QtCore.QPropertyAnimation(self, b'geometry', self)
+        slide.setDuration(210)
+        slide.setStartValue(start_rect)
+        slide.setEndValue(end_rect)
+        slide.setEasingCurve(QtCore.QEasingCurve.OutCubic)
+        self._open_anim.addAnimation(fade)
+        self._open_anim.addAnimation(slide)
+        self._open_anim.finished.connect(lambda: self.setGraphicsEffect(None))
+        self._open_anim.start(QtCore.QAbstractAnimation.DeleteWhenStopped)
+
+    def keyPressEvent(self, e):
+        k = e.key()
+        if k in (QtCore.Qt.Key_Escape, QtCore.Qt.Key_Back):
+            self._choice = self._cancel_choice
+            self.reject()
+            return
+        if k in (QtCore.Qt.Key_Return, QtCore.Qt.Key_Enter):
+            self._accept_current()
+            return
+        super().keyPressEvent(e)
+
+
 class MandatoryUpdateFailedDialog(QtWidgets.QDialog):
     def __init__(self, detail_text='', status_code='4476-4497-A080-0F00-8007-2EE2', parent=None):
         super().__init__(parent)
@@ -4332,92 +6606,177 @@ class InstallTaskProgressDialog(QtWidgets.QDialog):
         QtCore.QTimer.singleShot(0, self._center_dialog)
 
 
+class VerticalTextLabel(QtWidgets.QLabel):
+    def __init__(self, text='', clockwise=False, parent=None):
+        super().__init__(text, parent)
+        self._clockwise = bool(clockwise)
+        self.setAlignment(QtCore.Qt.AlignCenter)
+
+    def sizeHint(self):
+        s = super().sizeHint()
+        return QtCore.QSize(s.height() + 8, s.width() + 8)
+
+    def minimumSizeHint(self):
+        s = super().minimumSizeHint()
+        return QtCore.QSize(s.height() + 8, s.width() + 8)
+
+    def paintEvent(self, _event):
+        painter = QtGui.QPainter(self)
+        painter.setRenderHint(QtGui.QPainter.Antialiasing, True)
+        painter.setRenderHint(QtGui.QPainter.TextAntialiasing, True)
+        if self._clockwise:
+            painter.translate(self.width(), 0)
+            painter.rotate(90)
+        else:
+            painter.translate(0, self.height())
+            painter.rotate(-90)
+        rect = QtCore.QRect(0, 0, self.height(), self.width())
+        painter.setPen(self.palette().windowText().color())
+        painter.setFont(self.font())
+        painter.drawText(rect, QtCore.Qt.AlignCenter, self.text())
+        painter.end()
+
+
+class GuideSideBlade(QtWidgets.QFrame):
+    activated = QtCore.pyqtSignal(int)
+
+    def __init__(self, clockwise=False, parent=None):
+        super().__init__(parent)
+        self._section_idx = 0
+        self._active = False
+        self._clockwise = bool(clockwise)
+        self.setFixedWidth(76)
+        self.setCursor(QtGui.QCursor(QtCore.Qt.PointingHandCursor))
+        lay = QtWidgets.QVBoxLayout(self)
+        lay.setContentsMargins(0, 0, 0, 0)
+        self.label = VerticalTextLabel('', clockwise=self._clockwise)
+        self.label.setAlignment(QtCore.Qt.AlignCenter)
+        lay.addWidget(self.label, 1)
+        self._apply_style()
+
+    def set_payload(self, section_idx, text, active=False):
+        self._section_idx = int(section_idx)
+        self.label.setText(str(text or ''))
+        self._active = bool(active)
+        self._apply_style()
+
+    def _apply_style(self):
+        if self._active:
+            bg0, bg1, fg, bdr = '#4a5f78', '#31465f', '#f5f9fc', 'rgba(240,248,255,0.84)'
+            fs = 18
+            fw = 800
+        else:
+            bg0, bg1, fg, bdr = '#9ab1c6', '#7e99b2', '#f5f9fc', 'rgba(236,245,253,0.62)'
+            fs = 15
+            fw = 700
+        self.setStyleSheet(
+            f'''
+            QFrame {{
+                background:qlineargradient(x1:0,y1:0,x2:0,y2:1, stop:0 {bg0}, stop:1 {bg1});
+                border:1px solid {bdr};
+                border-radius:0px;
+            }}
+            '''
+        )
+        self.label.setStyleSheet(
+            f'color:{fg}; font-size:{fs}px; font-weight:{fw}; font-family:"Segoe UI","Noto Sans",sans-serif;'
+        )
+
+    def mousePressEvent(self, e):
+        self.activated.emit(int(self._section_idx))
+        super().mousePressEvent(e)
+
+
 class XboxGuideMenu(QtWidgets.QDialog):
-    def __init__(self, gamertag='Player1', parent=None, sfx_cb=None):
+    def __init__(self, gamertag='Player1', parent=None, sfx_cb=None, mode='dashboard'):
         super().__init__(parent)
         self.gamertag = str(gamertag or 'Player1')
+        self.mode = 'app' if str(mode or '').strip().lower() == 'app' else 'dashboard'
         self._play_sfx = sfx_cb
         self._selection = None
         self._open_anim = None
+        self._page_anim = None
+        self._blade_anim = None
+        self._shortcuts = []
         self._last_row = 0
+        self._section_idx = 0
+        self._sections = self._build_sections()
+        self._section_lists = []
         self.setWindowTitle('Xbox Guide')
         self.setWindowFlags(QtCore.Qt.Dialog | QtCore.Qt.FramelessWindowHint)
         self.setAttribute(QtCore.Qt.WA_TranslucentBackground, True)
         self.setModal(True)
-        self.resize(1060, 560)
+        self.resize(980, 520)
         self.setStyleSheet('''
             QDialog {
-                background:rgba(10, 16, 24, 0.56);
+                background:rgba(8, 14, 22, 0.58);
             }
             QFrame#xguide_panel {
-                background:qlineargradient(x1:0,y1:0,x2:1,y2:1, stop:0 #38414d, stop:1 #222a35);
+                background:qlineargradient(x1:0,y1:0,x2:1,y2:1, stop:0 #3a4654, stop:1 #2a3340);
                 border:1px solid rgba(226,238,248,0.30);
-                border-radius:2px;
+                border-radius:0px;
             }
             QLabel#xguide_title {
-                color:#f2f7fb;
-                font-size:46px;
+                color:#f3f7fb;
+                font-size:30px;
                 font-weight:800;
+                font-family:"Segoe UI","Noto Sans",sans-serif;
             }
             QLabel#xguide_meta {
-                color:rgba(233,243,251,0.92);
-                font-size:34px;
-                font-weight:600;
+                color:rgba(233,243,251,0.95);
+                font-size:17px;
+                font-weight:700;
+                font-family:"Segoe UI","Noto Sans",sans-serif;
+            }
+            QFrame#xguide_page_host {
+                background:#d9dde3;
+                border:1px solid rgba(11,16,22,0.38);
+            }
+            QLabel#xguide_section_title {
+                color:#293541;
+                font-size:16px;
+                font-weight:800;
+                padding:4px 12px;
+                font-family:"Segoe UI","Noto Sans",sans-serif;
             }
             QListWidget#xguide_list {
-                background:#d8dce1;
-                color:#1b2b42;
-                border:1px solid rgba(0,0,0,0.26);
-                font-size:52px;
+                background:#c9ced6;
+                color:#1a2a40;
+                border:none;
+                font-size:20px;
                 outline:none;
+                font-family:"Segoe UI","Noto Sans",sans-serif;
             }
             QListWidget#xguide_list::item {
-                padding:8px 16px;
-                border:1px solid transparent;
+                min-height:38px;
+                padding:4px 16px;
+                border-bottom:1px solid rgba(38,48,62,0.14);
             }
             QListWidget#xguide_list::item:selected {
                 color:#eefeed;
-                background:qlineargradient(x1:0,y1:0,x2:1,y2:0, stop:0 #59b53f, stop:1 #429b33);
-                border:1px solid rgba(255,255,255,0.25);
-            }
-            QFrame#xguide_actions {
-                background:rgba(47,58,72,0.88);
-                border:1px solid rgba(206,220,236,0.24);
-            }
-            QPushButton#xguide_action_btn {
-                text-align:left;
-                color:#f3f8fc;
-                background:#222f41;
-                border:1px solid rgba(202,218,236,0.28);
-                padding:8px 12px;
-                font-size:34px;
-                font-weight:800;
-                min-height:62px;
-            }
-            QPushButton#xguide_action_btn:hover,
-            QPushButton#xguide_action_btn:focus {
-                background:#2f4260;
-                border:1px solid rgba(228,239,252,0.48);
+                background:qlineargradient(x1:0,y1:0,x2:1,y2:0, stop:0 #57b73d, stop:1 #3d9531);
+                border:1px solid rgba(255,255,255,0.24);
             }
             QLabel#xguide_hint {
-                color:#eaf1f7;
-                font-size:29px;
-                font-weight:700;
+                color:#edf3f8;
+                font-size:20px;
+                font-weight:800;
+                font-family:"Segoe UI","Noto Sans",sans-serif;
             }
         ''')
+
         outer = QtWidgets.QVBoxLayout(self)
-        outer.setContentsMargins(18, 18, 18, 18)
+        outer.setContentsMargins(10, 12, 10, 12)
         panel = QtWidgets.QFrame()
         panel.setObjectName('xguide_panel')
-        panel.setMinimumSize(920, 500)
-        panel.setMaximumSize(1360, 820)
-        outer.addWidget(panel, 0, QtCore.Qt.AlignCenter)
+        outer.addWidget(panel)
 
         root = QtWidgets.QVBoxLayout(panel)
-        root.setContentsMargins(14, 12, 14, 12)
-        root.setSpacing(10)
+        root.setContentsMargins(10, 8, 10, 8)
+        root.setSpacing(6)
 
         top = QtWidgets.QHBoxLayout()
+        top.setSpacing(8)
         title = QtWidgets.QLabel('Xbox Guide')
         title.setObjectName('xguide_title')
         self.meta = QtWidgets.QLabel('')
@@ -4428,46 +6787,81 @@ class XboxGuideMenu(QtWidgets.QDialog):
         root.addLayout(top)
 
         body = QtWidgets.QHBoxLayout()
-        body.setSpacing(10)
-        self.listw = QtWidgets.QListWidget()
-        self.listw.setObjectName('xguide_list')
-        self.listw.addItems([
-            'Reciente',
-            'Mensajes recientes',
-            'Social global',
-            'Beacons',
-            'Mis juegos',
-            'Descargas activas',
-            'Canjear codigo',
-        ])
-        self.listw.setCurrentRow(0)
-        self.listw.itemActivated.connect(self._accept_current)
-        self.listw.itemDoubleClicked.connect(self._accept_current)
-        self.listw.currentRowChanged.connect(self._on_row_changed)
-        body.addWidget(self.listw, 7)
+        body.setSpacing(0)
 
-        actions = QtWidgets.QFrame()
-        actions.setObjectName('xguide_actions')
-        actions_l = QtWidgets.QVBoxLayout(actions)
-        actions_l.setContentsMargins(8, 8, 8, 8)
-        actions_l.setSpacing(6)
-        for txt in ('Configuracion', 'Inicio de Xbox', 'Cerrar app actual', 'Cerrar sesion'):
-            b = QtWidgets.QPushButton(txt)
-            b.setObjectName('xguide_action_btn')
-            b.clicked.connect(lambda _=False, action=txt: self._accept_action(action))
-            actions_l.addWidget(b)
-        actions_l.addStretch(1)
-        body.addWidget(actions, 3)
+        self.blade_primary = GuideSideBlade(clockwise=False)
+        self.blade_secondary = GuideSideBlade(clockwise=False)
+        self.blade_right = GuideSideBlade(clockwise=True)
+        self.blade_primary.activated.connect(self._switch_section_from_blade)
+        self.blade_secondary.activated.connect(self._switch_section_from_blade)
+        self.blade_right.activated.connect(self._switch_section_from_blade)
+        body.addWidget(self.blade_primary, 0)
+        body.addWidget(self.blade_secondary, 0)
+
+        page_shell = QtWidgets.QFrame()
+        page_shell.setObjectName('xguide_page_host')
+        shell_l = QtWidgets.QVBoxLayout(page_shell)
+        shell_l.setContentsMargins(0, 0, 0, 0)
+        shell_l.setSpacing(0)
+
+        self.section_title = QtWidgets.QLabel('')
+        self.section_title.setObjectName('xguide_section_title')
+        shell_l.addWidget(self.section_title, 0)
+
+        self.page_stack = QtWidgets.QStackedWidget()
+        sl = self.page_stack.layout()
+        if isinstance(sl, QtWidgets.QStackedLayout):
+            sl.setStackingMode(QtWidgets.QStackedLayout.StackAll)
+        shell_l.addWidget(self.page_stack, 1)
+
+        for _section_name, items in self._sections:
+            lw = QtWidgets.QListWidget()
+            lw.setObjectName('xguide_list')
+            lw.addItems([str(x) for x in items])
+            lw.itemActivated.connect(self._accept_current)
+            lw.itemDoubleClicked.connect(self._accept_current)
+            lw.currentRowChanged.connect(self._on_row_changed)
+            if lw.count() > 0:
+                lw.setCurrentRow(0)
+            self._section_lists.append(lw)
+            self.page_stack.addWidget(lw)
+        body.addWidget(page_shell, 1)
+        body.addWidget(self.blade_right, 0)
         root.addLayout(body, 1)
 
-        hint = QtWidgets.QLabel('<font color="#49b93e">A Select</font>   <font color="#cf2d2d">B Back</font>   <font color="#2b7fd8">X Sign Out</font>   <font color="#ddb126">Y Inicio de Xbox</font>')
+        if self.mode == 'app':
+            hint_text = '<font color="#49b93e">A Select</font> <font color="#cf2d2d">B Back</font> <font color="#2b7fd8">X Sign Out</font> <font color="#ddb126">Y Xbox Home</font> <font color="#e7eff6">LB/RB Page</font>'
+        else:
+            hint_text = '<font color="#49b93e">A Select</font> <font color="#cf2d2d">B Back</font> <font color="#2b7fd8">X Cerrar sesion</font> <font color="#ddb126">Y Inicio de Xbox</font> <font color="#e7eff6">LB/RB Pagina</font>'
+        hint = QtWidgets.QLabel(hint_text)
         hint.setObjectName('xguide_hint')
-        root.addWidget(hint)
+        root.addWidget(hint, 0, QtCore.Qt.AlignLeft)
 
         self._clock = QtCore.QTimer(self)
         self._clock.timeout.connect(self._refresh_meta)
         self._clock.start(1000)
         self._refresh_meta()
+        self._setup_shortcuts()
+        self._switch_section(0, animate=False)
+
+    def _build_sections(self):
+        if self.mode == 'app':
+            return [
+                ('Games', ['Leave Game', 'Friends', 'Party', 'Messages', 'Beacons & Activity', 'Chat', 'Manage Storage']),
+                (self.gamertag, ['Reciente', 'Mensajes recientes', 'Social global', 'Mis juegos', 'Descargas activas']),
+                ('Settings', ['Xbox Home', 'Canjear codigo', 'Configuracion', 'Sign Out']),
+            ]
+        return [
+            ('Guide', ['Reciente', 'Mensajes recientes', 'Social global', 'Beacons', 'Mis juegos', 'Descargas activas', 'Canjear codigo']),
+            (self.gamertag, ['Friends', 'Party', 'Messages', 'Chat', 'Beacons & Activity']),
+            ('Dash', ['Inicio de Xbox', 'Configuracion', 'Cerrar app actual', 'Cerrar sesion']),
+        ]
+
+    def _current_list(self):
+        idx = int(self._section_idx)
+        if 0 <= idx < len(self._section_lists):
+            return self._section_lists[idx]
+        return None
 
     def _sfx(self, name):
         if callable(self._play_sfx):
@@ -4475,6 +6869,195 @@ class XboxGuideMenu(QtWidgets.QDialog):
                 self._play_sfx(str(name))
             except Exception:
                 pass
+
+    def _setup_shortcuts(self):
+        def add_sc(key, cb):
+            sc = QtWidgets.QShortcut(QtGui.QKeySequence(int(key)), self)
+            sc.setContext(QtCore.Qt.WidgetWithChildrenShortcut)
+            sc.activated.connect(cb)
+            self._shortcuts.append(sc)
+
+        add_sc(QtCore.Qt.Key_Escape, self.reject)
+        add_sc(QtCore.Qt.Key_Back, self.reject)
+        add_sc(QtCore.Qt.Key_B, self.reject)
+        add_sc(QtCore.Qt.Key_Return, self._accept_current)
+        add_sc(QtCore.Qt.Key_Enter, self._accept_current)
+        add_sc(QtCore.Qt.Key_PageUp, lambda: self._cycle_section(-1))
+        add_sc(QtCore.Qt.Key_PageDown, lambda: self._cycle_section(1))
+        # Switch-style shoulder layout fallbacks.
+        add_sc(QtCore.Qt.Key_BracketLeft, lambda: self._cycle_section(-1))
+        add_sc(QtCore.Qt.Key_BracketRight, lambda: self._cycle_section(1))
+        add_sc(QtCore.Qt.Key_Y, self._go_home)
+        add_sc(QtCore.Qt.Key_Tab, self._go_home)
+        add_sc(QtCore.Qt.Key_X, self._sign_out)
+        add_sc(QtCore.Qt.Key_Space, self._sign_out)
+
+    def _switch_section_from_blade(self, section_idx):
+        self._switch_section(section_idx, animate=True)
+
+    def _cycle_section(self, delta):
+        total = max(1, len(self._sections))
+        self._switch_section((int(self._section_idx) + int(delta)) % total, animate=True)
+
+    def _refresh_side_blades(self):
+        n = max(1, len(self._sections))
+        cur = int(self._section_idx) % n
+        nxt = (cur + 1) % n
+        prv = (cur - 1) % n
+        self.blade_primary.set_payload(cur, self._sections[cur][0], active=True)
+        self.blade_secondary.set_payload(nxt, self._sections[nxt][0], active=False)
+        self.blade_right.set_payload(prv, self._sections[prv][0], active=False)
+
+    def _switch_section(self, row, animate=True):
+        try:
+            row = int(row)
+        except Exception:
+            return
+        if row < 0 or row >= len(self._sections):
+            return
+        old_idx = int(self._section_idx)
+        if row == old_idx and self.page_stack.currentIndex() == row:
+            self._section_title_refresh()
+            cur = self._current_list()
+            if cur is not None:
+                cur.setFocus()
+            self._refresh_side_blades()
+            return
+        self._section_idx = row
+        self._section_title_refresh()
+        self._refresh_side_blades()
+        self._sfx('hover')
+        if not animate:
+            self.page_stack.setCurrentIndex(row)
+            cur = self._current_list()
+            if cur is not None:
+                cur.setFocus()
+            return
+        self._animate_section_transition(old_idx, row)
+
+    def _section_title_refresh(self):
+        idx = int(self._section_idx)
+        label = self._sections[idx][0] if 0 <= idx < len(self._sections) else 'Guide'
+        self.section_title.setText(str(label))
+
+    def _animate_blades(self, direction):
+        direction = 1 if int(direction) >= 0 else -1
+        blades = [self.blade_primary, self.blade_secondary, self.blade_right]
+        grp = QtCore.QParallelAnimationGroup(self)
+        self._blade_anim = grp
+        for blade in blades:
+            effect = QtWidgets.QGraphicsOpacityEffect(blade)
+            blade.setGraphicsEffect(effect)
+            effect.setOpacity(0.55)
+            end_rect = blade.geometry()
+            start_rect = QtCore.QRect(
+                end_rect.x() - (16 * direction),
+                end_rect.y(),
+                end_rect.width(),
+                end_rect.height(),
+            )
+            blade.setGeometry(start_rect)
+
+            slide = QtCore.QPropertyAnimation(blade, b'geometry', self)
+            slide.setDuration(170)
+            slide.setStartValue(start_rect)
+            slide.setEndValue(end_rect)
+            slide.setEasingCurve(QtCore.QEasingCurve.OutCubic)
+
+            fade = QtCore.QPropertyAnimation(effect, b'opacity', self)
+            fade.setDuration(160)
+            fade.setStartValue(0.55)
+            fade.setEndValue(1.0)
+            fade.setEasingCurve(QtCore.QEasingCurve.OutCubic)
+
+            grp.addAnimation(slide)
+            grp.addAnimation(fade)
+
+        def done():
+            for blade in blades:
+                blade.setGraphicsEffect(None)
+            self._blade_anim = None
+
+        grp.finished.connect(done)
+        grp.start(QtCore.QAbstractAnimation.DeleteWhenStopped)
+
+    def _animate_section_transition(self, from_idx, to_idx):
+        if from_idx < 0 or from_idx >= self.page_stack.count():
+            self.page_stack.setCurrentIndex(to_idx)
+            cur = self._current_list()
+            if cur is not None:
+                cur.setFocus()
+            return
+
+        from_w = self.page_stack.widget(from_idx)
+        to_w = self.page_stack.widget(to_idx)
+        rect = self.page_stack.rect()
+        direction = 1 if to_idx > from_idx else -1
+        shift = max(52, rect.width() // 8) * direction
+
+        for i, lw in enumerate(self._section_lists):
+            if i not in (from_idx, to_idx):
+                lw.hide()
+        from_w.setGeometry(rect)
+        to_w.setGeometry(rect)
+        from_w.move(0, 0)
+        to_w.move(shift, 0)
+        from_w.show()
+        to_w.show()
+        to_w.raise_()
+
+        fx_from = QtWidgets.QGraphicsOpacityEffect(from_w)
+        fx_to = QtWidgets.QGraphicsOpacityEffect(to_w)
+        fx_from.setOpacity(1.0)
+        fx_to.setOpacity(0.0)
+        from_w.setGraphicsEffect(fx_from)
+        to_w.setGraphicsEffect(fx_to)
+
+        grp = QtCore.QParallelAnimationGroup(self)
+        self._page_anim = grp
+
+        move_from = QtCore.QPropertyAnimation(from_w, b'pos', self)
+        move_from.setDuration(190)
+        move_from.setStartValue(QtCore.QPoint(0, 0))
+        move_from.setEndValue(QtCore.QPoint(-shift, 0))
+        move_from.setEasingCurve(QtCore.QEasingCurve.InOutCubic)
+
+        move_to = QtCore.QPropertyAnimation(to_w, b'pos', self)
+        move_to.setDuration(190)
+        move_to.setStartValue(QtCore.QPoint(shift, 0))
+        move_to.setEndValue(QtCore.QPoint(0, 0))
+        move_to.setEasingCurve(QtCore.QEasingCurve.OutCubic)
+
+        fade_from = QtCore.QPropertyAnimation(fx_from, b'opacity', self)
+        fade_from.setDuration(170)
+        fade_from.setStartValue(1.0)
+        fade_from.setEndValue(0.14)
+        fade_from.setEasingCurve(QtCore.QEasingCurve.OutCubic)
+
+        fade_to = QtCore.QPropertyAnimation(fx_to, b'opacity', self)
+        fade_to.setDuration(180)
+        fade_to.setStartValue(0.0)
+        fade_to.setEndValue(1.0)
+        fade_to.setEasingCurve(QtCore.QEasingCurve.OutCubic)
+
+        grp.addAnimation(move_from)
+        grp.addAnimation(move_to)
+        grp.addAnimation(fade_from)
+        grp.addAnimation(fade_to)
+
+        def done():
+            self.page_stack.setCurrentIndex(to_idx)
+            for lw in self._section_lists:
+                lw.move(0, 0)
+                lw.setGraphicsEffect(None)
+            cur = self._current_list()
+            if cur is not None:
+                cur.setFocus()
+            self._page_anim = None
+
+        grp.finished.connect(done)
+        grp.start(QtCore.QAbstractAnimation.DeleteWhenStopped)
+        self._animate_blades(direction)
 
     def _on_row_changed(self, row):
         try:
@@ -4487,55 +7070,78 @@ class XboxGuideMenu(QtWidgets.QDialog):
 
     def _refresh_meta(self):
         now = QtCore.QDateTime.currentDateTime().toString('HH:mm')
-        self.meta.setText(f'{self.gamertag}    {now}')
+        mode_tag = 'APP' if self.mode == 'app' else 'DASH'
+        self.meta.setText(f'{self.gamertag}   {now}   {mode_tag}')
 
     def _accept_current(self, *_):
-        it = self.listw.currentItem()
+        lw = self._current_list()
+        if lw is None:
+            return
+        it = lw.currentItem()
         if it is None:
             return
         self._selection = it.text()
         self._sfx('select')
         self.accept()
 
-    def _accept_action(self, action):
-        self._selection = str(action)
+    def _go_home(self):
+        self._selection = 'Xbox Home' if self.mode == 'app' else 'Inicio de Xbox'
+        self._sfx('select')
+        self.accept()
+
+    def _sign_out(self):
+        self._selection = 'Sign Out' if self.mode == 'app' else 'Cerrar sesion'
         self._sfx('select')
         self.accept()
 
     def selected(self):
         if self._selection:
             return self._selection
-        it = self.listw.currentItem()
+        lw = self._current_list()
+        if lw is None:
+            return None
+        it = lw.currentItem()
         return it.text() if it else None
 
     def showEvent(self, e):
         super().showEvent(e)
         parent = self.parentWidget()
         if parent is not None:
-            w = min(max(980, int(parent.width() * 0.86)), max(980, parent.width() - 40))
-            h = min(max(520, int(parent.height() * 0.72)), max(520, parent.height() - 40))
+            # Keep current guide style, but render it smaller and centered.
+            w = min(max(820, int(parent.width() * 0.74)), max(820, parent.width() - 46))
+            h = min(max(430, int(parent.height() * 0.63)), max(430, parent.height() - 46))
             self.resize(w, h)
-            x = parent.x() + max(10, (parent.width() - self.width()) // 2)
-            y = parent.y() + max(10, (parent.height() - self.height()) // 2)
+            x = parent.x() + max(8, (parent.width() - self.width()) // 2)
+            y = parent.y() + max(8, (parent.height() - self.height()) // 2)
             self.move(max(0, x), max(0, y))
         self._refresh_meta()
+        self._refresh_side_blades()
+        self._sfx('open')
         self._animate_open()
+        cur = self._current_list()
+        if cur is not None:
+            cur.setFocus()
 
     def _animate_open(self):
         effect = QtWidgets.QGraphicsOpacityEffect(self)
         self.setGraphicsEffect(effect)
         effect.setOpacity(0.0)
         end_rect = self.geometry()
-        start_rect = QtCore.QRect(end_rect.x() - max(24, end_rect.width() // 18), end_rect.y(), end_rect.width(), end_rect.height())
+        start_rect = QtCore.QRect(
+            end_rect.x() - max(24, end_rect.width() // 16),
+            end_rect.y(),
+            end_rect.width(),
+            end_rect.height(),
+        )
         self.setGeometry(start_rect)
         self._open_anim = QtCore.QParallelAnimationGroup(self)
         fade = QtCore.QPropertyAnimation(effect, b'opacity', self)
-        fade.setDuration(190)
+        fade.setDuration(180)
         fade.setStartValue(0.0)
         fade.setEndValue(1.0)
         fade.setEasingCurve(QtCore.QEasingCurve.OutCubic)
         slide = QtCore.QPropertyAnimation(self, b'geometry', self)
-        slide.setDuration(230)
+        slide.setDuration(220)
         slide.setStartValue(start_rect)
         slide.setEndValue(end_rect)
         slide.setEasingCurve(QtCore.QEasingCurve.OutCubic)
@@ -4545,33 +7151,30 @@ class XboxGuideMenu(QtWidgets.QDialog):
         self._open_anim.start(QtCore.QAbstractAnimation.DeleteWhenStopped)
 
     def keyPressEvent(self, e):
-        if e.key() in (QtCore.Qt.Key_Y, QtCore.Qt.Key_Tab):
-            self._selection = 'Inicio de Xbox'
-            self._sfx('select')
-            self.accept()
+        k = e.key()
+        if k in (QtCore.Qt.Key_Y, QtCore.Qt.Key_Tab):
+            self._go_home()
             return
-        if e.key() in (QtCore.Qt.Key_X, QtCore.Qt.Key_Space):
-            self._selection = 'Cerrar sesion'
-            self._sfx('select')
-            self.accept()
+        if k in (QtCore.Qt.Key_X, QtCore.Qt.Key_Space):
+            self._sign_out()
             return
-        if e.key() in (QtCore.Qt.Key_Prior, QtCore.Qt.Key_Next):
-            n = int(self.listw.count())
-            if n > 0:
-                step = -5 if e.key() == QtCore.Qt.Key_Prior else 5
-                row = int(self.listw.currentRow())
-                if row < 0:
-                    row = 0
-                row = max(0, min(n - 1, row + step))
-                self.listw.setCurrentRow(row)
+        if k in (QtCore.Qt.Key_Prior, QtCore.Qt.Key_PageUp, QtCore.Qt.Key_BracketLeft):
+            self._cycle_section(-1)
             return
-        if e.key() in (QtCore.Qt.Key_Escape, QtCore.Qt.Key_Back):
+        if k in (QtCore.Qt.Key_Next, QtCore.Qt.Key_PageDown, QtCore.Qt.Key_BracketRight):
+            self._cycle_section(1)
+            return
+        if k in (QtCore.Qt.Key_Escape, QtCore.Qt.Key_Back, QtCore.Qt.Key_B):
             self.reject()
             return
-        if e.key() in (QtCore.Qt.Key_Return, QtCore.Qt.Key_Enter):
+        if k in (QtCore.Qt.Key_Return, QtCore.Qt.Key_Enter):
             self._accept_current()
             return
         super().keyPressEvent(e)
+
+    def reject(self):
+        self._sfx('back')
+        super().reject()
 
 
 class GamesInlineOverlay(QtWidgets.QFrame):
@@ -5001,13 +7604,16 @@ class WebKioskWindow(QtWidgets.QMainWindow):
     def __init__(self, url, parent=None, sfx_cb=None):
         super().__init__(parent)
         self._play_sfx = sfx_cb
+        self._ultra_low_ram = ultra_low_ram_mode()
         self._gp = None
         self._gp_prev = {}
         self._gp_timer = None
         self.setWindowTitle(url)
+        self.setAttribute(QtCore.Qt.WA_DeleteOnClose, True)
         self.resize(1280, 720)
         self.setStyleSheet('background:#000;')
         self.view = QtWebEngineWidgets.QWebEngineView(self)
+        self._configure_web_runtime()
         self.setCentralWidget(self.view)
         self.view.load(QtCore.QUrl(url))
         self._esc = QtWidgets.QShortcut(QtGui.QKeySequence(QtCore.Qt.Key_Escape), self)
@@ -5022,7 +7628,63 @@ class WebKioskWindow(QtWidgets.QMainWindow):
         self._guide.activated.connect(self._show_guide)
         self._guide2 = QtWidgets.QShortcut(QtGui.QKeySequence(QtCore.Qt.Key_Home), self)
         self._guide2.activated.connect(self._show_guide)
+        self._guide_keys = {QtCore.Qt.Key_F1, QtCore.Qt.Key_Home, QtCore.Qt.Key_Meta}
+        key_super_l = getattr(QtCore.Qt, 'Key_Super_L', None)
+        key_super_r = getattr(QtCore.Qt, 'Key_Super_R', None)
+        if key_super_l is not None:
+            self._guide_keys.add(key_super_l)
+        if key_super_r is not None:
+            self._guide_keys.add(key_super_r)
         self._setup_gamepad()
+
+    def _configure_web_runtime(self):
+        if QtWebEngineWidgets is None or self.view is None:
+            return
+        try:
+            page = self.view.page()
+        except Exception:
+            page = None
+        if page is None:
+            return
+        try:
+            settings = page.settings()
+            attrs = (
+                ('JavascriptEnabled', True),
+                ('LocalStorageEnabled', True),
+                ('PluginsEnabled', True),
+                ('FullScreenSupportEnabled', True),
+                ('PlaybackRequiresUserGesture', False),
+                ('WebGLEnabled', True),
+                ('Accelerated2dCanvasEnabled', True),
+            )
+            for name, value in attrs:
+                attr = getattr(QtWebEngineWidgets.QWebEngineSettings, name, None)
+                if attr is not None:
+                    settings.setAttribute(attr, bool(value))
+        except Exception:
+            pass
+        try:
+            profile = page.profile()
+        except Exception:
+            profile = None
+        if profile is None:
+            return
+        try:
+            cache_dir = DATA_HOME / 'webengine-cache'
+            storage_dir = DATA_HOME / 'webengine-profile'
+            cache_dir.mkdir(parents=True, exist_ok=True)
+            storage_dir.mkdir(parents=True, exist_ok=True)
+            profile.setCachePath(str(cache_dir))
+            profile.setPersistentStoragePath(str(storage_dir))
+            profile.setHttpCacheType(QtWebEngineWidgets.QWebEngineProfile.DiskHttpCache)
+            if self._ultra_low_ram:
+                try:
+                    profile.setHttpCacheMaximumSize(16 * 1024 * 1024)
+                except Exception:
+                    pass
+            profile.setPersistentCookiesPolicy(QtWebEngineWidgets.QWebEngineProfile.ForcePersistentCookies)
+        except Exception:
+            pass
 
     def _sfx(self, name='select'):
         if callable(self._play_sfx):
@@ -5099,14 +7761,14 @@ class WebKioskWindow(QtWidgets.QMainWindow):
                 gamertag = str(parent._gamertag())
             except Exception:
                 pass
-        d = XboxGuideMenu(gamertag, self, sfx_cb=self._play_sfx)
+        d = XboxGuideMenu(gamertag, self, sfx_cb=self._play_sfx, mode='app')
         if d.exec_() != QtWidgets.QDialog.Accepted:
             self._sfx('back')
             return
         sel = str(d.selected() or '').strip()
         if not sel:
             return
-        if sel == 'Cerrar app actual':
+        if sel in ('Cerrar app actual', 'Close Current App', 'Leave Game'):
             self.close()
             return
         if parent is not None and hasattr(parent, '_handle_xbox_guide_action'):
@@ -5126,7 +7788,7 @@ class WebKioskWindow(QtWidgets.QMainWindow):
             self._gp = QtGamepad.QGamepad(ids[0], self)
             self._gp_timer = QtCore.QTimer(self)
             self._gp_timer.timeout.connect(self._poll_gamepad)
-            self._gp_timer.start(75)
+            self._gp_timer.start(95 if self._ultra_low_ram else 75)
         except Exception:
             self._gp = None
 
@@ -5201,20 +7863,26 @@ class WebKioskWindow(QtWidgets.QMainWindow):
         if k in (QtCore.Qt.Key_Escape, QtCore.Qt.Key_Back):
             self.close()
             return
-        guide_keys = {QtCore.Qt.Key_F1, QtCore.Qt.Key_Home, QtCore.Qt.Key_Meta}
-        key_super_l = getattr(QtCore.Qt, 'Key_Super_L', None)
-        key_super_r = getattr(QtCore.Qt, 'Key_Super_R', None)
-        if key_super_l is not None:
-            guide_keys.add(key_super_l)
-        if key_super_r is not None:
-            guide_keys.add(key_super_r)
-        if k in guide_keys:
+        if k in self._guide_keys:
             self._show_guide()
             return
         if k in (QtCore.Qt.Key_Return, QtCore.Qt.Key_Enter):
             self._open_keyboard_if_editable()
             return
         super().keyPressEvent(e)
+
+    def closeEvent(self, e):
+        try:
+            if self._gp_timer is not None:
+                self._gp_timer.stop()
+        except Exception:
+            pass
+        try:
+            if self.view is not None:
+                self.view.stop()
+        except Exception:
+            pass
+        super().closeEvent(e)
 
 
 class DashboardPage(QtWidgets.QWidget):
@@ -5225,25 +7893,32 @@ class DashboardPage(QtWidgets.QWidget):
         self.name = name
         self.spec = spec
         self.left_tiles = []
+        self.center_tiles = []
         self.right_tiles = []
         self.hero = None
         self._body_layout = None
         self.left_col = None
         self.left_layout = None
+        self.center_col = None
         self.center_layout = None
+        self.center_tiles_layout = None
         self.right_col = None
         self.right_layout = None
+        self._last_apply_key = None
         self._build()
 
     def _build_tiles(self, defs, target, layout, alignment=QtCore.Qt.AlignLeft, tile_opts=None):
         opts = dict(tile_opts or {})
         for action, text, size in defs:
             tile_size = size
-            if opts.get('dense'):
-                try:
-                    tile_size = (int(size[0]), max(84, int(size[1] * 0.86)))
-                except Exception:
-                    tile_size = size
+            try:
+                w0, h0 = int(size[0]), int(size[1])
+            except Exception:
+                w0, h0 = 220, 120
+            if opts.get('metro_left'):
+                tile_size = (max(130, int(w0 * 0.64)), max(74, int(h0 * 0.60)))
+            elif opts.get('dense'):
+                tile_size = (max(110, int(w0 * 0.63)), max(70, int(h0 * 0.62)))
             tile = GreenTile(
                 action,
                 text,
@@ -5257,27 +7932,40 @@ class DashboardPage(QtWidgets.QWidget):
             layout.addWidget(tile, 0, alignment)
 
     def _build(self):
-        body = QtWidgets.QHBoxLayout(self)
+        wrap = QtWidgets.QVBoxLayout(self)
+        wrap.setContentsMargins(0, 0, 0, 0)
+        wrap.setSpacing(0)
+        wrap.addStretch(1)
+
+        body = QtWidgets.QHBoxLayout()
         self._body_layout = body
         body.setContentsMargins(0, 0, 0, 0)
-        body.setSpacing(26)
-        body.addStretch(1)
+        body.setSpacing(12)
 
         left_col = QtWidgets.QWidget()
         self.left_col = left_col
-        left_col.setFixedWidth(320)
+        left_col.setFixedWidth(220)
         left = QtWidgets.QVBoxLayout(left_col)
         self.left_layout = left
         left.setContentsMargins(0, 0, 0, 0)
-        left.setSpacing(14)
-        self._build_tiles(self.spec.get('left', []), self.left_tiles, left, QtCore.Qt.AlignLeft)
+        left.setSpacing(7)
+        self._build_tiles(
+            self.spec.get('left', []),
+            self.left_tiles,
+            left,
+            QtCore.Qt.AlignLeft,
+            tile_opts={'metro_left': True, 'icon_scale': 0.86, 'text_scale': 0.88},
+        )
         left.addStretch(1)
 
         center_col = QtWidgets.QWidget()
+        self.center_col = center_col
+        center_col.setSizePolicy(QtWidgets.QSizePolicy.Fixed, QtWidgets.QSizePolicy.Preferred)
         center = QtWidgets.QVBoxLayout(center_col)
         self.center_layout = center
         center.setContentsMargins(0, 0, 0, 0)
-        center.setSpacing(14)
+        center.setSpacing(6)
+        center.addStretch(1)
         hero_variant = str(self.spec.get('hero_variant', 'default')).strip().lower()
         if hero_variant == 'games':
             self.hero = GamesShowcasePanel(
@@ -5292,52 +7980,110 @@ class DashboardPage(QtWidgets.QWidget):
                 self.spec.get('hero_subtitle', 'featured'),
             )
         self.hero.clicked.connect(self.actionTriggered.emit)
-        center.addWidget(self.hero, 0, alignment=QtCore.Qt.AlignHCenter)
+        center.addWidget(self.hero, 0, alignment=QtCore.Qt.AlignHCenter | QtCore.Qt.AlignTop)
+
+        center_bottom_defs = self.spec.get('center_bottom', [])
+        if center_bottom_defs:
+            center_tiles_wrap = QtWidgets.QWidget()
+            center_tiles_row = QtWidgets.QHBoxLayout(center_tiles_wrap)
+            self.center_tiles_layout = center_tiles_row
+            center_tiles_row.setContentsMargins(0, 0, 0, 0)
+            center_tiles_row.setSpacing(6)
+            center_tiles_row.addStretch(1)
+            self._build_tiles(
+                center_bottom_defs,
+                self.center_tiles,
+                center_tiles_row,
+                QtCore.Qt.AlignVCenter,
+                tile_opts={'dense': True, 'icon_scale': 0.72, 'text_scale': 0.84},
+            )
+            center_tiles_row.addStretch(1)
+            center.addWidget(center_tiles_wrap, 0, alignment=QtCore.Qt.AlignHCenter | QtCore.Qt.AlignTop)
         center.addStretch(1)
 
         right_col = QtWidgets.QWidget()
         self.right_col = right_col
-        right_col.setFixedWidth(320)
+        right_col.setFixedWidth(170)
         right = QtWidgets.QVBoxLayout(right_col)
         self.right_layout = right
         right.setContentsMargins(0, 0, 0, 0)
-        right.setSpacing(14)
+        right.setSpacing(6)
         self._build_tiles(
             self.spec.get('right', []),
             self.right_tiles,
             right,
-            QtCore.Qt.AlignRight,
-            tile_opts={'dense': True, 'icon_scale': 0.70, 'text_scale': 0.86},
+            QtCore.Qt.AlignLeft,
+            tile_opts={'dense': True, 'icon_scale': 0.62, 'text_scale': 0.78},
         )
         right.addStretch(1)
 
-        body.addWidget(left_col, 0, alignment=QtCore.Qt.AlignVCenter)
-        body.addWidget(center_col, 0, alignment=QtCore.Qt.AlignVCenter)
-        body.addWidget(right_col, 0, alignment=QtCore.Qt.AlignVCenter)
         body.addStretch(1)
+        body.addWidget(left_col, 0, alignment=QtCore.Qt.AlignTop)
+        body.addWidget(center_col, 0, alignment=QtCore.Qt.AlignTop)
+        body.addWidget(right_col, 0, alignment=QtCore.Qt.AlignTop)
+        body.addStretch(1)
+        wrap.addLayout(body, 0)
+        wrap.addStretch(1)
 
-    def apply_scale(self, scale=1.0, compact=False):
-        s = max(0.62, float(scale))
-        compact_factor = 0.86 if compact else 1.0
-        col_w = max(170, int(320 * s * compact_factor))
-        gap = max(8, int(26 * s * compact_factor))
-        col_gap = max(6, int(14 * s * compact_factor))
+    def _apply_scale_once(self, scale=1.0, compact=False):
+        s = max(0.58, float(scale))
+        compact_factor = 0.95 if compact else 1.0
+        left_w = max(112, int(220 * s * compact_factor))
+        right_w = max(96, int(170 * s * compact_factor))
+        gap = max(4, int(12 * s * compact_factor))
+        col_gap = max(3, int(7 * s * compact_factor))
         if self._body_layout is not None:
             self._body_layout.setSpacing(gap)
         if self.left_col is not None:
-            self.left_col.setFixedWidth(col_w)
+            self.left_col.setFixedWidth(left_w)
         if self.right_col is not None:
-            self.right_col.setFixedWidth(col_w)
+            self.right_col.setFixedWidth(right_w)
         if self.left_layout is not None:
             self.left_layout.setSpacing(col_gap)
         if self.center_layout is not None:
             self.center_layout.setSpacing(col_gap)
+        if self.center_tiles_layout is not None:
+            self.center_tiles_layout.setSpacing(max(3, int(6 * s * compact_factor)))
         if self.right_layout is not None:
             self.right_layout.setSpacing(col_gap)
-        for tile in self.left_tiles + self.right_tiles:
-            tile.apply_scale(s, compact)
+        for group in (self.left_tiles, self.center_tiles, self.right_tiles):
+            for tile in group:
+                tile.apply_scale(s, compact)
         if self.hero is not None:
             self.hero.apply_scale(s, compact)
+
+    def _content_size_hint(self):
+        gap = int(self._body_layout.spacing()) if self._body_layout is not None else 0
+        left_w = int(self.left_col.width()) if self.left_col is not None else 0
+        center_w = int(self.center_col.sizeHint().width()) if self.center_col is not None else 0
+        right_w = int(self.right_col.width()) if self.right_col is not None else 0
+        total_w = left_w + center_w + right_w + max(0, gap * 2)
+
+        left_h = int(self.left_col.sizeHint().height()) if self.left_col is not None else 0
+        center_h = int(self.center_col.sizeHint().height()) if self.center_col is not None else 0
+        right_h = int(self.right_col.sizeHint().height()) if self.right_col is not None else 0
+        total_h = max(left_h, center_h, right_h)
+        return total_w, total_h
+
+    def apply_scale(self, scale=1.0, compact=False):
+        base = max(0.58, float(scale))
+        apply_key = (round(base, 4), bool(compact), int(self.width()), int(self.height()))
+        if apply_key == self._last_apply_key:
+            return
+        fitted = base
+        for _ in range(10):
+            self._apply_scale_once(fitted, compact)
+            self.layout().activate()
+            avail_w = max(520, int(self.width()) - 8)
+            avail_h = max(300, int(self.height()) - 8)
+            need_w, need_h = self._content_size_hint()
+            if need_w <= avail_w and need_h <= avail_h:
+                break
+            nxt = max(0.58, fitted * 0.94)
+            if abs(nxt - fitted) < 0.002:
+                break
+            fitted = nxt
+        self._last_apply_key = apply_key
 
 
 class AchievementToast(QtWidgets.QFrame):
@@ -5744,11 +8490,9 @@ class AchievementsHubDialog(QtWidgets.QDialog):
         score = int(row.get('score', 0) or 0)
         unlocked = bool(row.get('unlocked', False))
         state = 'Desbloqueado' if unlocked else 'Bloqueado'
-        QtWidgets.QMessageBox.information(
-            self,
-            title,
-            f'{desc}\n\nEstado: {state}\nGamerscore: {score}G'
-        )
+        detail_txt = f'{desc}\n\nEstado: {state}\nGamerscore: {score}G'
+        dlg = GuidePromptDialog(title, detail_txt, ['OK'], self, default_choice='OK', cancel_choice='OK')
+        dlg.exec_()
 
     def reload(self):
         try:
@@ -5859,6 +8603,13 @@ class Dashboard(QtWidgets.QMainWindow):
         ensure_data()
         self.setWindowTitle('XUI - Xbox 360 Style')
         scr = QtWidgets.QApplication.primaryScreen()
+        self._runtime_profile = detect_runtime_profile()
+        self._total_ram_mb = detect_total_ram_mb()
+        self._ultra_low_ram = ultra_low_ram_mode(scr)
+        self._low_power_ui = use_low_power_ui(scr)
+        self._force_reduce_motion = (os.environ.get('XUI_REDUCE_MOTION', '0') == '1')
+        # Keep lightweight transitions even on low-power devices; allow hard-disable via XUI_REDUCE_MOTION=1.
+        self._reduced_motion = self._force_reduce_motion
         if scr is not None:
             g = scr.availableGeometry()
             self.resize(min(1600, g.width()), min(900, g.height()))
@@ -5877,6 +8628,12 @@ class Dashboard(QtWidgets.QMainWindow):
                     ('Bing Categories', 'Categories', (320, 170)),
                     ('Bing Music', 'Bing Music', (320, 205)),
                 ],
+                'center_bottom': [
+                    ('Bing Search', 'Search', (190, 114)),
+                    ('Voice Search', 'Voice', (190, 114)),
+                    ('Bing Categories', 'Categories', (190, 114)),
+                    ('Kinect Hub', 'Kinect Hub', (190, 114)),
+                ],
                 'right': [
                     ('Bing Games', 'Bing Games', (270, 130)),
                     ('Bing Apps', 'Bing Apps', (270, 130)),
@@ -5888,19 +8645,15 @@ class Dashboard(QtWidgets.QMainWindow):
             },
             'home': {
                 'hint': 'home: usa flechas para moverte y Enter para abrir',
-                'hero_action': 'Hub',
-                'hero_title': 'home',
-                'hero_subtitle': 'featured',
+                'hero_action': 'Spotlight',
+                'hero_title': 'xbox live',
+                'hero_subtitle': 'Connect your Xbox 360 to the Internet to explore games, entertainment, and more',
                 'left': [
                     ('Open Tray', 'Open Tray', (320, 170)),
-                    ('Quickplay Queue', 'Quickplay Queue', (320, 170)),
                     ('My Pins', 'My Pins', (320, 170)),
-                    ('Recent', 'Recent', (320, 205)),
+                    ('Recent', 'Recent', (320, 170)),
                 ],
                 'right': [
-                    ('Spotlight', 'Spotlight', (270, 130)),
-                    ('Bing Search', 'Bing Search', (270, 130)),
-                    ('Downloads', 'Downloads', (270, 130)),
                     ('Friends', 'Friends', (270, 130)),
                     ('Avatar Store', 'Avatar Store', (270, 130)),
                     ('Sign In', 'Sign In', (270, 130)),
@@ -5915,6 +8668,12 @@ class Dashboard(QtWidgets.QMainWindow):
                     ('Friends', 'Friends', (320, 170)),
                     ('Messages', 'Messages', (320, 170)),
                     ('LAN Chat', 'LAN Chat', (320, 205)),
+                ],
+                'center_bottom': [
+                    ('Friends', 'Friends', (190, 114)),
+                    ('Messages', 'Messages', (190, 114)),
+                    ('Party', 'Party', (190, 114)),
+                    ('LAN Chat', 'LAN Chat', (190, 114)),
                 ],
                 'right': [
                     ('Activity Feed', 'Activity Feed', (270, 130)),
@@ -5932,18 +8691,14 @@ class Dashboard(QtWidgets.QMainWindow):
                 'hero_title': 'games',
                 'hero_subtitle': 'play now',
                 'left': [
-                    ('Casino', 'Casino', (320, 170)),
-                    ('Runner', 'Runner', (320, 170)),
-                    ('Missions', 'Missions', (320, 170)),
-                    ('FNAE', 'FNAE', (320, 205)),
+                    ('My Games', 'My Games', (320, 170)),
+                    ('Browse Games', 'Browse Games', (320, 170)),
+                    ('Search Games', 'Search Games', (320, 170)),
                 ],
                 'right': [
-                    ('Game Marketplace', 'Game Marketplace', (270, 130)),
-                    ('Indie Channel', 'Indie Channel', (270, 130)),
-                    ('Demos', 'Demos', (270, 130)),
-                    ('Steam', 'Steam', (270, 130)),
-                    ('RetroArch', 'RetroArch', (270, 130)),
-                    ('Store', 'Store', (270, 130)),
+                    ('Friends', 'Friends', (270, 130)),
+                    ('My TV & Movies', 'My TV & Movies', (270, 130)),
+                    ('Browse TV & Movies', 'Browse TV & Movies', (270, 130)),
                 ],
             },
             'tv & movies': {
@@ -5956,6 +8711,12 @@ class Dashboard(QtWidgets.QMainWindow):
                     ('Boot Video', 'Boot Video', (320, 170)),
                     ('Live TV', 'Live TV', (320, 170)),
                     ('System Info', 'System Info', (320, 205)),
+                ],
+                'center_bottom': [
+                    ('Media Player', 'Media Player', (190, 114)),
+                    ('Movie Trailers', 'Trailers', (190, 114)),
+                    ('Netflix', 'Netflix', (190, 114)),
+                    ('YouTube', 'YouTube', (190, 114)),
                 ],
                 'right': [
                     ('Video Marketplace', 'Video Market', (270, 130)),
@@ -5975,6 +8736,12 @@ class Dashboard(QtWidgets.QMainWindow):
                     ('Startup Sound', 'Startup Sound', (320, 170)),
                     ('All Audio Files', 'All Audio Files', (320, 170)),
                     ('Mute / Unmute', 'Mute / Unmute', (320, 205)),
+                ],
+                'center_bottom': [
+                    ('Music Marketplace', 'Marketplace', (190, 114)),
+                    ('Internet Radio', 'Radio', (190, 114)),
+                    ('Playlist', 'Playlist', (190, 114)),
+                    ('Visualizer', 'Visualizer', (190, 114)),
                 ],
                 'right': [
                     ('Music Marketplace', 'Music Market', (270, 130)),
@@ -5996,6 +8763,12 @@ class Dashboard(QtWidgets.QMainWindow):
                     ('Web Control', 'Web Control', (320, 170)),
                     ('Utilities', 'Utilities', (320, 205)),
                 ],
+                'center_bottom': [
+                    ('App Launcher', 'App Launcher', (190, 114)),
+                    ('File Manager', 'File Manager', (190, 114)),
+                    ('Terminal', 'Terminal', (190, 114)),
+                    ('Virtual Keyboard', 'Keyboard', (190, 114)),
+                ],
                 'right': [
                     ('Downloads', 'Downloads', (270, 130)),
                     ('Avatar Editor', 'Avatar Editor', (270, 130)),
@@ -6015,6 +8788,12 @@ class Dashboard(QtWidgets.QMainWindow):
                     ('Storage', 'Storage', (320, 170)),
                     ('Network Setup', 'Network Setup', (320, 170)),
                     ('Power Profile', 'Preferences', (320, 205)),
+                ],
+                'center_bottom': [
+                    ('Update Check', 'Update Check', (190, 114)),
+                    ('System Update', 'System Update', (190, 114)),
+                    ('Setup Wizard', 'Setup Wizard', (190, 114)),
+                    ('Turn Off', 'Turn Off', (190, 114)),
                 ],
                 'right': [
                     ('Account Security', 'Account', (270, 130)),
@@ -6039,6 +8818,8 @@ class Dashboard(QtWidgets.QMainWindow):
         self._last_hover_at = 0.0
         self._tab_animating = False
         self._tab_anim_group = None
+        self._visible_page_idx = 0
+        self._last_responsive_key = None
         self._web_windows = []
         self._fullscreen_enforced = False
         self._ui_scale = 1.0
@@ -6055,6 +8836,10 @@ class Dashboard(QtWidgets.QMainWindow):
         self._mandatory_update_proc = None
         self._mandatory_update_progress = None
         self._mandatory_update_output = ''
+        self._mandatory_update_retry_scheduled = False
+        self._mandatory_payload_cache = None
+        self._mandatory_payload_checked_at = 0.0
+        self._mandatory_payload_proc = None
         self._install_task_proc = None
         self._install_task_progress = None
         self._install_task_output = ''
@@ -6069,6 +8854,26 @@ class Dashboard(QtWidgets.QMainWindow):
         self._gp_axis_last_dir = {}
         self._gp_axis_deadzone = 0.40
         self._gp_axis_release_zone = 0.22
+        self._last_audio_ready_at = 0.0
+        self._sfx_path_cache = {}
+        self._guide_keys = {QtCore.Qt.Key_F1, QtCore.Qt.Key_Home, QtCore.Qt.Key_Meta}
+        key_super_l = getattr(QtCore.Qt, 'Key_Super_L', None)
+        key_super_r = getattr(QtCore.Qt, 'Key_Super_R', None)
+        if key_super_l is not None:
+            self._guide_keys.add(key_super_l)
+        if key_super_r is not None:
+            self._guide_keys.add(key_super_r)
+        self._gc_timer = None
+        if self._ultra_low_ram:
+            try:
+                gc.enable()
+                gc.set_threshold(450, 8, 8)
+                self._gc_timer = QtCore.QTimer(self)
+                self._gc_timer.setInterval(45000)
+                self._gc_timer.timeout.connect(lambda: gc.collect(1))
+                self._gc_timer.start()
+            except Exception:
+                self._gc_timer = None
         self.sfx = {
             'hover': 'hover.mp3',
             'open': 'open.mp3',
@@ -6103,7 +8908,7 @@ class Dashboard(QtWidgets.QMainWindow):
             if action and action not in seen:
                 seen.add(action)
                 out.append(action)
-        for group in ('left', 'right'):
+        for group in ('left', 'center_bottom', 'right'):
             for action, _text, _size in spec.get(group, []):
                 if action and action not in seen:
                     seen.add(action)
@@ -6120,8 +8925,8 @@ class Dashboard(QtWidgets.QMainWindow):
         stage.setObjectName('stage')
         stage_l = QtWidgets.QVBoxLayout(stage)
         self._stage_layout = stage_l
-        stage_l.setContentsMargins(150, 70, 150, 50)
-        stage_l.setSpacing(18)
+        stage_l.setContentsMargins(94, 34, 94, 26)
+        stage_l.setSpacing(10)
 
         self.top_tabs = TopTabs(self.tabs)
         self.top_tabs.changed.connect(self._on_tab_changed)
@@ -6140,8 +8945,8 @@ class Dashboard(QtWidgets.QMainWindow):
         self._normalize_page_visibility(0)
         stage_l.addWidget(self.page_stack, 1)
 
-        self.desc = QtWidgets.QLabel('Connect your device to the Internet to explore games, entertainment, and more')
-        self.desc.setStyleSheet('font-size:28px; color:rgba(235,240,244,0.75);')
+        self.desc = QtWidgets.QLabel('Connect your Xbox 360 to the Internet to explore games, entertainment, and more')
+        self.desc.setStyleSheet('font-size:18px; color:rgba(236,240,244,0.82); font-family:"Segoe UI","Noto Sans",sans-serif;')
         stage_l.addWidget(self.desc)
 
         outer.addWidget(stage)
@@ -6151,16 +8956,25 @@ class Dashboard(QtWidgets.QMainWindow):
         self._games_inline.closed.connect(lambda: self._play_sfx('back'))
         self._games_inline.hide()
 
-        self.setStyleSheet('''
-            QMainWindow {
-                background:qlineargradient(x1:0.0,y1:0.0,x2:0.0,y2:1.0, stop:0 #545b64, stop:0.55 #666d76, stop:1 #aeb5be);
-            }
-            QFrame#stage {
-                background: rgba(255,255,255,0.05);
-                border: 1px solid rgba(255,255,255,0.08);
-                border-radius: 0px;
-            }
-        ''')
+        main_bg = (
+            '#8f959c'
+            if self._low_power_ui
+            else 'qlineargradient(x1:0.0,y1:0.0,x2:0.0,y2:1.0, stop:0 #4f555d, stop:0.44 #858b92, stop:1 #d7dbe0)'
+        )
+        stage_bg = 'rgba(255,255,255,0.03)' if self._low_power_ui else 'rgba(255,255,255,0.06)'
+        stage_border = 'rgba(255,255,255,0.08)' if self._low_power_ui else 'rgba(255,255,255,0.10)'
+        self.setStyleSheet(
+            f'''
+            QMainWindow {{
+                background:{main_bg};
+            }}
+            QFrame#stage {{
+                background:{stage_bg};
+                border:1px solid {stage_border};
+                border-radius:0px;
+            }}
+            '''
+        )
         self.setCursor(QtGui.QCursor(QtCore.Qt.BlankCursor))
         root.setCursor(QtGui.QCursor(QtCore.Qt.BlankCursor))
 
@@ -6174,34 +8988,55 @@ class Dashboard(QtWidgets.QMainWindow):
             g = scr.availableGeometry()
             sw = max(800, g.width())
             sh = max(480, g.height())
-        rw = min(w, sw) / 1600.0
-        rh = min(h, sh) / 900.0
-        scale = max(0.62, min(1.0, min(rw, rh)))
+        vw = min(w, sw)
+        vh = min(h, sh)
+        rw = vw / 1600.0
+        rh = vh / 900.0
+        base_scale = min(rw, rh)
         force_compact = os.environ.get('XUI_COMPACT_UI', '0') == '1'
-        compact = force_compact or (min(w, sw) <= 1280) or (min(h, sh) <= 720)
+        compact = force_compact or (vw <= 1366) or (vh <= 768)
+        scale = min(1.0, base_scale)
         if compact:
-            scale = min(scale, 0.8)
+            floor = 0.74 if vh < 700 else 0.80
+            boost = 1.08 if vh <= 800 else 1.0
+            scale = max(floor, min(1.0, scale * boost))
         if force_compact:
-            scale = min(scale, 0.74)
+            scale = min(scale, 0.92)
+        if self._low_power_ui:
+            scale = max(0.82 if vh >= 700 else 0.76, scale)
+        env_scale = str(os.environ.get('XUI_UI_SCALE', '')).strip()
+        if env_scale:
+            try:
+                scale = max(0.58, min(1.15, float(env_scale)))
+            except Exception:
+                pass
         return scale, compact
 
     def _apply_responsive_layout(self):
         scale, compact = self._compute_ui_metrics()
+        layout_key = (round(float(scale), 4), bool(compact), int(self.width()), int(self.height()))
+        if layout_key == self._last_responsive_key:
+            self._layout_overlays()
+            return
+        self._last_responsive_key = layout_key
         self._ui_scale = scale
         self._compact_ui = compact
-        compact_factor = 0.72 if compact else 1.0
+        compact_factor = 0.80 if compact else 1.0
         if self._stage_layout is not None:
-            side = max(22, int(150 * scale * compact_factor))
-            top = max(12, int(70 * scale * compact_factor))
-            bottom = max(12, int(50 * scale * compact_factor))
-            spacing = max(8, int(18 * scale * compact_factor))
+            side = max(18, int(94 * scale * compact_factor))
+            top = max(10, int(34 * scale * compact_factor))
+            bottom = max(8, int(26 * scale * compact_factor))
+            spacing = max(6, int(10 * scale * compact_factor))
             self._stage_layout.setContentsMargins(side, top, side, bottom)
             self._stage_layout.setSpacing(spacing)
         if hasattr(self, 'top_tabs') and self.top_tabs is not None:
             self.top_tabs.apply_scale(scale, compact)
         if hasattr(self, 'desc') and self.desc is not None:
-            desc_px = max(12, int(28 * scale * (0.82 if compact else 1.0)))
-            self.desc.setStyleSheet(f'font-size:{desc_px}px; color:rgba(235,240,244,0.75);')
+            desc_px = max(10, int(18 * scale * (0.92 if compact else 1.0)))
+            self.desc.setStyleSheet(
+                f'font-size:{desc_px}px; color:rgba(236,240,244,0.82); '
+                'font-family:"Segoe UI","Noto Sans",sans-serif;'
+            )
         for p in self.pages:
             p.apply_scale(scale, compact)
         if self._achievement_toast is not None:
@@ -6224,7 +9059,9 @@ class Dashboard(QtWidgets.QMainWindow):
         h = max(520, ph - top - bottom_margin)
         x = margin_x
         y = top
-        self._games_inline.setGeometry(x, y, w, h)
+        new_rect = QtCore.QRect(x, y, w, h)
+        if self._games_inline.geometry() != new_rect:
+            self._games_inline.setGeometry(new_rect)
 
     def showEvent(self, e):
         super().showEvent(e)
@@ -6232,17 +9069,37 @@ class Dashboard(QtWidgets.QMainWindow):
         QtCore.QTimer.singleShot(0, self._apply_responsive_layout)
         if not self._startup_update_checked:
             self._startup_update_checked = True
-            QtCore.QTimer.singleShot(260, self._check_mandatory_update_gate)
+            self._request_mandatory_update_payload(force=True)
+            # Startup burst: detect mandatory updates immediately after dashboard appears.
+            for delay in (120, 420, 900, 1700):
+                QtCore.QTimer.singleShot(delay, self._check_mandatory_update_gate)
             self._start_mandatory_update_monitor()
 
     def _start_mandatory_update_monitor(self):
         if self._mandatory_update_timer is not None:
             return
         t = QtCore.QTimer(self)
-        t.setInterval(120000)
+        t.setInterval(45000 if self._ultra_low_ram else 30000)
         t.timeout.connect(self._check_mandatory_update_gate)
         t.start()
         self._mandatory_update_timer = t
+
+    def _queue_mandatory_update_retry(self, delay_ms=900):
+        if self._mandatory_update_retry_scheduled:
+            return
+        if self._mandatory_update_in_progress or self._mandatory_update_dialog_open:
+            return
+        try:
+            delay = int(delay_ms)
+        except Exception:
+            delay = 900
+        if delay < 180:
+            delay = 180
+        self._mandatory_update_retry_scheduled = True
+        def _retry():
+            self._mandatory_update_retry_scheduled = False
+            self._check_mandatory_update_gate()
+        QtCore.QTimer.singleShot(delay, _retry)
 
     def resizeEvent(self, e):
         super().resizeEvent(e)
@@ -6266,9 +9123,16 @@ class Dashboard(QtWidgets.QMainWindow):
     def _normalize_page_visibility(self, idx=None):
         if idx is None:
             idx = self.page_stack.currentIndex()
+        idx = max(0, min(int(idx), len(self.pages) - 1))
+        if (not self._tab_animating) and int(getattr(self, '_visible_page_idx', -1)) == idx:
+            page = self.pages[idx]
+            if page.pos() != QtCore.QPoint(0, 0):
+                page.move(0, 0)
+            return
         for i, page in enumerate(self.pages):
             page.move(0, 0)
             page.setVisible(i == idx)
+        self._visible_page_idx = idx
 
     def _animate_tab_transition(self, from_idx, to_idx):
         if from_idx == to_idx:
@@ -6277,12 +9141,19 @@ class Dashboard(QtWidgets.QMainWindow):
             return
         if self._tab_animating:
             return
+        if self._reduced_motion:
+            self.page_stack.setCurrentIndex(to_idx)
+            self._normalize_page_visibility(to_idx)
+            self.update_focus()
+            return
         from_w = self.page_stack.widget(from_idx)
         to_w = self.page_stack.widget(to_idx)
         rect = self.page_stack.rect()
-        shift = rect.width() if to_idx > from_idx else -rect.width()
-        from_end_x = -int(shift * 0.58)
-        to_start_x = int(shift * 0.42)
+        direction = 1 if to_idx > from_idx else -1
+        # Xbox-like side blade movement, but compact to keep GPU/CPU cost low.
+        travel = int(max(56, rect.width() * (0.20 if self._low_power_ui else 0.28)))
+        from_end_x = -direction * travel
+        to_start_x = direction * int(travel * (0.92 if self._low_power_ui else 1.05))
 
         for i, page in enumerate(self.pages):
             if i not in (from_idx, to_idx):
@@ -6295,50 +9166,55 @@ class Dashboard(QtWidgets.QMainWindow):
         to_w.show()
         to_w.raise_()
 
-        from_fx = QtWidgets.QGraphicsOpacityEffect(from_w)
-        to_fx = QtWidgets.QGraphicsOpacityEffect(to_w)
-        from_fx.setOpacity(1.0)
-        to_fx.setOpacity(0.0)
-        from_w.setGraphicsEffect(from_fx)
-        to_w.setGraphicsEffect(to_fx)
-
         self._tab_animating = True
         self._tab_anim_group = QtCore.QParallelAnimationGroup(self)
+        duration = 155 if self._low_power_ui else 215
 
         anim_from = QtCore.QPropertyAnimation(from_w, b'pos')
-        anim_from.setDuration(320)
+        anim_from.setDuration(duration)
         anim_from.setStartValue(QtCore.QPoint(0, 0))
         anim_from.setEndValue(QtCore.QPoint(from_end_x, 0))
-        anim_from.setEasingCurve(QtCore.QEasingCurve.InOutCubic)
+        anim_from.setEasingCurve(QtCore.QEasingCurve.OutCubic)
 
         anim_to = QtCore.QPropertyAnimation(to_w, b'pos')
-        anim_to.setDuration(320)
+        anim_to.setDuration(duration)
         anim_to.setStartValue(QtCore.QPoint(to_start_x, 0))
         anim_to.setEndValue(QtCore.QPoint(0, 0))
-        anim_to.setEasingCurve(QtCore.QEasingCurve.InOutCubic)
-
-        fade_from = QtCore.QPropertyAnimation(from_fx, b'opacity')
-        fade_from.setDuration(280)
-        fade_from.setStartValue(1.0)
-        fade_from.setEndValue(0.08)
-        fade_from.setEasingCurve(QtCore.QEasingCurve.OutCubic)
-
-        fade_to = QtCore.QPropertyAnimation(to_fx, b'opacity')
-        fade_to.setDuration(300)
-        fade_to.setStartValue(0.0)
-        fade_to.setEndValue(1.0)
-        fade_to.setEasingCurve(QtCore.QEasingCurve.OutCubic)
+        anim_to.setEasingCurve(QtCore.QEasingCurve.OutCubic)
 
         self._tab_anim_group.addAnimation(anim_from)
         self._tab_anim_group.addAnimation(anim_to)
-        self._tab_anim_group.addAnimation(fade_from)
-        self._tab_anim_group.addAnimation(fade_to)
+        from_fx = None
+        to_fx = None
+        if not self._low_power_ui:
+            from_fx = QtWidgets.QGraphicsOpacityEffect(from_w)
+            to_fx = QtWidgets.QGraphicsOpacityEffect(to_w)
+            from_fx.setOpacity(1.0)
+            to_fx.setOpacity(0.74)
+            from_w.setGraphicsEffect(from_fx)
+            to_w.setGraphicsEffect(to_fx)
+
+            fade_from = QtCore.QPropertyAnimation(from_fx, b'opacity')
+            fade_from.setDuration(duration)
+            fade_from.setStartValue(1.0)
+            fade_from.setEndValue(0.84)
+            fade_from.setEasingCurve(QtCore.QEasingCurve.OutCubic)
+
+            fade_to = QtCore.QPropertyAnimation(to_fx, b'opacity')
+            fade_to.setDuration(duration + 20)
+            fade_to.setStartValue(0.74)
+            fade_to.setEndValue(1.0)
+            fade_to.setEasingCurve(QtCore.QEasingCurve.OutCubic)
+            self._tab_anim_group.addAnimation(fade_from)
+            self._tab_anim_group.addAnimation(fade_to)
 
         def done():
             self.page_stack.setCurrentIndex(to_idx)
             self._normalize_page_visibility(to_idx)
-            from_w.setGraphicsEffect(None)
-            to_w.setGraphicsEffect(None)
+            if from_fx is not None:
+                from_w.setGraphicsEffect(None)
+            if to_fx is not None:
+                to_w.setGraphicsEffect(None)
             self._tab_animating = False
             self._tab_anim_group = None
             self.update_focus()
@@ -6364,18 +9240,20 @@ class Dashboard(QtWidgets.QMainWindow):
             self.focus_area = 'tabs'
             self.focus_idx = 0
         if animate:
+            self.top_tabs.set_current(self.tab_idx)
             self._animate_tab_transition(old_idx, idx)
         else:
             self.page_stack.setCurrentIndex(idx)
             self._normalize_page_visibility(idx)
+            self.update_focus()
         self._play_sfx('open')
-        self.update_focus()
 
     def update_focus(self):
         self.top_tabs.set_current(self.tab_idx)
         tab_name = self.tabs[self.tab_idx]
         page = self._current_page()
         self.desc.setText(self.page_specs.get(tab_name, {}).get('hint', f'{tab_name}: use arrows and Enter'))
+        center_count = max(1, 1 + len(page.center_tiles))
 
         if self.focus_area == 'left':
             if page.left_tiles:
@@ -6389,19 +9267,26 @@ class Dashboard(QtWidgets.QMainWindow):
             else:
                 self.focus_area = 'center'
                 self.focus_idx = 0
+        elif self.focus_area == 'center':
+            self.focus_idx = max(0, min(self.focus_idx, center_count - 1))
         else:
             self.focus_idx = 0
 
+        cur = (self.tab_idx, self.focus_area, self.focus_idx)
+        if self._last_focus_state is not None and cur == self._last_focus_state:
+            return
+
         for i, t in enumerate(page.left_tiles):
             t.set_selected(self.focus_area == 'left' and self.focus_idx == i)
+        for i, t in enumerate(page.center_tiles):
+            t.set_selected(self.focus_area == 'center' and self.focus_idx == (i + 1))
         for i, t in enumerate(page.right_tiles):
             t.set_selected(self.focus_area == 'right' and self.focus_idx == i)
-        page.hero.set_selected(self.focus_area == 'center')
+        page.hero.set_selected(self.focus_area == 'center' and self.focus_idx == 0)
 
-        cur = (self.tab_idx, self.focus_area, self.focus_idx)
         if self._last_focus_state is None:
             self._last_focus_state = cur
-        elif cur != self._last_focus_state:
+        else:
             self._play_sfx('hover')
             self._last_focus_state = cur
 
@@ -6490,6 +9375,34 @@ class Dashboard(QtWidgets.QMainWindow):
                     'name': name,
                 })
         return games
+
+    def _launch_steam_game_by_name(self, query):
+        q = str(query or '').strip().lower()
+        if not q:
+            return False
+        hits = []
+        tokens = [tok for tok in re.split(r'[^a-z0-9]+', q) if tok]
+        for game in self._steam_installed_games(limit=500):
+            appid = str(game.get('appid', '')).strip()
+            name = str(game.get('name', '')).strip()
+            n = name.lower()
+            if not appid or not name:
+                continue
+            ok = all(tok in n for tok in tokens) if tokens else (q in n)
+            if ok:
+                score = len(n)
+                hits.append((score, appid, name))
+        if not hits:
+            return False
+        hits.sort(key=lambda row: row[0])
+        appid = str(hits[0][1])
+        steam = XUI_HOME / 'bin' / 'xui_steam.sh'
+        if steam.exists():
+            self._run('/bin/sh', ['-c', f'"{steam}" -applaunch {appid}'])
+        else:
+            self._open_url_external(f'steam://run/{appid}', normal_mode=True)
+        self._unlock_achievement_event('launch', 'steam')
+        return True
 
     def _platform_games_tiles(self):
         tiles = []
@@ -6595,19 +9508,143 @@ class Dashboard(QtWidgets.QMainWindow):
         except Exception:
             return None
 
-    def _mandatory_update_payload(self):
-        checker = XUI_HOME / 'bin' / 'xui_update_check.sh'
-        if not checker.exists():
+    def _is_windows_runtime(self):
+        return (os.name == 'nt') or str(sys.platform).lower().startswith('win')
+
+    def _python_exec_for_update(self):
+        candidates = []
+        if str(getattr(sys, 'executable', '') or '').strip():
+            candidates.append(str(sys.executable))
+        if self._is_windows_runtime():
+            candidates.extend(['py', 'python', 'python3'])
+        else:
+            candidates.extend(['python3', 'python'])
+        seen = set()
+        for c in candidates:
+            c = str(c or '').strip()
+            if not c or c in seen:
+                continue
+            seen.add(c)
+            if os.path.isabs(c):
+                if os.path.exists(c):
+                    return c
+                continue
+            if shutil.which(c):
+                return c
+        return ''
+
+    def _update_checker_path(self):
+        xui_bin = XUI_HOME / 'bin'
+        if self._is_windows_runtime():
+            order = [xui_bin / 'xui_update_check.py', xui_bin / 'xui_update_check.sh']
+        else:
+            order = [xui_bin / 'xui_update_check.sh', xui_bin / 'xui_update_check.py']
+        for p in order:
+            try:
+                if p.exists():
+                    return p
+            except Exception:
+                continue
+        return None
+
+    def _update_checker_invocation(self, mode='mandatory', json_mode=False):
+        checker = self._update_checker_path()
+        if checker is None:
             return None
-        cmd = f'/bin/sh -c "{checker} mandatory --json"'
-        out = subprocess.getoutput(cmd)
-        return self._extract_json_blob(out)
+        mode = str(mode or 'status').strip() or 'status'
+        if checker.suffix.lower() == '.py':
+            pyexe = self._python_exec_for_update()
+            if not pyexe:
+                return None
+            args = [str(checker), mode]
+            if json_mode:
+                args.append('--json')
+            return pyexe, args
+        checker_q = shlex.quote(str(checker))
+        cmd = f'{checker_q} {mode}'
+        if json_mode:
+            cmd += ' --json'
+        return '/bin/sh', ['-lc', cmd]
+
+    def _request_mandatory_update_payload(self, force=False):
+        invocation = self._update_checker_invocation('mandatory', json_mode=True)
+        if invocation is None:
+            return False
+        proc = self._mandatory_payload_proc
+        if proc is not None and proc.state() != QtCore.QProcess.NotRunning:
+            return True
+        now = time.monotonic()
+        ttl = 25.0 if self._ultra_low_ram else 15.0
+        if (not force) and isinstance(self._mandatory_payload_cache, dict):
+            if (now - float(self._mandatory_payload_checked_at)) <= ttl:
+                return False
+        p = QtCore.QProcess(self)
+        p.setProgram(invocation[0])
+        p.setArguments(invocation[1])
+        p.setProcessChannelMode(QtCore.QProcess.MergedChannels)
+
+        def finished(_code, _status):
+            try:
+                out = bytes(p.readAllStandardOutput()).decode('utf-8', errors='ignore')
+            except Exception:
+                out = ''
+            payload = self._extract_json_blob(out)
+            if isinstance(payload, dict):
+                self._mandatory_payload_cache = payload
+            else:
+                self._mandatory_payload_cache = {'checked': False, 'update_required': False}
+            self._mandatory_payload_checked_at = time.monotonic()
+            self._mandatory_payload_proc = None
+            try:
+                p.deleteLater()
+            except Exception:
+                pass
+            if self.isVisible():
+                QtCore.QTimer.singleShot(0, self._check_mandatory_update_gate)
+
+        def errored(_err):
+            self._mandatory_payload_cache = {'checked': False, 'update_required': False}
+            self._mandatory_payload_checked_at = time.monotonic()
+            self._mandatory_payload_proc = None
+            try:
+                p.deleteLater()
+            except Exception:
+                pass
+
+        p.finished.connect(finished)
+        p.errorOccurred.connect(errored)
+        self._mandatory_payload_proc = p
+        p.start()
+        return True
+
+    def _mandatory_update_payload(self, force=False):
+        if self._update_checker_path() is None:
+            return None
+        now = time.monotonic()
+        ttl = 25.0 if self._ultra_low_ram else 15.0
+        if force:
+            self._request_mandatory_update_payload(force=True)
+        if isinstance(self._mandatory_payload_cache, dict):
+            if (now - float(self._mandatory_payload_checked_at)) <= ttl:
+                return dict(self._mandatory_payload_cache)
+        self._request_mandatory_update_payload(force=False)
+        if isinstance(self._mandatory_payload_cache, dict):
+            return dict(self._mandatory_payload_cache)
+        return None
 
     def _launch_mandatory_updater_and_quit(self):
-        checker = XUI_HOME / 'bin' / 'xui_update_check.sh'
-        if not checker.exists():
+        invocation = self._update_checker_invocation('apply', json_mode=False)
+        if invocation is None:
             QtWidgets.QApplication.quit()
             return
+        try:
+            if self._mandatory_payload_proc is not None:
+                if self._mandatory_payload_proc.state() != QtCore.QProcess.NotRunning:
+                    self._mandatory_payload_proc.kill()
+                self._mandatory_payload_proc.deleteLater()
+                self._mandatory_payload_proc = None
+        except Exception:
+            pass
         if self._mandatory_update_proc is not None:
             if self._mandatory_update_proc.state() != QtCore.QProcess.NotRunning:
                 return
@@ -6624,8 +9661,8 @@ class Dashboard(QtWidgets.QMainWindow):
         env.insert('AUTO_CONFIRM', '1')
         env.insert('XUI_SKIP_LAUNCH_PROMPT', '1')
         proc.setProcessEnvironment(env)
-        proc.setProgram('/bin/sh')
-        proc.setArguments(['-lc', f'"{checker}" apply'])
+        proc.setProgram(invocation[0])
+        proc.setArguments(invocation[1])
         proc.setProcessChannelMode(QtCore.QProcess.MergedChannels)
         proc.readyReadStandardOutput.connect(self._on_mandatory_update_output)
         proc.finished.connect(self._on_mandatory_update_finished)
@@ -6682,6 +9719,24 @@ class Dashboard(QtWidgets.QMainWindow):
         self._play_sfx('back')
 
     def _restart_dashboard_after_update(self):
+        if self._is_windows_runtime():
+            launcher = XUI_HOME / 'bin' / 'xui_start.bat'
+            dash = XUI_HOME / 'dashboard' / 'pyqt_dashboard_improved.py'
+            started = False
+            try:
+                if launcher.exists():
+                    started = QtCore.QProcess.startDetached('cmd.exe', ['/c', str(launcher)])
+            except Exception:
+                started = False
+            if not started:
+                pyexe = self._python_exec_for_update() or str(getattr(sys, 'executable', 'python'))
+                try:
+                    QtCore.QProcess.startDetached(pyexe, [str(dash)])
+                except Exception:
+                    pass
+            QtCore.QTimer.singleShot(520, QtWidgets.QApplication.quit)
+            return
+
         helper = XUI_HOME / 'bin' / 'xui_postupdate_restart.sh'
         script = '''#!/usr/bin/env bash
 set -euo pipefail
@@ -6830,6 +9885,43 @@ exit 0
             proc.deleteLater()
         self._mandatory_update_in_progress = False
         ok = (status == QtCore.QProcess.NormalExit and int(code) == 0)
+        if not ok:
+            # Soft-success fallback: updater can return non-zero even when files/state are already updated.
+            out = str(self._mandatory_update_output or '')
+            if ('update-applied' in out) or ('step=state-written' in out):
+                ok = True
+            else:
+                try:
+                    payload_after = self._mandatory_update_payload()
+                except Exception:
+                    payload_after = {}
+                if isinstance(payload_after, dict):
+                    if bool(payload_after.get('checked', False)) and not bool(payload_after.get('update_required', True)):
+                        ok = True
+                if not ok:
+                    lower_out = out.lower()
+                    success_hits = 0
+                    for marker in (
+                        'finalizing installation',
+                        'installation complete',
+                        'attempted to enable user services',
+                        'configured passwordless sudo for xui actions',
+                    ):
+                        if marker in lower_out:
+                            success_hits += 1
+                    if success_hits >= 2:
+                        fatal_markers = (
+                            'sudo authentication failed',
+                            'cannot reach github metadata',
+                            'installer failed with code',
+                            'permission denied',
+                            'permiso denegado',
+                            'traceback (most recent call last)',
+                            'no space left on device',
+                            'command not found',
+                        )
+                        if not any(m in lower_out for m in fatal_markers):
+                            ok = True
         if ok:
             dlg = self._mandatory_update_progress
             if dlg is not None and hasattr(dlg, 'finish_ok'):
@@ -6860,13 +9952,19 @@ exit 0
         if self._mandatory_update_dialog_open:
             return
         if not self.isVisible():
+            self._queue_mandatory_update_retry(1200)
             return
         if QtWidgets.QApplication.activeModalWidget() is not None:
+            # Defer while another popup is active, then retry quickly.
+            self._queue_mandatory_update_retry(900)
             return
         payload = self._mandatory_update_payload()
         if not isinstance(payload, dict):
+            self._queue_mandatory_update_retry(3000)
             return
         if not bool(payload.get('checked', False)):
+            # Network/GitHub can come up a bit later after boot; retry sooner than monitor interval.
+            self._queue_mandatory_update_retry(25000)
             return
         if not bool(payload.get('update_required', False)):
             return
@@ -6892,18 +9990,33 @@ exit 0
             pass
 
     def _play_sfx(self, name):
-        if name == 'hover':
-            now = time.monotonic()
+        key = str(name or '').strip()
+        if not key:
+            return
+        now = time.monotonic()
+        if key == 'hover':
             if (now - self._last_hover_at) < 0.08:
                 return
             self._last_hover_at = now
-        ensure_audio_output_ready(35)
+        if (now - float(self._last_audio_ready_at)) > 8.0:
+            ensure_audio_output_ready(35)
+            self._last_audio_ready_at = now
         candidates = []
-        base = self.sfx.get(name)
+        base = self.sfx.get(key)
         if base:
             candidates.append(base)
-        candidates.extend(self.sfx_aliases.get(name, []))
-        snd = pick_existing_sound(candidates)
+        candidates.extend(self.sfx_aliases.get(key, []))
+        cache_key = (key, tuple(candidates))
+        snd = None
+        cached = self._sfx_path_cache.get(cache_key)
+        if cached:
+            cp = Path(cached)
+            if cp.exists():
+                snd = cp
+        if snd is None:
+            snd = pick_existing_sound(candidates)
+            if snd is not None:
+                self._sfx_path_cache[cache_key] = str(snd)
         if snd is None:
             return
         play_media(snd, video=False, blocking=False)
@@ -7169,9 +10282,12 @@ exit 0
         proc.start()
 
     def _open_url(self, url):
+        self._prune_web_windows()
         if QtWebEngineWidgets is not None:
             try:
                 w = WebKioskWindow(url, self, sfx_cb=self._play_sfx)
+                w.setAttribute(QtCore.Qt.WA_DeleteOnClose, True)
+                w.destroyed.connect(self._on_web_window_destroyed)
                 self._web_windows.append(w)
                 w.showFullScreen()
                 self._play_sfx('open')
@@ -7187,13 +10303,30 @@ exit 0
             return
         self._msg('Browser', f'No browser launcher available.\n{url}')
 
+    def _on_web_window_destroyed(self, _obj=None):
+        self._prune_web_windows()
+
+    def _prune_web_windows(self):
+        alive = []
+        for w in list(self._web_windows):
+            if w is None:
+                continue
+            try:
+                _ = w.windowTitle()
+            except Exception:
+                continue
+            alive.append(w)
+        self._web_windows = alive
+
     def _open_url_external(self, url, normal_mode=True):
         u = str(url or '').strip()
         if not u:
             return
         kiosk = XUI_HOME / 'bin' / 'xui_browser.sh'
         if kiosk.exists():
-            mode = '--normal' if bool(normal_mode) else '--kiosk'
+            # Keep browser apps useful but always fullscreen by default.
+            # Use hub mode (fullscreen + controls) unless caller explicitly asks kiosk.
+            mode = '--hub' if bool(normal_mode) else '--kiosk'
             self._run('/bin/sh', ['-c', f'"{kiosk}" {mode} "{u}"'])
             return
         self._run('/bin/sh', ['-c', f'xdg-open "{u}"'])
@@ -7305,21 +10438,62 @@ exit 0
         self._play_sfx('close')
 
     def _popup_message(self, title, text, icon, buttons, default_button=None):
-        box = QtWidgets.QMessageBox(self)
-        box.setWindowTitle(title)
-        box.setText(str(text))
-        box.setIcon(icon)
-        box.setStandardButtons(buttons)
-        if default_button is not None:
-            box.setDefaultButton(default_button)
-        esc_btn = (
-            box.button(QtWidgets.QMessageBox.Cancel)
-            or box.button(QtWidgets.QMessageBox.No)
-            or box.button(QtWidgets.QMessageBox.Ok)
+        flag_names = [
+            (QtWidgets.QMessageBox.Yes, 'Yes'),
+            (QtWidgets.QMessageBox.No, 'No'),
+            (QtWidgets.QMessageBox.Ok, 'OK'),
+            (QtWidgets.QMessageBox.Cancel, 'Cancel'),
+            (QtWidgets.QMessageBox.Retry, 'Retry'),
+            (QtWidgets.QMessageBox.Abort, 'Abort'),
+            (QtWidgets.QMessageBox.Ignore, 'Ignore'),
+            (QtWidgets.QMessageBox.Close, 'Close'),
+        ]
+        options = []
+        try:
+            mask = int(buttons)
+        except Exception:
+            mask = int(QtWidgets.QMessageBox.Ok)
+        for flag, label in flag_names:
+            try:
+                if mask & int(flag):
+                    options.append(label)
+            except Exception:
+                continue
+        if not options:
+            options = ['OK']
+
+        def _flag_to_label(flag):
+            for f, lbl in flag_names:
+                try:
+                    if int(flag) == int(f):
+                        return lbl
+                except Exception:
+                    continue
+            return ''
+
+        default_label = _flag_to_label(default_button) if default_button is not None else ''
+        if default_label not in options:
+            if 'No' in options:
+                default_label = 'No'
+            elif options:
+                default_label = options[0]
+            else:
+                default_label = 'OK'
+        cancel_label = 'No' if 'No' in options else ('Cancel' if 'Cancel' in options else options[-1])
+        dlg = GuidePromptDialog(
+            str(title or ''),
+            str(text or ''),
+            options,
+            self,
+            default_choice=default_label,
+            cancel_choice=cancel_label,
         )
-        if esc_btn is not None:
-            box.setEscapeButton(esc_btn)
-        return box.exec_()
+        rc = dlg.exec_()
+        choice = dlg.selected_choice()
+        if rc != QtWidgets.QDialog.Accepted and not choice:
+            choice = cancel_label
+        label_to_flag = {lbl: flag for flag, lbl in flag_names}
+        return int(label_to_flag.get(choice, QtWidgets.QMessageBox.Ok))
 
     def _ask_yes_no(self, title, text):
         self._play_sfx('open')
@@ -7421,7 +10595,7 @@ exit 0
             return
         self._guide_open_last_at = now
         self._play_sfx('open')
-        d = XboxGuideMenu(current_gamertag(), self, sfx_cb=self._play_sfx)
+        d = XboxGuideMenu(current_gamertag(), self, sfx_cb=self._play_sfx, mode='dashboard')
         if d.exec_() == QtWidgets.QDialog.Accepted:
             opt = d.selected()
             if opt:
@@ -7826,11 +11000,17 @@ exit 0
         elif action == 'My Games':
             self._menu('My Games', ['Runner', 'Casino', 'Gem Match', 'FNAE', 'Steam', 'RetroArch', 'Games Integrations'])
         elif action in ('Browse Games', 'Browse'):
-            self._run('/bin/sh', ['-c', f'{xui}/bin/xui_store.sh'])
+            self._menu('Browse Games', ['Games Marketplace', 'Game Marketplace', 'Indie Channel', 'Steam', 'RetroArch', 'Store'])
+        elif action == 'Xbox Home Feed':
+            self._open_url_external('https://www.xbox.com/en-US/', normal_mode=True)
+        elif action == 'My TV & Movies':
+            self._menu('My TV & Movies', ['Netflix', 'YouTube', 'Twitch', 'Movie Trailers', 'Video Marketplace', 'Live TV'])
+        elif action == 'Browse TV & Movies':
+            self._menu('Browse TV & Movies', ['Video Marketplace', 'Movie Trailers', 'Netflix', 'YouTube', 'Twitch', 'Live TV', 'Skype'])
         elif action == 'Quickplay Queue':
             self._menu('Quickplay Queue', ['My Games', 'Recently Played', 'Arcade Picks', 'Games Marketplace', 'Web Browser'])
         elif action == 'Spotlight':
-            self._open_url_external('https://www.xbox.com/en-US/games', normal_mode=True)
+            self._menu('Spotlight', ['Xbox Home Feed', 'Games Marketplace', 'Video Marketplace', 'Music Marketplace', 'Bing Search'])
         elif action == 'Bing Search':
             q, ok = self._input_text('Bing Search', 'Search the web:', '')
             if ok and str(q).strip():
@@ -7885,6 +11065,8 @@ exit 0
                 if self._ask_yes_no('Beacons', 'Clear all active beacons?'):
                     safe_json_write(BEACONS_FILE, [])
                     self._msg('Beacons', 'All beacons cleared.')
+        elif action in ('View Beacons', 'Add Beacon', 'Remove Beacon', 'Clear Beacons'):
+            self.handle_action('Beacons')
         elif action == 'Cloud Storage':
             out = subprocess.getoutput('/bin/sh -c "du -sh $HOME/.xui/data 2>/dev/null | head -n 1"').strip()
             info = (
@@ -7917,6 +11099,10 @@ exit 0
             self._run('/bin/sh', ['-c', f'{xui}/bin/xui_store.sh'])
         elif action == 'Indie Channel':
             self._menu('Indie Channel', ['Store', 'Games Marketplace', 'Itch.io Free Games Hub', 'Game Jolt Games Hub'])
+        elif action == 'Itch.io Free Games Hub':
+            self._open_url_external('https://itch.io/games/free', normal_mode=True)
+        elif action == 'Game Jolt Games Hub':
+            self._open_url_external('https://gamejolt.com/games', normal_mode=True)
         elif action == 'Demos':
             self._menu('Demos', ['Runner', 'Casino', 'Gem Match', 'Movie Trailers'])
         elif action == 'Recently Played':
@@ -7938,12 +11124,29 @@ exit 0
             except Exception:
                 arr = []
             self._menu('Recent', arr or ['No recent actions'])
+        elif action == 'No recent actions':
+            self._msg('Recent', 'No recent actions.')
+        elif action == 'No recent games':
+            self._msg('Recently Played', 'No recent games.')
         elif action == 'Casino':
             self._run('/bin/sh', ['-c', f'{xui}/bin/xui_python.sh {xui}/casino/casino.py'])
         elif action == 'Runner':
             self._run('/bin/sh', ['-c', f'{xui}/bin/xui_python.sh {xui}/games/runner.py'])
         elif action in ('Gem Match', 'Bejeweled'):
             self._run('/bin/sh', ['-c', f'{xui}/bin/xui_gem_match.sh'])
+        elif action == 'Showcase Halo 4':
+            if not self._launch_steam_game_by_name('Halo 4'):
+                self._open_url_external('https://www.bing.com/search?q=Halo+4', normal_mode=True)
+        elif action == 'Showcase COD Black Ops':
+            if not self._launch_steam_game_by_name('Call of Duty Black Ops'):
+                self._open_url_external('https://www.bing.com/search?q=Call+of+Duty+Black+Ops', normal_mode=True)
+        elif action == 'Showcase FIFA Soccer 13':
+            if not self._launch_steam_game_by_name('FIFA 13'):
+                self._open_url_external('https://www.bing.com/search?q=FIFA+Soccer+13', normal_mode=True)
+        elif action == 'Showcase Nike Kinect Training':
+            self._open_url_external('https://www.bing.com/search?q=Nike+Kinect+Training', normal_mode=True)
+        elif action in ('Showcase Recommendations', 'Showcase All Recommendations'):
+            self._menu('Recommendations', ['Game Marketplace', 'Indie Channel', 'Demos', 'Movie Trailers'])
         elif action in ('FNAE', "Five Night's At Epstein's", "Five Nights At Epstein's"):
             run_fnae = f'{xui}/bin/xui_run_fnae.sh'
             install_fnae = f'{xui}/bin/xui_install_fnae.sh'
@@ -8316,7 +11519,7 @@ exit 0
         elif action == 'Battery Saver':
             self._run('/bin/sh', ['-c', f'{xui}/bin/xui_battery_saver.sh toggle'])
         elif action == 'Update Check':
-            payload = self._mandatory_update_payload()
+            payload = self._mandatory_update_payload(force=True)
             if isinstance(payload, dict) and bool(payload.get('checked', False)):
                 if bool(payload.get('update_required', False)):
                     repo = str(payload.get('repo', 'afitler79-alt/XUI-X360-FRONTEND'))
@@ -8326,7 +11529,7 @@ exit 0
                 else:
                     self._msg('Update', 'System is up to date.')
             else:
-                self._msg('Update', subprocess.getoutput(f'/bin/sh -c "{xui}/bin/xui_update_check.sh mandatory"'))
+                self._msg('Update', 'Checking updates in background...\nTry again in a moment.')
         elif action == 'System Update':
             self._run_terminal(f'"{xui}/bin/xui_update_system.sh"')
         elif action == 'Family':
@@ -8339,7 +11542,11 @@ exit 0
             if self._ask_yes_no('Exit', 'Salir al escritorio?'):
                 QtWidgets.QApplication.quit()
         else:
-            self._msg('Action', f'{action} launched.')
+            q = urllib.parse.quote_plus(str(action or '').strip())
+            if q:
+                self._open_url_external(f'https://www.bing.com/search?q={q}', normal_mode=True)
+            else:
+                self._msg('Action', 'No action selected.')
 
     def _dispatch_dashboard_key(self, key):
         modal = QtWidgets.QApplication.activeModalWidget()
@@ -8449,6 +11656,58 @@ exit 0
         except Exception:
             pass
 
+    def closeEvent(self, e):
+        try:
+            if self._mandatory_update_timer is not None:
+                self._mandatory_update_timer.stop()
+        except Exception:
+            pass
+        try:
+            if self._mandatory_payload_proc is not None:
+                if self._mandatory_payload_proc.state() != QtCore.QProcess.NotRunning:
+                    self._mandatory_payload_proc.kill()
+                self._mandatory_payload_proc.deleteLater()
+                self._mandatory_payload_proc = None
+        except Exception:
+            pass
+        try:
+            if self._mandatory_update_proc is not None:
+                if self._mandatory_update_proc.state() != QtCore.QProcess.NotRunning:
+                    self._mandatory_update_proc.kill()
+                self._mandatory_update_proc.deleteLater()
+                self._mandatory_update_proc = None
+        except Exception:
+            pass
+        try:
+            if self._install_task_proc is not None:
+                if self._install_task_proc.state() != QtCore.QProcess.NotRunning:
+                    self._install_task_proc.kill()
+                self._install_task_proc.deleteLater()
+                self._install_task_proc = None
+        except Exception:
+            pass
+        for did in list(self._qgamepads.keys()):
+            gp = self._qgamepads.pop(did, None)
+            if gp is not None:
+                try:
+                    gp.deleteLater()
+                except Exception:
+                    pass
+        for w in list(self._web_windows):
+            if w is None:
+                continue
+            try:
+                w.close()
+            except Exception:
+                pass
+        self._web_windows = []
+        try:
+            if self._gc_timer is not None:
+                self._gc_timer.stop()
+        except Exception:
+            pass
+        super().closeEvent(e)
+
     def keyPressEvent(self, e):
         k = self._canonical_gamepad_key(e.key())
         if self._games_inline is not None and self._games_inline.isVisible():
@@ -8463,6 +11722,10 @@ exit 0
                 self.update_focus()
                 return
             if self.focus_area == 'center':
+                if self.focus_idx > 0:
+                    self.focus_idx = 0
+                    self.update_focus()
+                    return
                 self.focus_area = 'tabs'
                 self.focus_idx = 0
                 self.update_focus()
@@ -8484,11 +11747,20 @@ exit 0
                 self._switch_tab(self.tab_idx - 1, animate=True, keep_tabs_focus=True)
                 return
             elif self.focus_area == 'center':
-                if page.left_tiles:
+                if self.focus_idx > 1 and page.center_tiles:
+                    self.focus_idx = max(1, self.focus_idx - 1)
+                elif self.focus_idx == 1 and page.left_tiles:
+                    self.focus_area = 'left'
+                    self.focus_idx = 0
+                elif self.focus_idx == 0 and page.left_tiles:
                     self.focus_area = 'left'
                     self.focus_idx = min(self.focus_idx, len(page.left_tiles) - 1)
             elif self.focus_area == 'right':
                 self.focus_area = 'center'
+                if page.center_tiles:
+                    self.focus_idx = len(page.center_tiles)
+                else:
+                    self.focus_idx = 0
             self.update_focus(); return
         if k == QtCore.Qt.Key_Right:
             if self.focus_area == 'tabs':
@@ -8496,20 +11768,30 @@ exit 0
                 return
             elif self.focus_area == 'left':
                 self.focus_area = 'center'
+                self.focus_idx = 1 if page.center_tiles else 0
             elif self.focus_area == 'center':
-                if page.right_tiles:
+                if self.focus_idx > 0 and self.focus_idx < len(page.center_tiles):
+                    self.focus_idx += 1
+                elif page.right_tiles:
                     self.focus_area = 'right'
-                    self.focus_idx = min(self.focus_idx, len(page.right_tiles) - 1)
+                    self.focus_idx = min(max(0, self.focus_idx - 1), len(page.right_tiles) - 1)
             self.update_focus(); return
         if k == QtCore.Qt.Key_Up:
             if self.focus_area in ('left', 'right'):
                 self.focus_idx = max(0, self.focus_idx - 1)
             elif self.focus_area == 'center':
-                self.focus_area = 'tabs'
+                if self.focus_idx > 0:
+                    self.focus_idx = 0
+                else:
+                    self.focus_area = 'tabs'
             self.update_focus(); return
         if k == QtCore.Qt.Key_Down:
             if self.focus_area == 'tabs':
                 self.focus_area = 'center'
+                self.focus_idx = 0
+            elif self.focus_area == 'center':
+                if self.focus_idx == 0 and page.center_tiles:
+                    self.focus_idx = 1
             elif self.focus_area == 'left':
                 self.focus_idx = min(len(page.left_tiles)-1, self.focus_idx + 1) if page.left_tiles else 0
             elif self.focus_area == 'right':
@@ -8533,7 +11815,11 @@ exit 0
                 self._play_sfx('select')
                 self.update_focus()
             elif self.focus_area == 'center':
-                self.handle_action(page.hero.action)
+                if self.focus_idx <= 0:
+                    self.handle_action(page.hero.action)
+                elif page.center_tiles:
+                    idx = max(0, min(self.focus_idx - 1, len(page.center_tiles) - 1))
+                    self.handle_action(page.center_tiles[idx].action)
             elif self.focus_area == 'left':
                 if page.left_tiles:
                     self.handle_action(page.left_tiles[self.focus_idx].action)
@@ -8541,31 +11827,51 @@ exit 0
                 if page.right_tiles:
                     self.handle_action(page.right_tiles[self.focus_idx].action)
             return
-        guide_keys = {QtCore.Qt.Key_F1, QtCore.Qt.Key_Home, QtCore.Qt.Key_Meta}
-        key_super_l = getattr(QtCore.Qt, 'Key_Super_L', None)
-        key_super_r = getattr(QtCore.Qt, 'Key_Super_R', None)
-        if key_super_l is not None:
-            guide_keys.add(key_super_l)
-        if key_super_r is not None:
-            guide_keys.add(key_super_r)
-        if k in guide_keys:
+        if k in self._guide_keys:
             self._show_xbox_guide()
             return
         super().keyPressEvent(e)
 
 
 def main():
+    ultra_low_ram = ultra_low_ram_mode()
+    attr = getattr(QtCore.Qt, 'AA_CompressHighFrequencyEvents', None)
+    if attr is not None:
+        try:
+            QtCore.QCoreApplication.setAttribute(attr, True)
+        except Exception:
+            pass
     app = QtWidgets.QApplication(sys.argv)
     app.setApplicationName('XUI Xbox Style')
+    if ultra_low_ram:
+        try:
+            QtGui.QPixmapCache.setCacheLimit(6144)
+        except Exception:
+            pass
     f = app.font()
     scr = app.primaryScreen()
+    low_ui = use_low_power_ui(scr)
     if scr is not None:
         g = scr.availableGeometry()
-        base_pt = 10 if (g.width() <= 1280 or g.height() <= 720) else 12
+        if low_ui and (g.width() <= 1366 or g.height() <= 768):
+            base_pt = 11
+        else:
+            base_pt = 10 if (g.width() <= 1280 or g.height() <= 720) else 12
     else:
-        base_pt = 12
+        base_pt = 11 if low_ui else 12
     f.setPointSize(base_pt)
     app.setFont(f)
+    if low_ui:
+        for fx in (
+            QtCore.Qt.UI_AnimateMenu,
+            QtCore.Qt.UI_AnimateCombo,
+            QtCore.Qt.UI_FadeMenu,
+            QtCore.Qt.UI_FadeTooltip,
+        ):
+            try:
+                app.setEffectEnabled(fx, False)
+            except Exception:
+                pass
     play_startup_video()
     w = Dashboard()
     try:
@@ -8591,12 +11897,10 @@ deploy_custom_dashboard(){
         return 0
     fi
     script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-    src=""
-    for candidate in "$script_dir/pyqt_dashboard_improved_fixed2.py" "$script_dir/pyqt_dashboard_improved_fixed.py"; do
-        if [ -f "$candidate" ]; then src="$candidate"; break; fi
-    done
+    src="$script_dir/pyqt_dashboard_improved_fixed.py"
     dst="$DASH_DIR/pyqt_dashboard_improved.py"
-    if [ -z "$src" ]; then
+    if [ ! -f "$src" ]; then
+        # nothing to do
         return 0
     fi
     info "Found enhanced dashboard at $src"
@@ -8662,7 +11966,33 @@ ASSETS_DIR="$TARGET_HOME/.xui/assets"
 DASH_SCRIPT="$TARGET_HOME/.xui/dashboard/pyqt_dashboard_improved.py"
 PY_RUNNER="$TARGET_HOME/.xui/bin/xui_python.sh"
 info(){ echo "[INFO] $*"; }
+play_video(){
+  local file="$1"
+  [ -f "$file" ] || return 1
+  if command -v mpv >/dev/null 2>&1; then
+    mpv --no-terminal --really-quiet --fullscreen "$file"; return $?
+  elif command -v ffplay >/dev/null 2>&1; then
+    ffplay -autoexit -fs -loglevel quiet "$file"; return $?
+  elif command -v gst-play-1.0 >/dev/null 2>&1; then
+    gst-play-1.0 --no-interactive "$file"; return $?
+  elif command -v cvlc >/dev/null 2>&1; then
+    cvlc --play-and-exit --fullscreen --quiet "$file"; return $?
+  elif command -v vlc >/dev/null 2>&1; then
+    vlc --play-and-exit --fullscreen --quiet "$file"; return $?
+  fi
+  return 1
+}
+PLAYED_STARTUP=0
+if [ -f "$ASSETS_DIR/startup.mp4" ]; then
+  info "Playing startup video"
+  if play_video "$ASSETS_DIR/startup.mp4"; then
+    PLAYED_STARTUP=1
+  fi
+fi
 if [ -f "$DASH_SCRIPT" ]; then
+  if [ "$PLAYED_STARTUP" = "1" ]; then
+    export XUI_SKIP_STARTUP_VIDEO=1
+  fi
   if [ -x "$PY_RUNNER" ]; then
     exec "$PY_RUNNER" "$DASH_SCRIPT"
   fi
@@ -9781,12 +13111,25 @@ BASH
 set -euo pipefail
 as_root(){
   if [ "$(id -u)" -eq 0 ]; then "$@"; return $?; fi
+  if command -v sudo >/dev/null 2>&1 && sudo -n true >/dev/null 2>&1; then
+    sudo -n "$@"; return $?
+  fi
   if [ "${XUI_NONINTERACTIVE:-0}" = "1" ] || [ ! -t 0 ]; then
-    if command -v pkexec >/dev/null 2>&1; then pkexec "$@"; return $?; fi
-    if command -v sudo >/dev/null 2>&1; then sudo -n "$@"; return $?; fi
-  else
-    if command -v sudo >/dev/null 2>&1; then sudo "$@"; return $?; fi
-    if command -v pkexec >/dev/null 2>&1; then pkexec "$@"; return $?; fi
+    if [ "${XUI_ALLOW_NONINTERACTIVE_PKEXEC:-0}" = "1" ] && command -v pkexec >/dev/null 2>&1; then
+      pkexec "$@"; return $?
+    fi
+    echo "non-interactive root unavailable (no cached sudo): $*" >&2
+    return 1
+  fi
+  if command -v sudo >/dev/null 2>&1; then
+    sudo -v >/dev/null 2>&1 || true
+    if sudo -n true >/dev/null 2>&1; then
+      sudo -n "$@"; return $?
+    fi
+    sudo "$@"; return $?
+  fi
+  if command -v pkexec >/dev/null 2>&1; then
+    pkexec "$@"; return $?
   fi
   echo "root privileges unavailable for: $*" >&2
   return 1
@@ -10496,6 +13839,14 @@ import urllib.request
 import uuid
 from pathlib import Path
 from PyQt5 import QtCore, QtGui, QtWidgets
+try:
+    from PyQt5 import QtGamepad
+except Exception:
+    QtGamepad = None
+try:
+    from PyQt5 import QtGamepad
+except Exception:
+    QtGamepad = None
 
 sys.path.insert(0, str(Path.home() / '.xui' / 'bin'))
 from xui_game_lib import get_balance, change_balance, ensure_wallet, complete_mission, unlock_for_event
@@ -11470,11 +14821,72 @@ class RunnerGame(QtWidgets.QWidget):
         if m.get('completed'):
             bal = m.get('balance', bal)
             extra = f"\nMission reward: +{float(m.get('reward', 0)):.2f}"
-        QtWidgets.QMessageBox.information(
-            self,
-            'Runner',
-            f'Game Over\nScore: {self.score}\nReward: +{reward} credits{extra}\nBalance: EUR {bal:.2f}',
+        dlg = QtWidgets.QDialog(self)
+        dlg.setWindowTitle('Runner')
+        dlg.setWindowFlags(QtCore.Qt.Dialog | QtCore.Qt.FramelessWindowHint)
+        dlg.setModal(True)
+        dlg.resize(760, 440)
+        dlg.setStyleSheet('''
+            QDialog { background:#d7dce1; border:2px solid rgba(239,244,248,0.78); }
+            QLabel#title {
+                color:#eef4f8;
+                background:qlineargradient(x1:0,y1:0,x2:1,y2:0, stop:0 #69717a, stop:1 #505860);
+                font-size:30px;
+                font-weight:800;
+                padding:8px 12px;
+            }
+            QLabel#body { color:#1f2730; font-size:23px; font-weight:650; }
+            QListWidget {
+                background:#e4e8ec;
+                color:#1f252c;
+                font-size:30px;
+                border:1px solid rgba(76,86,96,0.4);
+                outline:none;
+            }
+            QListWidget::item {
+                padding:7px 12px;
+                margin:1px 0px;
+            }
+            QListWidget::item:selected {
+                background:qlineargradient(x1:0,y1:0,x2:1,y2:0, stop:0 #5abc3e, stop:1 #3e9132);
+                color:#f4fff1;
+                border:1px solid rgba(249,255,248,0.4);
+            }
+        ''')
+        lay = QtWidgets.QVBoxLayout(dlg)
+        lay.setContentsMargins(0, 0, 0, 0)
+        lay.setSpacing(0)
+        hdr = QtWidgets.QLabel('Runner')
+        hdr.setObjectName('title')
+        lay.addWidget(hdr, 0)
+        body = QtWidgets.QWidget()
+        bl = QtWidgets.QVBoxLayout(body)
+        bl.setContentsMargins(16, 14, 16, 12)
+        bl.setSpacing(10)
+        txt = QtWidgets.QLabel(
+            f'Game Over\nScore: {self.score}\nReward: +{reward} credits{extra}\nBalance: EUR {bal:.2f}'
         )
+        txt.setObjectName('body')
+        txt.setWordWrap(True)
+        bl.addWidget(txt, 1)
+        lw = QtWidgets.QListWidget()
+        lw.addItem('OK')
+        lw.setCurrentRow(0)
+        lw.itemActivated.connect(lambda *_: dlg.accept())
+        bl.addWidget(lw, 0)
+        lay.addWidget(body, 1)
+
+        def _key(ev):
+            if ev.key() in (QtCore.Qt.Key_Return, QtCore.Qt.Key_Enter, QtCore.Qt.Key_A):
+                dlg.accept()
+                return
+            if ev.key() in (QtCore.Qt.Key_Escape, QtCore.Qt.Key_Back, QtCore.Qt.Key_B):
+                dlg.reject()
+                return
+            QtWidgets.QDialog.keyPressEvent(dlg, ev)
+
+        dlg.keyPressEvent = _key
+        dlg.exec_()
         self.close()
 
     def keyPressEvent(self, e):
@@ -12408,6 +15820,121 @@ class VirtualKeyboardDialog(QtWidgets.QDialog):
         return self.line.text().strip()
 
 
+class StoreMenuDialog(QtWidgets.QDialog):
+    def __init__(self, title, text, options=None, parent=None, default_choice='', cancel_choice=''):
+        super().__init__(parent)
+        opts = [str(x).strip() for x in (options or []) if str(x).strip()]
+        if not opts:
+            opts = ['OK']
+        self._options = opts
+        self._choice = str(default_choice or opts[0]).strip() or opts[0]
+        if self._choice not in self._options:
+            self._choice = self._options[0]
+        self._cancel_choice = str(cancel_choice or '').strip()
+        if self._cancel_choice not in self._options:
+            self._cancel_choice = 'Cancel' if 'Cancel' in self._options else self._options[-1]
+        self.setWindowTitle(str(title or 'Menu'))
+        self.setWindowFlags(QtCore.Qt.Dialog | QtCore.Qt.FramelessWindowHint)
+        self.setModal(True)
+        self.resize(860, 520)
+        self.setStyleSheet('''
+            QDialog { background:#d7dce1; border:2px solid rgba(239,244,248,0.78); }
+            QLabel#title {
+                color:#eef4f8;
+                background:qlineargradient(x1:0,y1:0,x2:1,y2:0, stop:0 #69717a, stop:1 #505860);
+                font-size:28px;
+                font-weight:800;
+                padding:8px 12px;
+            }
+            QLabel#body {
+                color:#1f2730;
+                font-size:22px;
+                font-weight:650;
+            }
+            QListWidget#choices {
+                background:#e4e8ec;
+                color:#1f252c;
+                font-size:31px;
+                border:1px solid rgba(76,86,96,0.4);
+                outline:none;
+            }
+            QListWidget#choices::item {
+                padding:7px 10px;
+                margin:1px 0px;
+            }
+            QListWidget#choices::item:selected {
+                background:qlineargradient(x1:0,y1:0,x2:1,y2:0, stop:0 #5abc3e, stop:1 #3e9132);
+                color:#f4fff1;
+                border:1px solid rgba(249,255,248,0.4);
+            }
+            QLabel#hint {
+                color:#1f252c;
+                font-size:16px;
+                font-weight:800;
+            }
+        ''')
+        root = QtWidgets.QVBoxLayout(self)
+        root.setContentsMargins(0, 0, 0, 0)
+        root.setSpacing(0)
+        lbl_title = QtWidgets.QLabel(str(title or 'Menu'))
+        lbl_title.setObjectName('title')
+        root.addWidget(lbl_title, 0)
+        body = QtWidgets.QWidget()
+        lay = QtWidgets.QVBoxLayout(body)
+        lay.setContentsMargins(16, 14, 16, 12)
+        lay.setSpacing(10)
+        self.body_lbl = QtWidgets.QLabel(str(text or ''))
+        self.body_lbl.setObjectName('body')
+        self.body_lbl.setWordWrap(True)
+        lay.addWidget(self.body_lbl, 1)
+        self.listw = QtWidgets.QListWidget()
+        self.listw.setObjectName('choices')
+        self.listw.addItems(self._options)
+        idx = self._options.index(self._choice) if self._choice in self._options else 0
+        self.listw.setCurrentRow(max(0, idx))
+        self.listw.itemActivated.connect(self._accept_current)
+        lay.addWidget(self.listw, 0)
+        hint = QtWidgets.QLabel('A/ENTER = Select | B/ESC = Back')
+        hint.setObjectName('hint')
+        lay.addWidget(hint, 0)
+        root.addWidget(body, 1)
+
+    def showEvent(self, e):
+        super().showEvent(e)
+        parent = self.parentWidget()
+        if parent is not None:
+            w = min(max(760, int(parent.width() * 0.62)), max(760, parent.width() - 120))
+            h = min(max(440, int(parent.height() * 0.62)), max(440, parent.height() - 120))
+            self.resize(w, h)
+            x = parent.x() + (parent.width() - w) // 2
+            y = parent.y() + (parent.height() - h) // 2
+            self.move(max(0, x), max(0, y))
+
+    def selected_choice(self):
+        return str(self._choice or '')
+
+    def _accept_current(self, *_):
+        it = self.listw.currentItem()
+        if it is not None:
+            self._choice = str(it.text()).strip() or self._choice
+        self.accept()
+
+    def keyPressEvent(self, e):
+        k = e.key()
+        if k in (QtCore.Qt.Key_Escape, QtCore.Qt.Key_Back):
+            self._choice = self._cancel_choice
+            self.reject()
+            return
+        if k in (QtCore.Qt.Key_Return, QtCore.Qt.Key_Enter, QtCore.Qt.Key_A):
+            self._accept_current()
+            return
+        if k in (QtCore.Qt.Key_B,):
+            self._choice = self._cancel_choice
+            self.reject()
+            return
+        super().keyPressEvent(e)
+
+
 class StoreInstallProgressDialog(QtWidgets.QDialog):
     def __init__(self, app_title='App', parent=None):
         super().__init__(parent)
@@ -13079,6 +16606,47 @@ class StoreWindow(QtWidgets.QMainWindow):
         self.search_text = str(text or '')
         self._refresh_tiles()
 
+    def _menu_notice(self, title, text):
+        d = StoreMenuDialog(
+            str(title or 'Info'),
+            str(text or ''),
+            ['OK'],
+            self,
+            default_choice='OK',
+            cancel_choice='OK',
+        )
+        d.exec_()
+
+    def _menu_pick(self, title, options, descriptions=None, default_choice=''):
+        opts = [str(x).strip() for x in (options or []) if str(x).strip()]
+        if not opts:
+            return None
+        descriptions = descriptions or {}
+        detail = str(descriptions.get(default_choice, '') or '').strip()
+        d = StoreMenuDialog(
+            str(title or 'Menu'),
+            detail or 'Select an option.',
+            opts,
+            self,
+            default_choice=str(default_choice or opts[0]),
+            cancel_choice='Close' if 'Close' in opts else opts[-1],
+        )
+        if d.exec_() == QtWidgets.QDialog.Accepted:
+            return d.selected_choice()
+        return None
+
+    def _cycle_category(self, step=1):
+        order = list(self.FILTER_MAP.keys())
+        if not order:
+            return
+        try:
+            cur = order.index(self.category)
+        except Exception:
+            cur = 0
+        nxt = (cur + int(step)) % len(order)
+        self.set_category(order[nxt])
+        self.info_lbl.setText(f'Category: {self.category}')
+
     def _search_input_active(self):
         try:
             return bool(self.search is not None and self.search.hasFocus())
@@ -13359,15 +16927,37 @@ class StoreWindow(QtWidgets.QMainWindow):
     def show_inventory(self):
         inv = self.inventory.get('items', [])
         if not inv:
-            QtWidgets.QMessageBox.information(self, 'Inventory', 'No purchased items.')
+            self._menu_notice('Inventory', 'No purchased items.')
             return
-        lines = []
+        options = []
+        descriptions = {}
         for i, x in enumerate(inv[:400], 1):
-            lines.append(
-                f"{i}. {x.get('name', 'Item')} [{x.get('category', 'Apps')}] "
-                f"(EUR {float(x.get('price', 0)):.2f})"
-            )
-        QtWidgets.QMessageBox.information(self, 'Inventory', '\n'.join(lines))
+            name = str(x.get('name', 'Item'))
+            category = str(x.get('category', 'Apps'))
+            iid = str(x.get('id', '')).strip()
+            price = float(x.get('price', 0) or 0)
+            label = f'{i:02d}. {name}'
+            options.append(label)
+            desc = f'{category} | EUR {price:.2f}'
+            if iid:
+                desc += f' | ID: {iid}'
+            descriptions[label] = desc
+        options.append('Close')
+        pick = self._menu_pick('Inventory', options, descriptions, default_choice=options[0] if options else '')
+        if not pick or pick == 'Close':
+            return
+        try:
+            idx = int(str(pick).split('.', 1)[0]) - 1
+        except Exception:
+            idx = -1
+        if idx < 0 or idx >= len(inv):
+            return
+        iid = str(inv[idx].get('id', '')).strip()
+        if not iid:
+            return
+        self.selected_item_id = iid
+        self._apply_selection()
+        self._scroll_to_selected()
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
@@ -13422,6 +17012,12 @@ class StoreWindow(QtWidgets.QMainWindow):
         k = e.key()
         if k in (QtCore.Qt.Key_Escape, QtCore.Qt.Key_Back):
             self.close()
+            return
+        if k in (QtCore.Qt.Key_PageUp, QtCore.Qt.Key_Backtab):
+            self._cycle_category(-1)
+            return
+        if k in (QtCore.Qt.Key_PageDown,):
+            self._cycle_category(1)
             return
         if k == QtCore.Qt.Key_F2:
             self.open_virtual_keyboard()
@@ -13482,7 +17078,7 @@ class StoreWindow(QtWidgets.QMainWindow):
             self._gamepad_timer = QtCore.QTimer(self)
             self._gamepad_timer.timeout.connect(self._poll_gamepad)
             self._gamepad_timer.start(70)
-            self.info_lbl.setText('Controller connected: A=Launch X=Buy Y=Inventory B=Back F2=Keyboard.')
+            self.info_lbl.setText('Controller: A=Launch X=Buy Y=Inventory B=Back LB/RB=Category START=Keyboard.')
         except Exception:
             self._gamepad = None
 
@@ -13508,11 +17104,13 @@ class StoreWindow(QtWidgets.QMainWindow):
         b = bool(self._gp_read('buttonB', False))
         x = bool(self._gp_read('buttonX', False))
         y = bool(self._gp_read('buttonY', False))
+        lb = bool(self._gp_read('buttonL1', False)) or bool(self._gp_read('buttonLeftShoulder', False))
+        rb = bool(self._gp_read('buttonR1', False)) or bool(self._gp_read('buttonRightShoulder', False))
         start = bool(self._gp_read('buttonStart', False))
 
         curr = {
             'left': left, 'right': right, 'up': up, 'down': down,
-            'a': a, 'b': b, 'x': x, 'y': y, 'start': start,
+            'a': a, 'b': b, 'x': x, 'y': y, 'lb': lb, 'rb': rb, 'start': start,
         }
 
         def pressed(key):
@@ -13535,6 +17133,10 @@ class StoreWindow(QtWidgets.QMainWindow):
             self.buy_selected()
         elif pressed('y'):
             self.show_inventory()
+        elif pressed('lb'):
+            self._cycle_category(-1)
+        elif pressed('rb'):
+            self._cycle_category(1)
         elif pressed('start'):
             self.open_virtual_keyboard()
         elif pressed('b'):
@@ -14521,23 +18123,25 @@ set -euo pipefail
 
 as_root(){
   if [ "$(id -u)" -eq 0 ]; then "$@"; return $?; fi
+  if command -v sudo >/dev/null 2>&1 && sudo -n true >/dev/null 2>&1; then
+    sudo -n "$@" && return 0
+  fi
   if [ "${XUI_NONINTERACTIVE:-0}" = "1" ] || [ ! -t 0 ]; then
-    if command -v pkexec >/dev/null 2>&1; then
+    if [ "${XUI_ALLOW_NONINTERACTIVE_PKEXEC:-0}" = "1" ] && command -v pkexec >/dev/null 2>&1; then
       pkexec "$@" && return 0
     fi
-    if command -v sudo >/dev/null 2>&1; then
-      sudo -n "$@" && return 0
-    fi
-    echo "non-interactive root unavailable; skipping: $*" >&2
+    echo "non-interactive root unavailable (no cached sudo); skipping: $*" >&2
     return 1
   fi
   if command -v sudo >/dev/null 2>&1; then
-    sudo "$@"
-    return $?
+    sudo -v >/dev/null 2>&1 || true
+    if sudo -n true >/dev/null 2>&1; then
+      sudo -n "$@" && return 0
+    fi
+    sudo "$@"; return $?
   fi
   if command -v pkexec >/dev/null 2>&1; then
-    pkexec "$@"
-    return $?
+    pkexec "$@"; return $?
   fi
   echo "root privileges unavailable: $*" >&2
   return 1
@@ -14545,11 +18149,13 @@ as_root(){
 
 can_noninteractive_root(){
   [ "$(id -u)" -eq 0 ] && return 0
-  if command -v pkexec >/dev/null 2>&1; then
+  if command -v sudo >/dev/null 2>&1 && sudo -n -v >/dev/null 2>&1; then
     return 0
   fi
-  command -v sudo >/dev/null 2>&1 || return 1
-  sudo -n -v >/dev/null 2>&1
+  if [ "${XUI_ALLOW_NONINTERACTIVE_PKEXEC:-0}" = "1" ] && command -v pkexec >/dev/null 2>&1; then
+    return 0
+  fi
+  return 1
 }
 
 wait_apt(){
@@ -14626,10 +18232,10 @@ XUI_HOME="$HOME/.xui"
 APP_HOME="$XUI_HOME/apps/fnae"
 DATA_FILE="$XUI_HOME/data/fnae_paths.json"
 BIN_DIR="$XUI_HOME/bin"
-LINUX_MEDIAFIRE_URL="https://www.mediafire.com/file/a4q4l09vdfqzzws/Five_Nights_At_Epsteins_Linux.tar/file"
-LINUX_MEDIAFIRE_DIRECT_URL="https://www.mediafire.com/download/a4q4l09vdfqzzws/Five_Nights_At_Epsteins_Linux.tar"
-WINDOWS_MEDIAFIRE_URL="https://www.mediafire.com/file/6tj1rd7kmsxv4oe/Five_Nights_At_Epstein%2527s.zip/file"
-WINDOWS_MEDIAFIRE_DIRECT_URL="https://www.mediafire.com/download/6tj1rd7kmsxv4oe/Five_Nights_At_Epstein%27s.zip"
+LINUX_MEDIAFIRE_URL="${XUI_FNAE_LINUX_URL:-https://www.mediafire.com/file/a4q4l09vdfqzzws/Five_Nights_At_Epsteins_Linux.tar/file}"
+LINUX_MEDIAFIRE_DIRECT_URL="${XUI_FNAE_LINUX_DIRECT_URL:-https://www.mediafire.com/download/a4q4l09vdfqzzws/Five_Nights_At_Epsteins_Linux.tar}"
+WINDOWS_MEDIAFIRE_URL="${XUI_FNAE_WINDOWS_URL:-https://www.mediafire.com/file/6tj1rd7kmsxv4oe/Five_Nights_At_Epstein%2527s.zip/file}"
+WINDOWS_MEDIAFIRE_DIRECT_URL="${XUI_FNAE_WINDOWS_DIRECT_URL:-https://www.mediafire.com/download/6tj1rd7kmsxv4oe/Five_Nights_At_Epstein%27s.zip}"
 mkdir -p "$APP_HOME/linux" "$APP_HOME/windows" "$XUI_HOME/data"
 HOST_OS="$(uname -s 2>/dev/null || echo Linux)"
 IS_LINUX=0
@@ -14774,6 +18380,86 @@ extract_mediafire_direct(){
   return 1
 }
 
+extract_mediafire_quickkey(){
+  local src="$1"
+  local key=""
+  key="$(printf '%s' "$src" | sed -n 's#.*mediafire\.com/file/\([^/?#][^/?#]*\).*#\1#p' | head -n1 || true)"
+  if [ -z "$key" ]; then
+    key="$(printf '%s' "$src" | sed -n 's#.*mediafire\.com/download/\([^/?#][^/?#]*\).*#\1#p' | head -n1 || true)"
+  fi
+  if [ -n "$key" ]; then
+    printf '%s\n' "$key"
+    return 0
+  fi
+  return 1
+}
+
+resolve_mediafire_direct_via_api(){
+  local src_url="$1"
+  local key api_url tmp_json direct
+  key="$(extract_mediafire_quickkey "$src_url" || true)"
+  [ -n "$key" ] || return 1
+  api_url="https://www.mediafire.com/api/1.5/file/get_info.php?quick_key=${key}&response_format=json"
+  tmp_json="$(mktemp)"
+  if ! fetch_url_to_file "$api_url" "$tmp_json" "$src_url"; then
+    rm -f "$tmp_json" >/dev/null 2>&1 || true
+    return 1
+  fi
+  if command -v python3 >/dev/null 2>&1; then
+    direct="$(python3 - "$tmp_json" <<'PY'
+import json
+import sys
+
+try:
+    with open(sys.argv[1], "r", encoding="utf-8", errors="ignore") as fh:
+        data = json.load(fh)
+except Exception:
+    raise SystemExit(1)
+
+resp = data.get("response") or {}
+if str(resp.get("result") or "").lower() != "success":
+    raise SystemExit(1)
+file_info = resp.get("file_info") or {}
+links = file_info.get("links") or {}
+for key in ("normal_download", "direct_download", "one_time_download"):
+    val = links.get(key)
+    if isinstance(val, str) and val.startswith("http"):
+        print(val.strip())
+        raise SystemExit(0)
+raise SystemExit(1)
+PY
+)" || true
+  else
+    direct="$(grep -Eo '"normal_download"[[:space:]]*:[[:space:]]*"[^"]+"' "$tmp_json" | head -n1 | sed -E 's/.*"([^"]+)".*/\1/' || true)"
+  fi
+  rm -f "$tmp_json" >/dev/null 2>&1 || true
+  if [ -n "$direct" ]; then
+    direct="$(printf '%s' "$direct" | sed -e 's/&amp;/\&/g' -e 's#\\/#/#g')"
+    printf '%s\n' "$direct"
+    return 0
+  fi
+  return 1
+}
+
+download_from_mediafire_api(){
+  local page_url="$1"
+  local out_file="$2"
+  local direct=""
+  direct="$(resolve_mediafire_direct_via_api "$page_url" || true)"
+  [ -n "$direct" ] || return 1
+  rm -f "$out_file" >/dev/null 2>&1 || true
+  if ! fetch_url_to_file "$direct" "$out_file" "$page_url"; then
+    rm -f "$out_file" >/dev/null 2>&1 || true
+    return 1
+  fi
+  [ -s "$out_file" ] || { rm -f "$out_file" >/dev/null 2>&1 || true; return 1; }
+  if is_html_file "$out_file"; then
+    rm -f "$out_file" >/dev/null 2>&1 || true
+    return 1
+  fi
+  return 0
+}
+
 download_from_mediafire(){
   local page_url="$1"
   local out_file="$2"
@@ -14840,33 +18526,36 @@ def fetch(url, referer=''):
     with urllib.request.urlopen(req, timeout=60, context=ctx) as r:
         return r.read()
 
-raw = fetch(page_url)
-txt = raw.decode('utf-8', 'ignore')
+try:
+    raw = fetch(page_url)
+    txt = raw.decode('utf-8', 'ignore')
 
-m = re.search(r'id=["\']downloadButton["\'][^>]*href=["\']([^"\']+)', txt, re.IGNORECASE)
-if not m:
-    m = re.search(r'https?://download[0-9]*\.mediafire\.com/[^\s"\'<>]+', txt, re.IGNORECASE)
-if not m:
-    m = re.search(r'https:\\/\\/download[0-9]*\\.mediafire\\.com\\/[^\s"\'<>]+', txt, re.IGNORECASE)
-if not m:
+    m = re.search(r'id=["\']downloadButton["\'][^>]*href=["\']([^"\']+)', txt, re.IGNORECASE)
+    if not m:
+        m = re.search(r'https?://download[0-9]*\.mediafire\.com/[^\s"\'<>]+', txt, re.IGNORECASE)
+    if not m:
+        m = re.search(r'https:\\/\\/download[0-9]*\\.mediafire\\.com\\/[^\s"\'<>]+', txt, re.IGNORECASE)
+    if not m:
+        raise SystemExit(1)
+
+    raw_direct = m.group(1) if (getattr(m, 'lastindex', 0) or 0) >= 1 else m.group(0)
+    direct = html.unescape(raw_direct).replace('\\/', '/')
+    if direct.startswith('//'):
+        direct = 'https:' + direct
+    if direct.startswith('/'):
+        direct = urllib.parse.urljoin(page_url, direct)
+
+    payload = fetch(direct, page_url)
+    head = payload[:4096].lower()
+    if b'<html' in head or b'<!doctype html' in head:
+        raise SystemExit(2)
+    if not payload:
+        raise SystemExit(3)
+
+    with open(out_file, 'wb') as fh:
+        fh.write(payload)
+except Exception:
     raise SystemExit(1)
-
-raw_direct = m.group(1) if (getattr(m, 'lastindex', 0) or 0) >= 1 else m.group(0)
-direct = html.unescape(raw_direct).replace('\\/', '/')
-if direct.startswith('//'):
-    direct = 'https:' + direct
-if direct.startswith('/'):
-    direct = urllib.parse.urljoin(page_url, direct)
-
-payload = fetch(direct, page_url)
-head = payload[:4096].lower()
-if b'<html' in head or b'<!doctype html' in head:
-    raise SystemExit(2)
-if not payload:
-    raise SystemExit(3)
-
-with open(out_file, 'wb') as fh:
-    fh.write(payload)
 raise SystemExit(0)
 PY
   return $?
@@ -14890,6 +18579,14 @@ download_mediafire_archive(){
     [ -n "$src" ] || continue
     echo "[FNAE] MediaFire parse attempt: $src"
     if download_from_mediafire "$src" "$out_file" && "$validator" "$out_file"; then
+      return 0
+    fi
+    rm -f "$out_file" >/dev/null 2>&1 || true
+  done
+  for src in "$@"; do
+    [ -n "$src" ] || continue
+    echo "[FNAE] MediaFire API attempt: $src"
+    if download_from_mediafire_api "$src" "$out_file" && "$validator" "$out_file"; then
       return 0
     fi
     rm -f "$out_file" >/dev/null 2>&1 || true
@@ -14943,51 +18640,86 @@ find_linux_executable(){
     LC_ALL=C head -c 4 "$f" 2>/dev/null | grep -q $'^\x7fELF'
   }
 
-  # 1) Common Unity/Linux artifacts.
-  local exe=""
-  exe="$(find "$root" -maxdepth 8 -type f \( -name '*.x86_64' -o -name '*.x86' -o -name '*.AppImage' \) | head -n1 || true)"
-  if [ -n "$exe" ] && [ -f "$exe" ]; then
-    chmod +x "$exe" >/dev/null 2>&1 || true
-    echo "$exe"
-    return 0
-  fi
+  is_script(){
+    local f="$1"
+    [ -f "$f" ] || return 1
+    head -n1 "$f" 2>/dev/null | grep -q '^#!'
+  }
 
-  # 2) Unity convention: <GameName> executable + <GameName>_Data directory.
-  local data_dir base cand
+  looks_launcher(){
+    local f="$1"
+    [ -f "$f" ] || return 1
+    local bn low
+    bn="$(basename "$f")"
+    low="$(printf '%s' "$bn" | tr '[:upper:]' '[:lower:]')"
+    case "$low" in
+      unitycrashhandler*|crashhandler*|chrome-sandbox|\
+      *.so|*.dll|*.pdb|*.json|*.txt|*.md|*.png|*.jpg|*.jpeg|*.bmp|*.svg|*.ico|\
+      *.wav|*.mp3|*.ogg|*.desktop|*.cfg|*.ini|*.xml)
+        return 1
+        ;;
+    esac
+    if [ -d "${f}_Data" ] || [ -d "$(dirname "$f")/${bn}_Data" ]; then
+      return 0
+    fi
+    case "$low" in
+      *epstein*|*fnae*|*five*night*)
+        return 0
+        ;;
+    esac
+    is_elf "$f" && return 0
+    is_script "$f" && return 0
+    return 1
+  }
+
+  local exe="" data_dir base cand
   while IFS= read -r data_dir; do
     [ -n "$data_dir" ] || continue
     base="${data_dir%_Data}"
-    for cand in "$base" "$base.x86_64" "$base.x86"; do
-      if [ -f "$cand" ]; then
+    for cand in "$base" "$base.x86_64" "$base.x86" "$base.sh"; do
+      if [ -f "$cand" ] && looks_launcher "$cand"; then
         chmod +x "$cand" >/dev/null 2>&1 || true
         echo "$cand"
         return 0
       fi
     done
-  done < <(find "$root" -maxdepth 8 -type d -name '*_Data' 2>/dev/null)
+  done < <(find "$root" -maxdepth 8 -type d -name '*_Data' 2>/dev/null | sort)
 
-  # 3) Fallback: executable files that look like game launchers.
-  exe="$(find "$root" -maxdepth 8 -type f \
-    ! -name '*.so' ! -name '*.dll' ! -name '*.pdb' \
-    ! -name 'UnityCrashHandler*' ! -name '*.exe' \
-    -perm -u+x | head -n1 || true)"
-  if [ -n "$exe" ] && [ -f "$exe" ]; then
-    chmod +x "$exe" >/dev/null 2>&1 || true
-    echo "$exe"
-    return 0
-  fi
-
-  # 4) Fallback: any ELF binary, even if it was extracted without +x bit.
   while IFS= read -r exe; do
     [ -n "$exe" ] || continue
-    if is_elf "$exe"; then
+    if looks_launcher "$exe"; then
       chmod +x "$exe" >/dev/null 2>&1 || true
       echo "$exe"
       return 0
     fi
-  done < <(find "$root" -maxdepth 8 -type f \
-    ! -name '*.so' ! -name '*.dll' ! -name '*.pdb' \
-    ! -name 'UnityCrashHandler*' ! -name '*.exe' 2>/dev/null)
+  done < <(find "$root" -maxdepth 8 -type f \( -name '*.x86_64' -o -name '*.x86' -o -name '*.AppImage' \) 2>/dev/null | sort)
+
+  while IFS= read -r exe; do
+    [ -n "$exe" ] || continue
+    if looks_launcher "$exe"; then
+      chmod +x "$exe" >/dev/null 2>&1 || true
+      echo "$exe"
+      return 0
+    fi
+  done < <(find "$root" -maxdepth 8 -type f \( -iname '*epstein*' -o -iname '*fnae*' -o -iname '*five*night*' \) 2>/dev/null | sort)
+
+  while IFS= read -r exe; do
+    [ -n "$exe" ] || continue
+    if looks_launcher "$exe"; then
+      chmod +x "$exe" >/dev/null 2>&1 || true
+      echo "$exe"
+      return 0
+    fi
+  done < <(find "$root" -maxdepth 8 -type f -perm -u+x 2>/dev/null | sort)
+
+  while IFS= read -r exe; do
+    [ -n "$exe" ] || continue
+    if looks_launcher "$exe"; then
+      chmod +x "$exe" >/dev/null 2>&1 || true
+      echo "$exe"
+      return 0
+    fi
+  done < <(find "$root" -maxdepth 8 -type f 2>/dev/null | sort)
   return 1
 }
 
@@ -15109,6 +18841,12 @@ fi
 
 if [ "$IS_LINUX" = "1" ] && [ -z "$TAR_SRC" ]; then
   echo "FNAE Linux archive was not found or download failed."
+  if command -v getent >/dev/null 2>&1; then
+    if ! getent hosts mediafire.com >/dev/null 2>&1; then
+      echo "DNS check failed: mediafire.com is not resolvable on this system."
+      echo "Verify Network Setup / DNS and retry."
+    fi
+  fi
   echo "Required Linux URL:"
   echo "  $LINUX_MEDIAFIRE_URL"
   exit 1
@@ -15215,6 +18953,8 @@ APP_HOME="$XUI_HOME/apps/fnae"
 DATA_FILE="$XUI_HOME/data/fnae_paths.json"
 BIN_DIR="$XUI_HOME/bin"
 PID_FILE="$XUI_HOME/data/active_game.pid"
+LOG_DIR="$XUI_HOME/logs"
+LOG_FILE="$LOG_DIR/fnae_run.log"
 HOST_OS="$(uname -s 2>/dev/null || echo Linux)"
 IS_LINUX=0
 [ "$HOST_OS" = "Linux" ] && IS_LINUX=1
@@ -15226,6 +18966,11 @@ if [ "${1:-}" = "--check" ]; then
   CHECK_ONLY=1
   shift || true
 fi
+mkdir -p "$LOG_DIR" "$(dirname "$PID_FILE")" >/dev/null 2>&1 || true
+
+run_note(){
+  printf '[%s] %s\n' "$(date '+%Y-%m-%d %H:%M:%S' 2>/dev/null || echo now)" "$*" >> "$LOG_FILE" 2>/dev/null || true
+}
 
 read_json_field(){
   local field="$1"
@@ -15242,47 +18987,96 @@ print(str(data.get(field, '')))
 PY
 }
 
+is_elf_file(){
+  local f="$1"
+  [ -f "$f" ] || return 1
+  LC_ALL=C head -c 4 "$f" 2>/dev/null | grep -q $'^\x7fELF'
+}
+
+is_script_file(){
+  local f="$1"
+  [ -f "$f" ] || return 1
+  head -n1 "$f" 2>/dev/null | grep -q '^#!'
+}
+
+is_probable_launcher(){
+  local f="$1"
+  [ -f "$f" ] || return 1
+  local bn low
+  bn="$(basename "$f")"
+  low="$(printf '%s' "$bn" | tr '[:upper:]' '[:lower:]')"
+  case "$low" in
+    unitycrashhandler*|crashhandler*|chrome-sandbox|\
+    *.so|*.dll|*.pdb|*.json|*.txt|*.md|*.png|*.jpg|*.jpeg|*.bmp|*.svg|*.ico|\
+    *.wav|*.mp3|*.ogg|*.desktop|*.cfg|*.ini|*.xml)
+      return 1
+      ;;
+  esac
+  if [ -d "${f}_Data" ] || [ -d "$(dirname "$f")/${bn}_Data" ]; then
+    return 0
+  fi
+  case "$low" in
+    *epstein*|*fnae*|*five*night*)
+      return 0
+      ;;
+  esac
+  is_elf_file "$f" && return 0
+  is_script_file "$f" && return 0
+  return 1
+}
+
 find_linux_executable(){
   local root="${1:-$APP_HOME/linux}"
   [ -d "$root" ] || return 1
-  is_elf(){
-    local f="$1"
-    [ -f "$f" ] || return 1
-    LC_ALL=C head -c 4 "$f" 2>/dev/null | grep -q $'^\x7fELF'
-  }
-  local exe=""
-  exe="$(find "$root" -maxdepth 8 -type f \( -name '*.x86_64' -o -name '*.x86' -o -name '*.AppImage' \) | head -n1 || true)"
-  if [ -n "$exe" ] && [ -f "$exe" ]; then
-    echo "$exe"
-    return 0
-  fi
+  local exe="" data_dir base cand
+
   while IFS= read -r data_dir; do
     [ -n "$data_dir" ] || continue
-    local base="${data_dir%_Data}"
-    for exe in "$base" "$base.x86_64" "$base.x86"; do
-      if [ -f "$exe" ]; then
-        echo "$exe"
+    base="${data_dir%_Data}"
+    for cand in "$base" "$base.x86_64" "$base.x86" "$base.sh"; do
+      if [ -f "$cand" ] && is_probable_launcher "$cand"; then
+        chmod +x "$cand" >/dev/null 2>&1 || true
+        echo "$cand"
         return 0
       fi
     done
-  done < <(find "$root" -maxdepth 8 -type d -name '*_Data' 2>/dev/null)
-  exe="$(find "$root" -maxdepth 8 -type f \
-    ! -name '*.so' ! -name '*.dll' ! -name '*.pdb' \
-    ! -name 'UnityCrashHandler*' ! -name '*.exe' \
-    -perm -u+x | head -n1 || true)"
-  if [ -n "$exe" ] && [ -f "$exe" ]; then
-    echo "$exe"
-    return 0
-  fi
+  done < <(find "$root" -maxdepth 8 -type d -name '*_Data' 2>/dev/null | sort)
+
   while IFS= read -r exe; do
     [ -n "$exe" ] || continue
-    if is_elf "$exe"; then
+    if is_probable_launcher "$exe"; then
+      chmod +x "$exe" >/dev/null 2>&1 || true
       echo "$exe"
       return 0
     fi
-  done < <(find "$root" -maxdepth 8 -type f \
-    ! -name '*.so' ! -name '*.dll' ! -name '*.pdb' \
-    ! -name 'UnityCrashHandler*' ! -name '*.exe' 2>/dev/null)
+  done < <(find "$root" -maxdepth 8 -type f \( -name '*.x86_64' -o -name '*.x86' -o -name '*.AppImage' \) 2>/dev/null | sort)
+
+  while IFS= read -r exe; do
+    [ -n "$exe" ] || continue
+    if is_probable_launcher "$exe"; then
+      chmod +x "$exe" >/dev/null 2>&1 || true
+      echo "$exe"
+      return 0
+    fi
+  done < <(find "$root" -maxdepth 8 -type f \( -iname '*epstein*' -o -iname '*fnae*' -o -iname '*five*night*' \) 2>/dev/null | sort)
+
+  while IFS= read -r exe; do
+    [ -n "$exe" ] || continue
+    if is_probable_launcher "$exe"; then
+      chmod +x "$exe" >/dev/null 2>&1 || true
+      echo "$exe"
+      return 0
+    fi
+  done < <(find "$root" -maxdepth 8 -type f -perm -u+x 2>/dev/null | sort)
+
+  while IFS= read -r exe; do
+    [ -n "$exe" ] || continue
+    if is_probable_launcher "$exe"; then
+      chmod +x "$exe" >/dev/null 2>&1 || true
+      echo "$exe"
+      return 0
+    fi
+  done < <(find "$root" -maxdepth 8 -type f 2>/dev/null | sort)
   return 1
 }
 
@@ -15339,6 +19133,10 @@ if [ -f "$DATA_FILE" ]; then
   LINUX_EXE="$(read_json_field linux_exe)"
   WIN_EXE="$(read_json_field windows_exe)"
 fi
+if [ -n "$LINUX_EXE" ] && { [ ! -f "$LINUX_EXE" ] || ! is_probable_launcher "$LINUX_EXE"; }; then
+  run_note "Ignoring stale/invalid linux_exe from data file: $LINUX_EXE"
+  LINUX_EXE=""
+fi
 if [ -z "$LINUX_EXE" ] || [ ! -f "$LINUX_EXE" ]; then
   LINUX_EXE="$(find_linux_executable "$APP_HOME/linux" || true)"
 fi
@@ -15383,25 +19181,96 @@ launch_and_wait(){
   return $rc
 }
 
+launch_linux_native(){
+  local exe="$1"
+  shift || true
+  local dir rc ldp
+  dir="$(dirname "$exe")"
+  rc=0
+  ldp="$dir"
+  if [ -n "${LD_LIBRARY_PATH:-}" ]; then
+    ldp="$dir:$LD_LIBRARY_PATH"
+  fi
+  chmod +x "$exe" >/dev/null 2>&1 || true
+  run_note "Launching native: $exe"
+  launch_and_wait "$dir" env LD_LIBRARY_PATH="$ldp" "$exe" "$@" || rc=$?
+  if [ "$rc" -eq 0 ]; then
+    return 0
+  fi
+  if is_script_file "$exe"; then
+    rc=0
+    run_note "Native failed, retrying via bash: $exe"
+    launch_and_wait "$dir" env LD_LIBRARY_PATH="$ldp" /bin/bash "$exe" "$@" || rc=$?
+  fi
+  return "$rc"
+}
+
+launch_linux_steam(){
+  local exe="$1"
+  shift || true
+  if ! command -v steam-run >/dev/null 2>&1; then
+    ensure_fnae_runtime_deps || true
+  fi
+  if ! command -v steam-run >/dev/null 2>&1; then
+    return 127
+  fi
+  local rc=0
+  run_note "Launching with steam-run: $exe"
+  launch_and_wait "$(dirname "$exe")" steam-run "$exe" "$@" || rc=$?
+  return "$rc"
+}
+
 if [ -n "$LINUX_EXE" ] && [ -f "$LINUX_EXE" ]; then
   chmod +x "$LINUX_EXE" || true
-  if [ "$IS_LINUX" = "1" ] && [ "$USE_STEAM_RUNTIME" != "0" ]; then
-    if [ "$USE_STEAM_RUNTIME" = "1" ] || needs_runtime_for_glibc "$LINUX_EXE"; then
-      if ! command -v steam-run >/dev/null 2>&1; then
-        ensure_fnae_runtime_deps || true
-      fi
-      if command -v steam-run >/dev/null 2>&1; then
-        launch_and_wait "$(dirname "$LINUX_EXE")" steam-run "$LINUX_EXE" "$@"
-        exit $?
-      fi
-      host_glibc="$(host_glibc_version || true)"
-      req_glibc="$(required_glibc_version "$LINUX_EXE" || true)"
-      echo "FNAE requires newer runtime (glibc ${req_glibc:-unknown}, host ${host_glibc:-unknown})."
-      echo "steam-run is not available."
-      echo "Run dependency installer:"
-      echo "  $DEPS_SCRIPT"
-      exit 1
-    fi
+  if [ "$IS_LINUX" = "1" ]; then
+    native_rc=1
+    steam_rc=1
+    mode="$(printf '%s' "$USE_STEAM_RUNTIME" | tr '[:upper:]' '[:lower:]')"
+    case "$mode" in
+      1|on|force|always)
+        launch_linux_steam "$LINUX_EXE" "$@" || steam_rc=$?
+        if [ "$steam_rc" -eq 0 ]; then
+          exit 0
+        fi
+        run_note "steam-run failed rc=$steam_rc, fallback native"
+        launch_linux_native "$LINUX_EXE" "$@" || native_rc=$?
+        [ "$native_rc" -eq 0 ] && exit 0
+        echo "FNAE failed to launch (steam-run rc=$steam_rc, native rc=$native_rc)."
+        echo "See log: $LOG_FILE"
+        exit "${native_rc:-1}"
+        ;;
+      0|off|never)
+        launch_linux_native "$LINUX_EXE" "$@" || native_rc=$?
+        [ "$native_rc" -eq 0 ] && exit 0
+        echo "FNAE failed to launch natively (rc=$native_rc)."
+        echo "See log: $LOG_FILE"
+        exit "${native_rc:-1}"
+        ;;
+      *)
+        launch_linux_native "$LINUX_EXE" "$@" || native_rc=$?
+        if [ "$native_rc" -eq 0 ]; then
+          exit 0
+        fi
+        run_note "native launch failed rc=$native_rc; trying steam-run fallback"
+        if needs_runtime_for_glibc "$LINUX_EXE" || command -v steam-run >/dev/null 2>&1; then
+          launch_linux_steam "$LINUX_EXE" "$@" || steam_rc=$?
+          if [ "$steam_rc" -eq 0 ]; then
+            exit 0
+          fi
+          run_note "steam-run launch failed rc=$steam_rc"
+        fi
+        host_glibc="$(host_glibc_version || true)"
+        req_glibc="$(required_glibc_version "$LINUX_EXE" || true)"
+        echo "FNAE failed to launch on Linux."
+        if [ -n "${req_glibc:-}" ] || [ -n "${host_glibc:-}" ]; then
+          echo "glibc host=${host_glibc:-unknown} required=${req_glibc:-unknown}"
+        fi
+        echo "See log: $LOG_FILE"
+        echo "You can force runtime mode:"
+        echo "  XUI_FNAE_USE_STEAM_RUNTIME=1 $BIN_DIR/xui_run_fnae.sh"
+        exit "${native_rc:-1}"
+        ;;
+    esac
   fi
   launch_and_wait "$(dirname "$LINUX_EXE")" "$LINUX_EXE" "$@"
   exit $?
@@ -15759,13 +19628,84 @@ class XboxSetup(QtWidgets.QDialog):
         self.btn_next.setVisible(idx < last)
         self.btn_finish.setVisible(idx == last)
 
+    def _warn(self, title, text):
+        d = QtWidgets.QDialog(self)
+        d.setWindowTitle(str(title or 'Warning'))
+        d.setWindowFlags(QtCore.Qt.Dialog | QtCore.Qt.FramelessWindowHint)
+        d.setModal(True)
+        d.resize(760, 420)
+        d.setStyleSheet('''
+            QDialog { background:#d7dce1; border:2px solid rgba(239,244,248,0.78); }
+            QLabel#title {
+                color:#eef4f8;
+                background:qlineargradient(x1:0,y1:0,x2:1,y2:0, stop:0 #69717a, stop:1 #505860);
+                font-size:28px;
+                font-weight:800;
+                padding:8px 12px;
+            }
+            QLabel#body { color:#1f2730; font-size:22px; font-weight:650; }
+            QListWidget {
+                background:#e4e8ec;
+                color:#1f252c;
+                font-size:29px;
+                border:1px solid rgba(76,86,96,0.4);
+                outline:none;
+            }
+            QListWidget::item {
+                padding:7px 12px;
+                margin:1px 0px;
+            }
+            QListWidget::item:selected {
+                background:qlineargradient(x1:0,y1:0,x2:1,y2:0, stop:0 #5abc3e, stop:1 #3e9132);
+                color:#f4fff1;
+                border:1px solid rgba(249,255,248,0.4);
+            }
+            QLabel#hint { color:#1f252c; font-size:16px; font-weight:800; }
+        ''')
+        lay = QtWidgets.QVBoxLayout(d)
+        lay.setContentsMargins(0, 0, 0, 0)
+        lay.setSpacing(0)
+        hdr = QtWidgets.QLabel(str(title or 'Warning'))
+        hdr.setObjectName('title')
+        lay.addWidget(hdr, 0)
+        body = QtWidgets.QWidget()
+        bl = QtWidgets.QVBoxLayout(body)
+        bl.setContentsMargins(16, 14, 16, 12)
+        bl.setSpacing(10)
+        self.body_lbl = QtWidgets.QLabel(str(text or ''))
+        self.body_lbl.setObjectName('body')
+        self.body_lbl.setWordWrap(True)
+        bl.addWidget(self.body_lbl, 1)
+        lw = QtWidgets.QListWidget()
+        lw.addItem('OK')
+        lw.setCurrentRow(0)
+        lw.itemActivated.connect(lambda *_: d.accept())
+        bl.addWidget(lw, 0)
+        hint = QtWidgets.QLabel('A/ENTER = Select | B/ESC = Back')
+        hint.setObjectName('hint')
+        bl.addWidget(hint, 0)
+        lay.addWidget(body, 1)
+
+        def _key(ev):
+            k = ev.key()
+            if k in (QtCore.Qt.Key_Escape, QtCore.Qt.Key_Back, QtCore.Qt.Key_B):
+                d.reject()
+                return
+            if k in (QtCore.Qt.Key_Return, QtCore.Qt.Key_Enter, QtCore.Qt.Key_A):
+                d.accept()
+                return
+            QtWidgets.QDialog.keyPressEvent(d, ev)
+
+        d.keyPressEvent = _key
+        d.exec_()
+
     def _go_back(self):
         self.stack.setCurrentIndex(max(0, self.stack.currentIndex() - 1))
         self._sync_buttons()
 
     def _go_next(self):
         if self.stack.currentIndex() == 1 and not self._valid_gamertag():
-            QtWidgets.QMessageBox.warning(self, 'Gamertag', 'Use 3-15 chars: letters, numbers, space, _ or -')
+            self._warn('Gamertag', 'Use 3-15 chars: letters, numbers, space, _ or -')
             return
         self.stack.setCurrentIndex(min(self.stack.count() - 1, self.stack.currentIndex() + 1))
         self._sync_buttons()
@@ -15776,7 +19716,7 @@ class XboxSetup(QtWidgets.QDialog):
 
     def _finish(self):
         if not self._valid_gamertag():
-            QtWidgets.QMessageBox.warning(self, 'Gamertag', 'Use 3-15 chars: letters, numbers, space, _ or -')
+            self._warn('Gamertag', 'Use 3-15 chars: letters, numbers, space, _ or -')
             self.stack.setCurrentIndex(1)
             self._sync_buttons()
             return
@@ -16100,7 +20040,7 @@ if [ "${XUI_FORCE_SETUP:-0}" = "1" ] || [ ! -s "$SETUP_STATE" ]; then
     fi
 fi
 
-# Helper to play video (blocking) using mpv or ffplay
+# Helper to play video (blocking) with multiple backends
 play_video(){
     local file="$1"
     if [ ! -f "$file" ]; then return 1; fi
@@ -16109,6 +20049,15 @@ play_video(){
         return $?
     elif command -v ffplay >/dev/null 2>&1; then
         ffplay -autoexit -fs -loglevel quiet "$file"
+        return $?
+    elif command -v gst-play-1.0 >/dev/null 2>&1; then
+        gst-play-1.0 --no-interactive "$file"
+        return $?
+    elif command -v cvlc >/dev/null 2>&1; then
+        cvlc --play-and-exit --fullscreen --quiet "$file"
+        return $?
+    elif command -v vlc >/dev/null 2>&1; then
+        vlc --play-and-exit --fullscreen --quiet "$file"
         return $?
     else
         warn "No video player found for $file"
@@ -16153,9 +20102,14 @@ PY
 }
 
 # Play startup video (blocking) if present
+PLAYED_STARTUP=0
 if [ -f "$ASSETS_DIR/startup.mp4" ]; then
     info "Playing startup video"
-    play_video "$ASSETS_DIR/startup.mp4" || true
+    if play_video "$ASSETS_DIR/startup.mp4"; then
+        PLAYED_STARTUP=1
+    else
+        warn "Startup video playback failed; dashboard fallback will try again."
+    fi
 fi
 
 # Finally start the dashboard
@@ -16165,10 +20119,14 @@ if [ ! -f "$DASH_SCRIPT" ]; then
     exit 1
 fi
 if [ -x "$PY_RUNNER" ]; then
-    export XUI_SKIP_STARTUP_VIDEO=1
+    if [ "$PLAYED_STARTUP" = "1" ]; then
+        export XUI_SKIP_STARTUP_VIDEO=1
+    fi
     exec "$PY_RUNNER" "$DASH_SCRIPT"
 fi
-export XUI_SKIP_STARTUP_VIDEO=1
+if [ "$PLAYED_STARTUP" = "1" ]; then
+    export XUI_SKIP_STARTUP_VIDEO=1
+fi
 exec python3 "$DASH_SCRIPT"
 SH
 chmod +x "$BIN_DIR/xui_startup_and_dashboard.sh"
@@ -16693,6 +20651,8 @@ REPO="${XUI_UPDATE_REPO:-afitler79-alt/XUI-X360-FRONTEND}"
 SRC="${XUI_SOURCE_DIR:-$HOME/.xui/src/XUI-X360-FRONTEND}"
 INSTALLER_NAME="${XUI_UPDATE_INSTALLER:-xui11.sh.fixed.sh}"
 STATE_FILE="$HOME/.xui/data/update_state.json"
+CHANNEL_FILE="$HOME/.xui/data/update_channel.json"
+DEFAULT_BRANCH="${XUI_DEFAULT_UPDATE_BRANCH:-linux}"
 mkdir -p "$(dirname "$STATE_FILE")"
 
 require_cmd(){
@@ -16792,10 +20752,44 @@ print("state-updated")
 PY
 }
 
+read_channel_branch(){
+  python3 - "$CHANNEL_FILE" <<'PY'
+import json,sys,pathlib
+p=pathlib.Path(sys.argv[1])
+if not p.exists():
+    print("")
+    raise SystemExit(0)
+try:
+    d=json.loads(p.read_text(encoding='utf-8'))
+except Exception:
+    print("")
+    raise SystemExit(0)
+print(str(d.get('branch','') or '').strip())
+PY
+}
+
+resolve_target_branch(){
+  local b=""
+  b="${XUI_UPDATE_BRANCH:-}"
+  if [ -n "$b" ]; then
+    echo "$b"
+    return 0
+  fi
+  b="$(read_channel_branch)"
+  if [ -n "$b" ]; then
+    echo "$b"
+    return 0
+  fi
+  echo "$DEFAULT_BRANCH"
+}
+
+TARGET_BRANCH="$(resolve_target_branch)"
+
 remote_meta_line(){
-  python3 - "$REPO" <<'PY'
+  python3 - "$REPO" "$TARGET_BRANCH" <<'PY'
 import json,sys,urllib.request,urllib.error
 repo=sys.argv[1]
+target=str(sys.argv[2] or "").strip()
 headers={
   "Accept":"application/vnd.github+json",
   "User-Agent":"xui-update-checker",
@@ -16805,8 +20799,11 @@ def fetch(url, timeout=10):
   with urllib.request.urlopen(req, timeout=timeout) as r:
     return json.loads(r.read().decode('utf-8', errors='ignore'))
 try:
-  repo_info=fetch(f"https://api.github.com/repos/{repo}")
-  branch=str(repo_info.get("default_branch") or "main").strip() or "main"
+  if target:
+    branch=target
+  else:
+    repo_info=fetch(f"https://api.github.com/repos/{repo}")
+    branch=str(repo_info.get("default_branch") or "main").strip() or "main"
   commit=fetch(f"https://api.github.com/repos/{repo}/commits/{branch}")
   sha=str(commit.get("sha") or "").strip()
   date=str((((commit.get("commit") or {}).get("committer") or {}).get("date")) or "")
@@ -16817,6 +20814,8 @@ try:
   print(f"OK\t{branch}\t{sha}\t{date}\t{html}")
 except Exception as exc:
   msg=str(exc).replace("\t"," ").replace("\n"," ")
+  if target:
+    msg=f"{msg} [branch={target}]"
   print(f"ERR\t\t\t\t{msg}")
 PY
 }
@@ -16855,6 +20854,9 @@ compute_status(){
   local checked=0 required=0 reason="unknown"
   local local_commit=""
   local_commit="$(read_state_commit)"
+  if [ -z "$local_commit" ] && [ -d "$SRC/.git" ]; then
+    local_commit="$(git -C "$SRC" rev-parse HEAD 2>/dev/null || true)"
+  fi
 
   line="$(remote_meta_line)"
   IFS=$'\t' read -r status branch remote_commit remote_date remote_url extra <<<"$line"
@@ -16862,7 +20864,7 @@ compute_status(){
     checked=0
     required=0
     reason="remote-unavailable:${extra:-unknown}"
-    branch="${branch:-main}"
+    branch="${TARGET_BRANCH:-linux}"
     remote_commit=""
     remote_date=""
     remote_url=""
@@ -16915,12 +20917,56 @@ apply_update(){
     exit 1
   fi
 
+  echo "step=sudo-auth"
+  if ! require_sudo_ticket; then
+    echo "sudo authentication failed or cancelled."
+    exit 1
+  fi
+  if [ "${XUI_AUTH_MODE:-}" = "sudo" ]; then
+    start_sudo_keepalive || true
+    trap stop_sudo_keepalive EXIT
+  fi
+
+  fix_src_permissions(){
+    local target="$1"
+    [ -e "$target" ] || return 0
+    if [ -w "$target" ] && { [ ! -d "$target/.git" ] || [ -w "$target/.git" ]; }; then
+      return 0
+    fi
+    echo "Fixing source permissions: $target"
+    if [ "${XUI_AUTH_MODE:-}" = "sudo" ]; then
+      sudo -n chown -R "$(id -u):$(id -g)" "$target" >/dev/null 2>&1 || true
+    elif [ "${XUI_AUTH_MODE:-}" = "pkexec" ]; then
+      pkexec /bin/sh -c 'chown -R "$1:$2" "$3"' sh "$(id -u)" "$(id -g)" "$target" >/dev/null 2>&1 || true
+    fi
+  }
+
+  remove_path_safe(){
+    local target="$1"
+    [ -e "$target" ] || return 0
+    rm -rf "$target" >/dev/null 2>&1 && return 0
+    fix_src_permissions "$target"
+    rm -rf "$target" >/dev/null 2>&1 && return 0
+    if [ "${XUI_AUTH_MODE:-}" = "sudo" ]; then
+      sudo -n rm -rf "$target" >/dev/null 2>&1 && return 0
+    elif [ "${XUI_AUTH_MODE:-}" = "pkexec" ]; then
+      pkexec /bin/sh -c 'rm -rf "$1"' sh "$target" >/dev/null 2>&1 && return 0
+    elif [ "${XUI_AUTH_MODE:-}" = "root" ]; then
+      rm -rf "$target" >/dev/null 2>&1 && return 0
+    fi
+    return 1
+  }
+
   clone_fresh_repo(){
     local tmp="${SRC}.tmp.$$"
-    rm -rf "$tmp"
+    remove_path_safe "$tmp" || true
     git clone "https://github.com/$REPO.git" "$tmp"
-    rm -rf "$SRC"
+    if ! remove_path_safe "$SRC"; then
+      echo "Cannot replace source dir due permissions: $SRC"
+      return 1
+    fi
     mv "$tmp" "$SRC"
+    fix_src_permissions "$SRC" || true
   }
 
   mkdir -p "$(dirname "$SRC")"
@@ -16996,41 +21042,75 @@ apply_update(){
     exit 1
   fi
 
-  echo "step=sudo-auth"
-  if ! require_sudo_ticket; then
-    echo "sudo authentication failed or cancelled."
-    exit 1
-  fi
-  if [ "${XUI_AUTH_MODE:-}" = "sudo" ]; then
-    start_sudo_keepalive || true
-    trap stop_sudo_keepalive EXIT
-  fi
-
   echo "step=installer-start"
-  if [ "${XUI_AUTH_MODE:-}" = "pkexec" ]; then
-    (
-      cd "$SRC"
-      if command -v timeout >/dev/null 2>&1; then
-        pkexec env AUTO_CONFIRM=1 XUI_SKIP_LAUNCH_PROMPT=1 XUI_NONINTERACTIVE=1 XUI_SYSTEMCTL_TIMEOUT_SEC="${XUI_SYSTEMCTL_TIMEOUT_SEC:-15}" \
-          timeout "${XUI_APPLY_INSTALLER_TIMEOUT_SEC:-900}" bash "$installer" --no-auto-install --skip-apt-wait
-      else
-        pkexec env AUTO_CONFIRM=1 XUI_SKIP_LAUNCH_PROMPT=1 XUI_NONINTERACTIVE=1 XUI_SYSTEMCTL_TIMEOUT_SEC="${XUI_SYSTEMCTL_TIMEOUT_SEC:-15}" \
-          bash "$installer" --no-auto-install --skip-apt-wait
-      fi
-    )
+  local installer_rc=0
+  local installer_log=""
+  local installer_soft_ok=0
+  local installer_started_epoch
+  installer_started_epoch="$(date +%s)"
+  installer_log="$(mktemp /tmp/xui-installer-log.XXXXXX 2>/dev/null || true)"
+  run_installer_once(){
+    if [ "${XUI_AUTH_MODE:-}" = "pkexec" ]; then
+      (
+        cd "$SRC"
+        if command -v timeout >/dev/null 2>&1; then
+          pkexec env AUTO_CONFIRM=1 XUI_SKIP_LAUNCH_PROMPT=1 XUI_NONINTERACTIVE=1 XUI_SYSTEMCTL_TIMEOUT_SEC="${XUI_SYSTEMCTL_TIMEOUT_SEC:-15}" \
+            timeout "${XUI_APPLY_INSTALLER_TIMEOUT_SEC:-900}" bash "$installer" --no-auto-install --skip-apt-wait
+        else
+          pkexec env AUTO_CONFIRM=1 XUI_SKIP_LAUNCH_PROMPT=1 XUI_NONINTERACTIVE=1 XUI_SYSTEMCTL_TIMEOUT_SEC="${XUI_SYSTEMCTL_TIMEOUT_SEC:-15}" \
+            bash "$installer" --no-auto-install --skip-apt-wait
+        fi
+      )
+    else
+      (
+        cd "$SRC"
+        if command -v timeout >/dev/null 2>&1; then
+          AUTO_CONFIRM=1 XUI_SKIP_LAUNCH_PROMPT=1 XUI_NONINTERACTIVE=1 XUI_SYSTEMCTL_TIMEOUT_SEC="${XUI_SYSTEMCTL_TIMEOUT_SEC:-15}" \
+            timeout "${XUI_APPLY_INSTALLER_TIMEOUT_SEC:-900}" bash "$installer" --no-auto-install --skip-apt-wait
+        else
+          AUTO_CONFIRM=1 XUI_SKIP_LAUNCH_PROMPT=1 XUI_NONINTERACTIVE=1 XUI_SYSTEMCTL_TIMEOUT_SEC="${XUI_SYSTEMCTL_TIMEOUT_SEC:-15}" \
+            bash "$installer" --no-auto-install --skip-apt-wait
+        fi
+      )
+    fi
+  }
+  set +e
+  if [ -n "${installer_log:-}" ] && command -v tee >/dev/null 2>&1; then
+    run_installer_once 2>&1 | tee "$installer_log"
+    installer_rc=${PIPESTATUS[0]}
   else
-    (
-      cd "$SRC"
-      if command -v timeout >/dev/null 2>&1; then
-        AUTO_CONFIRM=1 XUI_SKIP_LAUNCH_PROMPT=1 XUI_NONINTERACTIVE=1 XUI_SYSTEMCTL_TIMEOUT_SEC="${XUI_SYSTEMCTL_TIMEOUT_SEC:-15}" \
-          timeout "${XUI_APPLY_INSTALLER_TIMEOUT_SEC:-900}" bash "$installer" --no-auto-install --skip-apt-wait
-      else
-        AUTO_CONFIRM=1 XUI_SKIP_LAUNCH_PROMPT=1 XUI_NONINTERACTIVE=1 XUI_SYSTEMCTL_TIMEOUT_SEC="${XUI_SYSTEMCTL_TIMEOUT_SEC:-15}" \
-          bash "$installer" --no-auto-install --skip-apt-wait
-      fi
-    )
+    run_installer_once
+    installer_rc=$?
   fi
+  set -e
   echo "step=installer-done"
+  if [ -n "${installer_log:-}" ] && [ -f "$installer_log" ]; then
+    if grep -qiE 'Finalizing installation|Installation complete|Attempted to enable user services|state-updated|step=installer-done' "$installer_log" 2>/dev/null; then
+      installer_soft_ok=1
+    fi
+  fi
+  if [ "$installer_rc" -ne 0 ]; then
+    echo "warning=installer-exit-$installer_rc"
+    local dash_file marker_file checker_file
+    local dash_mtime marker_mtime checker_mtime
+    dash_file="$HOME/.xui/dashboard/pyqt_dashboard_improved.py"
+    marker_file="$HOME/.xui/.xui_4_0xv_setup_done"
+    checker_file="$HOME/.xui/bin/xui_update_check.sh"
+    dash_mtime="$(stat -c %Y "$dash_file" 2>/dev/null || echo 0)"
+    marker_mtime="$(stat -c %Y "$marker_file" 2>/dev/null || echo 0)"
+    checker_mtime="$(stat -c %Y "$checker_file" 2>/dev/null || echo 0)"
+    if [ "$dash_mtime" -lt "$installer_started_epoch" ] && [ "$marker_mtime" -lt "$installer_started_epoch" ] && [ "$checker_mtime" -lt "$installer_started_epoch" ]; then
+      if [ "$installer_soft_ok" -ne 1 ]; then
+        echo "Installer failed with code $installer_rc and no updated core artifacts were detected."
+        [ -n "${installer_log:-}" ] && rm -f "$installer_log" >/dev/null 2>&1 || true
+        exit "$installer_rc"
+      fi
+      echo "warning=installer-soft-success-log-detected"
+    else
+      echo "warning=installer-soft-success-core-files-detected"
+    fi
+  fi
+  [ -n "${installer_log:-}" ] && rm -f "$installer_log" >/dev/null 2>&1 || true
 
   # Ensure dashboard service stays enabled after updates.
   if command -v systemctl >/dev/null 2>&1; then
@@ -17059,8 +21139,12 @@ apply_update(){
   if [ -z "$installed_commit" ]; then
     installed_commit="$remote_commit"
   fi
-  write_state "$installed_commit" "$branch" "$remote_date" "$SRC" >/dev/null
-  echo "step=state-written"
+  if write_state "$installed_commit" "$branch" "$remote_date" "$SRC" >/dev/null 2>&1; then
+    echo "step=state-written"
+  else
+    echo "warning=state-write-failed"
+    echo "step=state-write-skipped"
+  fi
   echo "update-applied"
   echo "installed_commit=$installed_commit"
   if [ "${XUI_AUTH_MODE:-}" = "sudo" ]; then
@@ -17220,9 +21304,11 @@ BASH
 #!/usr/bin/env python3
 import argparse
 import json
+import os
 import sys
 import time
 from pathlib import Path
+from urllib.parse import parse_qs, unquote, urlparse
 from PyQt5 import QtCore, QtGui, QtWidgets
 try:
     from PyQt5 import QtWebEngineWidgets
@@ -17238,6 +21324,10 @@ RECENT_FILE = DATA_HOME / 'webhub_recent.json'
 FAV_FILE = DATA_HOME / 'webhub_favorites.json'
 SOCIAL_MESSAGES_FILE = DATA_HOME / 'social_messages_recent.json'
 MAX_RECENT = 24
+MODERN_USER_AGENT = os.environ.get(
+    'XUI_WEBHUB_USER_AGENT',
+    'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36'
+)
 
 
 def safe_read(path, default):
@@ -17259,6 +21349,74 @@ def normalize_url(text):
         return 'https://www.xbox.com'
     if '://' not in raw and not raw.startswith('about:'):
         raw = 'https://' + raw
+    return raw
+
+
+def detect_total_ram_mb():
+    forced = str(os.environ.get('XUI_RAM_MB', '')).strip()
+    if forced:
+        try:
+            return max(0, int(float(forced)))
+        except Exception:
+            pass
+    try:
+        for raw in Path('/proc/meminfo').read_text(encoding='utf-8', errors='ignore').splitlines():
+            line = str(raw).strip()
+            if not line.lower().startswith('memtotal:'):
+                continue
+            parts = line.split()
+            if len(parts) >= 2:
+                return max(0, int(parts[1]) // 1024)
+    except Exception:
+        pass
+    return 0
+
+
+def ultra_low_ram_mode():
+    mode = str(os.environ.get('XUI_RAM_MODE', 'auto')).strip().lower()
+    if mode in ('1', 'true', 'on', 'yes', '2g', '2gb', 'ultra', 'low'):
+        return True
+    if mode in ('0', 'false', 'off', 'no', 'normal', 'full'):
+        return False
+    mb = int(detect_total_ram_mb() or 0)
+    return bool(mb and mb <= 2304)
+
+
+def unwrap_supported_browser_redirect(url_text):
+    raw = normalize_url(url_text)
+    try:
+        parsed = urlparse(raw)
+    except Exception:
+        return raw
+    host = str(parsed.netloc or '').lower()
+    path = str(parsed.path or '')
+    if 'youtube.' not in host:
+        return raw
+    if not path.startswith('/supported_browsers'):
+        return raw
+    try:
+        qs = parse_qs(str(parsed.query or ''), keep_blank_values=False)
+    except Exception:
+        qs = {}
+    next_url = ''
+    for key in ('next_url', 'url', 'continue'):
+        vals = qs.get(key) or []
+        if vals and str(vals[0]).strip():
+            next_url = str(vals[0]).strip()
+            break
+    if not next_url:
+        return raw
+    try:
+        next_url = unquote(next_url).strip()
+    except Exception:
+        next_url = str(next_url).strip()
+    if next_url.startswith('//'):
+        next_url = 'https:' + next_url
+    elif next_url.startswith('/'):
+        next_url = 'https://www.youtube.com' + next_url
+    next_url = normalize_url(next_url)
+    if next_url and next_url != raw:
+        return next_url
     return raw
 
 
@@ -17407,10 +21565,12 @@ class WebHub(QtWidgets.QMainWindow):
     def __init__(self, url='https://www.xbox.com', kiosk=False):
         super().__init__()
         self.kiosk = bool(kiosk)
+        self._ultra_low_ram = ultra_low_ram_mode()
         self.pending_url = normalize_url(url)
         self._kbd_opening = False
         self._kbd_last_close = 0.0
         self._skip_web_return_once = 0
+        self._web_edit_probe_pending = False
         self._gp = None
         self._gp_prev = {}
         self._gp_timer = None
@@ -17521,6 +21681,7 @@ class WebHub(QtWidgets.QMainWindow):
         else:
             self.web = QtWebEngineWidgets.QWebEngineView()
             self.web.installEventFilter(self)
+            self._configure_webengine_runtime()
             self.stack.addWidget(self.web)
         self.hub = self._build_hub_widget()
         self.stack.addWidget(self.hub)
@@ -17549,6 +21710,65 @@ class WebHub(QtWidgets.QMainWindow):
         QtWidgets.QShortcut(QtGui.QKeySequence(QtCore.Qt.Key_F2), self, activated=self._open_virtual_keyboard_contextual)
         QtWidgets.QShortcut(QtGui.QKeySequence('Ctrl+K'), self, activated=self._open_virtual_keyboard_contextual)
 
+    def _configure_webengine_runtime(self):
+        if self.web is None or QtWebEngineWidgets is None:
+            return
+        profile = None
+        try:
+            profile = self.web.page().profile()
+        except Exception:
+            profile = None
+        if profile is not None:
+            try:
+                DATA_HOME.mkdir(parents=True, exist_ok=True)
+                cache_dir = DATA_HOME / 'webengine-cache'
+                storage_dir = DATA_HOME / 'webengine-profile'
+                cache_dir.mkdir(parents=True, exist_ok=True)
+                storage_dir.mkdir(parents=True, exist_ok=True)
+                profile.setCachePath(str(cache_dir))
+                profile.setPersistentStoragePath(str(storage_dir))
+            except Exception:
+                pass
+            try:
+                profile.setHttpAcceptLanguage('es-ES,es;q=0.9,en-US;q=0.8,en;q=0.7')
+            except Exception:
+                pass
+            try:
+                profile.setHttpUserAgent(MODERN_USER_AGENT)
+            except Exception:
+                pass
+            try:
+                profile.setPersistentCookiesPolicy(QtWebEngineWidgets.QWebEngineProfile.ForcePersistentCookies)
+            except Exception:
+                pass
+            try:
+                profile.setHttpCacheType(QtWebEngineWidgets.QWebEngineProfile.DiskHttpCache)
+            except Exception:
+                pass
+            if self._ultra_low_ram:
+                try:
+                    profile.setHttpCacheMaximumSize(16 * 1024 * 1024)
+                except Exception:
+                    pass
+        try:
+            settings = self.web.settings()
+            attrs = (
+                ('JavascriptEnabled', True),
+                ('LocalStorageEnabled', True),
+                ('PluginsEnabled', True),
+                ('FullScreenSupportEnabled', True),
+                ('ScreenCaptureEnabled', True),
+                ('WebGLEnabled', True),
+                ('Accelerated2dCanvasEnabled', True),
+                ('PlaybackRequiresUserGesture', False),
+            )
+            for name, value in attrs:
+                attr = getattr(QtWebEngineWidgets.QWebEngineSettings, name, None)
+                if attr is not None:
+                    settings.setAttribute(attr, bool(value))
+        except Exception:
+            pass
+
     def _recent_messages_text(self):
         arr = safe_read(SOCIAL_MESSAGES_FILE, [])
         if not isinstance(arr, list) or not arr:
@@ -17560,6 +21780,81 @@ class WebHub(QtWidgets.QMainWindow):
             else:
                 out.append(f'{i:02d}. {item}')
         return '\n'.join(out)
+
+    def _menu_message(self, title, text):
+        d = QtWidgets.QDialog(self)
+        d.setWindowTitle(str(title or 'Info'))
+        d.setWindowFlags(QtCore.Qt.Dialog | QtCore.Qt.FramelessWindowHint)
+        d.setModal(True)
+        d.resize(840, 500)
+        d.setStyleSheet('''
+            QDialog { background:#d7dce1; border:2px solid rgba(239,244,248,0.78); }
+            QLabel#title {
+                color:#eef4f8;
+                background:qlineargradient(x1:0,y1:0,x2:1,y2:0, stop:0 #69717a, stop:1 #505860);
+                font-size:28px;
+                font-weight:800;
+                padding:8px 12px;
+            }
+            QLabel#body {
+                color:#1f2730;
+                font-size:22px;
+                font-weight:650;
+            }
+            QListWidget {
+                background:#e4e8ec;
+                color:#1f252c;
+                font-size:30px;
+                border:1px solid rgba(76,86,96,0.4);
+                outline:none;
+            }
+            QListWidget::item {
+                padding:7px 12px;
+                margin:1px 0px;
+            }
+            QListWidget::item:selected {
+                background:qlineargradient(x1:0,y1:0,x2:1,y2:0, stop:0 #5abc3e, stop:1 #3e9132);
+                color:#f4fff1;
+                border:1px solid rgba(249,255,248,0.4);
+            }
+            QLabel#hint { color:#1f252c; font-size:16px; font-weight:800; }
+        ''')
+        lay = QtWidgets.QVBoxLayout(d)
+        lay.setContentsMargins(0, 0, 0, 0)
+        lay.setSpacing(0)
+        hdr = QtWidgets.QLabel(str(title or 'Info'))
+        hdr.setObjectName('title')
+        lay.addWidget(hdr, 0)
+        body = QtWidgets.QWidget()
+        bl = QtWidgets.QVBoxLayout(body)
+        bl.setContentsMargins(16, 14, 16, 12)
+        bl.setSpacing(10)
+        txt = QtWidgets.QLabel(str(text or ''))
+        txt.setObjectName('body')
+        txt.setWordWrap(True)
+        bl.addWidget(txt, 1)
+        lw = QtWidgets.QListWidget()
+        lw.addItem('OK')
+        lw.setCurrentRow(0)
+        lw.itemActivated.connect(lambda *_: d.accept())
+        bl.addWidget(lw, 0)
+        hint = QtWidgets.QLabel('A/ENTER = Select | B/ESC = Back')
+        hint.setObjectName('hint')
+        bl.addWidget(hint, 0)
+        lay.addWidget(body, 1)
+
+        def _key(ev):
+            k = ev.key()
+            if k in (QtCore.Qt.Key_Escape, QtCore.Qt.Key_Back, QtCore.Qt.Key_B):
+                d.reject()
+                return
+            if k in (QtCore.Qt.Key_Return, QtCore.Qt.Key_Enter, QtCore.Qt.Key_A):
+                d.accept()
+                return
+            QtWidgets.QDialog.keyPressEvent(d, ev)
+
+        d.keyPressEvent = _key
+        d.exec_()
 
     def _show_guide(self):
         opts = [
@@ -17593,13 +21888,13 @@ class WebHub(QtWidgets.QMainWindow):
         elif choice == 'Virtual Keyboard':
             self._open_virtual_keyboard_contextual()
         elif choice == 'Recent Messages':
-            QtWidgets.QMessageBox.information(self, 'Recent Messages', self._recent_messages_text())
+            self._menu_message('Recent Messages', self._recent_messages_text())
         elif choice == 'Recent Web':
             rec = safe_read(RECENT_FILE, [])
             if not isinstance(rec, list) or not rec:
-                QtWidgets.QMessageBox.information(self, 'Recent Web', 'No recent web activity.')
+                self._menu_message('Recent Web', 'No recent web activity.')
             else:
-                QtWidgets.QMessageBox.information(self, 'Recent Web', '\n'.join(str(x) for x in rec[:20]))
+                self._menu_message('Recent Web', '\n'.join(str(x) for x in rec[:20]))
 
     def _setup_gamepad(self):
         if QtGamepad is None:
@@ -17612,7 +21907,7 @@ class WebHub(QtWidgets.QMainWindow):
             self._gp = QtGamepad.QGamepad(ids[0], self)
             self._gp_timer = QtCore.QTimer(self)
             self._gp_timer.timeout.connect(self._poll_gamepad)
-            self._gp_timer.start(75)
+            self._gp_timer.start(95 if self._ultra_low_ram else 75)
         except Exception:
             self._gp = None
 
@@ -17654,6 +21949,7 @@ class WebHub(QtWidgets.QMainWindow):
             'a': bool(self._gpv('buttonA', False)),
             'b': bool(self._gpv('buttonB', False)),
             'x': bool(self._gpv('buttonX', False)),
+            'y': bool(self._gpv('buttonY', False)),
             'guide': bool(self._gpv('buttonGuide', False)),
             'lb': bool(self._gpv('buttonL1', False)),
             'rb': bool(self._gpv('buttonR1', False)),
@@ -17668,6 +21964,8 @@ class WebHub(QtWidgets.QMainWindow):
                 self._send_key_focus(QtCore.Qt.Key_Escape)
             elif pressed('a'):
                 self._send_key_focus(QtCore.Qt.Key_Return)
+            elif pressed('y'):
+                self._send_key_focus(QtCore.Qt.Key_Space)
             elif pressed('x'):
                 self._send_key_focus(QtCore.Qt.Key_Backspace)
             elif pressed('left'):
@@ -17699,6 +21997,12 @@ class WebHub(QtWidgets.QMainWindow):
                 self._send_key_focus(QtCore.Qt.Key_Return)
             else:
                 self._open_keyboard_if_web_editable()
+        elif pressed('y'):
+            if self.stack.currentWidget() is self.hub:
+                self._focus_addr_with_keyboard()
+            else:
+                self._send_key_focus(QtCore.Qt.Key_Tab)
+                self._auto_open_keyboard_if_web_editable(140)
         elif pressed('left'):
             self._send_key_focus(QtCore.Qt.Key_Left)
         elif pressed('right'):
@@ -17736,21 +22040,49 @@ class WebHub(QtWidgets.QMainWindow):
         payload = json.dumps(str(text or ''))
         js = f"""
 (() => {{
-  const el = document.activeElement;
+  const deepActive = (root) => {{
+    let el = root && root.activeElement ? root.activeElement : null;
+    let guard = 0;
+    while (el && el.shadowRoot && el.shadowRoot.activeElement && guard < 8) {{
+      el = el.shadowRoot.activeElement;
+      guard += 1;
+    }}
+    return el;
+  }};
+  const el = deepActive(document);
   if (!el) return false;
   const tag = (el.tagName || '').toLowerCase();
   const tp = (el.type || '').toLowerCase();
   const editable = el.isContentEditable || tag === 'textarea' ||
-    (tag === 'input' && !['button','submit','checkbox','radio','range','color','file','image','reset'].includes(tp));
+    (tag === 'input' && !['button','submit','checkbox','radio','range','color','file','image','reset','hidden'].includes(tp));
+  if (el.readOnly || el.disabled) return false;
   if (!editable) return false;
   const txt = {payload};
+  el.focus();
   if (el.isContentEditable) {{
-    try {{ document.execCommand('insertText', false, txt); }} catch (_e) {{ el.textContent = (el.textContent || '') + txt; }}
+    try {{
+      document.execCommand('selectAll', false, null);
+      document.execCommand('insertText', false, txt);
+    }} catch (_e) {{
+      el.textContent = txt;
+    }}
   }} else {{
-    el.value = (el.value || '') + txt;
+    const proto = tag === 'textarea'
+      ? (window.HTMLTextAreaElement && window.HTMLTextAreaElement.prototype)
+      : (window.HTMLInputElement && window.HTMLInputElement.prototype);
+    const desc = proto ? Object.getOwnPropertyDescriptor(proto, 'value') : null;
+    if (desc && typeof desc.set === 'function') {{
+      desc.set.call(el, txt);
+    }} else {{
+      el.value = txt;
+    }}
   }}
-  el.dispatchEvent(new Event('input', {{ bubbles: true }}));
-  el.dispatchEvent(new Event('change', {{ bubbles: true }}));
+  try {{
+    el.dispatchEvent(new InputEvent('input', {{ bubbles: true, composed: true, data: txt, inputType: 'insertText' }}));
+  }} catch (_e) {{
+    el.dispatchEvent(new Event('input', {{ bubbles: true, composed: true }}));
+  }}
+  el.dispatchEvent(new Event('change', {{ bubbles: true, composed: true }}));
   return true;
 }})();
 """
@@ -17765,39 +22097,112 @@ class WebHub(QtWidgets.QMainWindow):
         QtWidgets.QApplication.postEvent(self.web, press)
         QtWidgets.QApplication.postEvent(self.web, rel)
 
+    def _probe_web_editable(self, callback):
+        if self.web is None:
+            try:
+                callback(False, '')
+            except Exception:
+                pass
+            return
+        if self._web_edit_probe_pending:
+            return
+        self._web_edit_probe_pending = True
+        probe = """
+(() => {
+  const deepActive = (root) => {
+    let el = root && root.activeElement ? root.activeElement : null;
+    let guard = 0;
+    while (el && el.shadowRoot && el.shadowRoot.activeElement && guard < 8) {
+      el = el.shadowRoot.activeElement;
+      guard += 1;
+    }
+    return el;
+  };
+  const el = deepActive(document);
+  if (!el) return { editable: false, value: '' };
+  const tag = (el.tagName || '').toLowerCase();
+  const tp = (el.type || '').toLowerCase();
+  const editable = !el.readOnly && !el.disabled && (
+    el.isContentEditable ||
+    tag === 'textarea' ||
+    (tag === 'input' && !['button','submit','checkbox','radio','range','color','file','image','reset','hidden'].includes(tp))
+  );
+  let value = '';
+  if (editable) {
+    if (el.isContentEditable) value = el.innerText || el.textContent || '';
+    else value = el.value || '';
+  }
+  return { editable: !!editable, value: String(value || '') };
+})();
+"""
+        def _cb(result):
+            self._web_edit_probe_pending = False
+            editable = False
+            value = ''
+            if isinstance(result, dict):
+                editable = bool(result.get('editable', False))
+                value = str(result.get('value', '') or '')
+            else:
+                editable = bool(result)
+            try:
+                callback(editable, value)
+            except Exception:
+                pass
+        try:
+            self.web.page().runJavaScript(probe, _cb)
+        except Exception:
+            self._web_edit_probe_pending = False
+            try:
+                callback(False, '')
+            except Exception:
+                pass
+
+    def _auto_open_keyboard_if_web_editable(self, delay_ms=120):
+        if self.web is None:
+            return
+        if self._active_virtual_keyboard() is not None:
+            return
+        try:
+            delay = max(0, int(delay_ms))
+        except Exception:
+            delay = 120
+        def _probe_and_open():
+            if self._active_virtual_keyboard() is not None:
+                return
+            self._probe_web_editable(lambda editable, value: editable and self._open_virtual_keyboard_for_web(value))
+        if delay <= 0:
+            _probe_and_open()
+            return
+        QtCore.QTimer.singleShot(delay, _probe_and_open)
+
     def _open_keyboard_if_web_editable(self):
         if self.web is None:
             return
-        probe = """
-(() => {
-  const el = document.activeElement;
-  if (!el) return false;
-  const tag = (el.tagName || '').toLowerCase();
-  const tp = (el.type || '').toLowerCase();
-  return !!(el.isContentEditable || tag === 'textarea' ||
-    (tag === 'input' && !['button','submit','checkbox','radio','range','color','file','image','reset'].includes(tp)));
-})();
-"""
-        def cb(editable):
+        def cb(editable, value):
             if bool(editable):
-                self._open_virtual_keyboard_for_web()
+                self._open_virtual_keyboard_for_web(value)
             else:
                 self._forward_enter_to_web()
-        self.web.page().runJavaScript(probe, cb)
+        self._probe_web_editable(cb)
 
-    def _open_virtual_keyboard_for_web(self):
+    def _open_virtual_keyboard_for_web(self, initial_text=''):
         if self.web is None:
+            return
+        if self._active_virtual_keyboard() is not None:
+            return
+        if self._kbd_opening:
             return
         if (time.monotonic() - float(self._kbd_last_close)) < 0.35:
             return
-        d = VirtualKeyboardDialog('', self)
+        self._kbd_opening = True
+        d = VirtualKeyboardDialog(str(initial_text or ''), self)
         try:
             if d.exec_() == QtWidgets.QDialog.Accepted:
                 txt = d.text()
-                if txt:
-                    self._inject_text_into_page(txt)
+                self._inject_text_into_page(txt)
         finally:
             self._kbd_last_close = time.monotonic()
+            self._kbd_opening = False
 
     def _open_virtual_keyboard_contextual(self):
         if self.stack.currentWidget() is self.hub:
@@ -17809,13 +22214,19 @@ class WebHub(QtWidgets.QMainWindow):
         if obj is self.addr and event.type() in (QtCore.QEvent.FocusIn, QtCore.QEvent.MouseButtonPress):
             if not self._kbd_opening and (time.monotonic() - float(self._kbd_last_close)) >= 0.35:
                 QtCore.QTimer.singleShot(0, self._open_virtual_keyboard_for_addr)
-        if obj is self.web and event.type() == QtCore.QEvent.KeyPress:
-            if event.key() in (QtCore.Qt.Key_Return, QtCore.Qt.Key_Enter):
-                if self._skip_web_return_once > 0:
-                    self._skip_web_return_once -= 1
+        if obj is self.web:
+            if event.type() == QtCore.QEvent.KeyPress:
+                if event.key() in (QtCore.Qt.Key_Return, QtCore.Qt.Key_Enter):
+                    if self._skip_web_return_once > 0:
+                        self._skip_web_return_once -= 1
+                        return False
+                    self._open_keyboard_if_web_editable()
+                    return True
+                if event.key() == QtCore.Qt.Key_Tab:
+                    QtCore.QTimer.singleShot(90, lambda: self._auto_open_keyboard_if_web_editable(0))
                     return False
-                self._open_keyboard_if_web_editable()
-                return True
+            if event.type() == QtCore.QEvent.MouseButtonRelease:
+                self._auto_open_keyboard_if_web_editable(130)
         return super().eventFilter(obj, event)
 
     def _build_hub_widget(self):
@@ -17842,7 +22253,7 @@ class WebHub(QtWidgets.QMainWindow):
         grid.addWidget(self._section('Recent', self.recent_list), 0, 1)
         grid.addWidget(self._section('Featured', self.featured_list), 0, 2)
         v.addLayout(grid, 1)
-        hint = QtWidgets.QLabel('ENTER = open | F1 = toggle hub | ESC = close browser')
+        hint = QtWidgets.QLabel('A/ENTER open | Y/TAB focus | X/F2 keyboard | LB/RB back/next | F1 guide | B/ESC close')
         hint.setObjectName('hint')
         v.addWidget(hint)
         return hub
@@ -17918,6 +22329,7 @@ class WebHub(QtWidgets.QMainWindow):
 
     def open_url(self, raw):
         url = normalize_url(raw)
+        url = unwrap_supported_browser_redirect(url)
         self.addr.setText(url)
         if self.web is None:
             return
@@ -17926,11 +22338,17 @@ class WebHub(QtWidgets.QMainWindow):
 
     def _on_url_changed(self, qurl):
         s = qurl.toString()
-        self.addr.setText(s)
+        self.addr.setText(unwrap_supported_browser_redirect(s))
 
     def _on_loaded(self, ok):
         if ok and self.web is not None:
-            self._remember_recent(self.web.url().toString())
+            current = self.web.url().toString()
+            fixed = unwrap_supported_browser_redirect(current)
+            if fixed and fixed != current:
+                self.open_url(fixed)
+                return
+            self._remember_recent(current)
+            self._auto_open_keyboard_if_web_editable(280)
 
     def _go_back(self):
         if self.web is not None:
@@ -17952,13 +22370,38 @@ class WebHub(QtWidgets.QMainWindow):
             except Exception:
                 pass
 
+    def closeEvent(self, e):
+        try:
+            if self._gp_timer is not None:
+                self._gp_timer.stop()
+        except Exception:
+            pass
+        try:
+            if self.web is not None:
+                self.web.stop()
+        except Exception:
+            pass
+        super().closeEvent(e)
+
 
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--mode', choices=['hub', 'kiosk', 'normal'], default='hub')
     parser.add_argument('url', nargs='?', default='https://www.xbox.com')
     args = parser.parse_args()
+    ultra_low_ram = ultra_low_ram_mode()
+    attr = getattr(QtCore.Qt, 'AA_CompressHighFrequencyEvents', None)
+    if attr is not None:
+        try:
+            QtCore.QCoreApplication.setAttribute(attr, True)
+        except Exception:
+            pass
     app = QtWidgets.QApplication(sys.argv)
+    if ultra_low_ram:
+        try:
+            QtGui.QPixmapCache.setCacheLimit(4096)
+        except Exception:
+            pass
     fullscreen_mode = args.mode in ('hub', 'kiosk')
     w = WebHub(url=args.url, kiosk=fullscreen_mode)
     if fullscreen_mode:
@@ -17979,19 +22422,26 @@ if __name__ == '__main__':
 PY
     chmod +x "$BIN_DIR/xui_webhub.py"
 
-    cat > "$BIN_DIR/xui_browser.sh" <<'BASH'
+cat > "$BIN_DIR/xui_browser.sh" <<'BASH'
 #!/usr/bin/env bash
 set -euo pipefail
 MODE=hub
 URL="https://www.xbox.com"
+FORCE_FULLSCREEN="${XUI_BROWSER_FORCE_FULLSCREEN:-1}"
 while [ $# -gt 0 ]; do
   case "${1:-}" in
     --kiosk) MODE=kiosk; shift ;;
     --hub) MODE=hub; shift ;;
     --normal) MODE=normal; shift ;;
+    --fullscreen|--full) FORCE_FULLSCREEN=1; shift ;;
+    --windowed) FORCE_FULLSCREEN=0; shift ;;
     *) URL="${1:-$URL}"; shift ;;
   esac
 done
+
+if [ "$FORCE_FULLSCREEN" = "1" ] && [ "$MODE" = "normal" ]; then
+  MODE=hub
+fi
 
 PYRUN="$HOME/.xui/bin/xui_python.sh"
 WEBHUB="$HOME/.xui/bin/xui_webhub.py"
@@ -18273,10 +22723,109 @@ def _downloads_text():
     return 'No se detectan descargas activas.'
 
 
+class TextPromptDialog(QtWidgets.QDialog):
+    def __init__(self, title, label, text='', parent=None):
+        super().__init__(parent)
+        self._accepted = False
+        self.setWindowTitle(str(title or 'Input'))
+        self.setWindowFlags(QtCore.Qt.Dialog | QtCore.Qt.FramelessWindowHint)
+        self.setModal(True)
+        self.resize(860, 460)
+        self.setStyleSheet('''
+            QDialog { background:#d7dce1; border:2px solid rgba(239,244,248,0.78); }
+            QLabel#title {
+                color:#eef4f8;
+                background:qlineargradient(x1:0,y1:0,x2:1,y2:0, stop:0 #69717a, stop:1 #505860);
+                font-size:30px;
+                font-weight:800;
+                padding:8px 12px;
+            }
+            QLabel#label { color:#1f2730; font-size:22px; font-weight:650; }
+            QLineEdit {
+                background:#ffffff;
+                border:1px solid #8ea2b6;
+                color:#1f2730;
+                font-size:22px;
+                font-weight:700;
+                padding:8px;
+            }
+            QListWidget {
+                background:#e4e8ec;
+                color:#1f252c;
+                font-size:29px;
+                border:1px solid rgba(76,86,96,0.4);
+                outline:none;
+            }
+            QListWidget::item {
+                padding:7px 12px;
+                margin:1px 0px;
+            }
+            QListWidget::item:selected {
+                background:qlineargradient(x1:0,y1:0,x2:1,y2:0, stop:0 #5abc3e, stop:1 #3e9132);
+                color:#f4fff1;
+                border:1px solid rgba(249,255,248,0.4);
+            }
+            QLabel#hint { color:#1f252c; font-size:16px; font-weight:800; }
+        ''')
+        root = QtWidgets.QVBoxLayout(self)
+        root.setContentsMargins(0, 0, 0, 0)
+        root.setSpacing(0)
+        hdr = QtWidgets.QLabel(str(title or 'Input'))
+        hdr.setObjectName('title')
+        root.addWidget(hdr, 0)
+        body = QtWidgets.QWidget()
+        bl = QtWidgets.QVBoxLayout(body)
+        bl.setContentsMargins(16, 14, 16, 12)
+        bl.setSpacing(10)
+        lbl = QtWidgets.QLabel(str(label or 'Value:'))
+        lbl.setObjectName('label')
+        bl.addWidget(lbl, 0)
+        self.edit = QtWidgets.QLineEdit(str(text or ''))
+        self.edit.setFocus(QtCore.Qt.OtherFocusReason)
+        bl.addWidget(self.edit, 0)
+        self.listw = QtWidgets.QListWidget()
+        self.listw.addItems(['OK', 'Cancel'])
+        self.listw.setCurrentRow(0)
+        self.listw.itemActivated.connect(self._activate_current)
+        bl.addWidget(self.listw, 0)
+        hint = QtWidgets.QLabel('A/ENTER = Select | B/ESC = Back')
+        hint.setObjectName('hint')
+        bl.addWidget(hint, 0)
+        root.addWidget(body, 1)
+
+    def _activate_current(self, *_):
+        it = self.listw.currentItem()
+        choice = str(it.text()).strip().lower() if it is not None else 'cancel'
+        if choice == 'ok':
+            self._accepted = True
+            self.accept()
+            return
+        self._accepted = False
+        self.reject()
+
+    def value(self):
+        return str(self.edit.text() or '')
+
+    def accepted_value(self):
+        return bool(self._accepted)
+
+    def keyPressEvent(self, e):
+        k = e.key()
+        if k in (QtCore.Qt.Key_Escape, QtCore.Qt.Key_Back, QtCore.Qt.Key_B):
+            self._accepted = False
+            self.reject()
+            return
+        if k in (QtCore.Qt.Key_Return, QtCore.Qt.Key_Enter, QtCore.Qt.Key_A):
+            self._activate_current()
+            return
+        super().keyPressEvent(e)
+
+
 def _redeem_code(parent):
-    code, ok = QtWidgets.QInputDialog.getText(parent, 'Canjear codigo', 'Introduce tu codigo:')
-    if not ok:
+    d = TextPromptDialog('Canjear codigo', 'Introduce tu codigo:', '', parent)
+    if d.exec_() != QtWidgets.QDialog.Accepted or not d.accepted_value():
         return None
+    code = d.value()
     code = ''.join(ch for ch in str(code).upper() if ch.isalnum() or ch == '-')
     if not code:
         return 'Codigo no valido.'
@@ -18302,6 +22851,14 @@ def _close_session():
 def _pick_existing_sound(candidates):
     if not candidates:
         return None
+    key = tuple(str(fn) for fn in candidates if fn)
+    cache = getattr(_pick_existing_sound, '_cache', {})
+    if key:
+        cached = cache.get(key)
+        if cached:
+            cp = Path(cached)
+            if cp.exists():
+                return cp
     search_dirs = [
         ASSETS_DIR / 'SONIDOS',
         ASSETS_DIR / 'sonidos',
@@ -18316,6 +22873,9 @@ def _pick_existing_sound(candidates):
         for d in search_dirs:
             p = d / str(fn)
             if p.exists():
+                if key:
+                    cache[key] = str(p)
+                    _pick_existing_sound._cache = cache
                 return p
     return None
 
@@ -18340,14 +22900,22 @@ def _play_sfx(name):
     if snd is None:
         return
 
-    for cmd in (
-        ['mpv', '--really-quiet', '--no-terminal', '--no-video', str(snd)],
-        ['ffplay', '-nodisp', '-autoexit', '-loglevel', 'quiet', str(snd)],
-        ['paplay', str(snd)],
-        ['aplay', '-q', str(snd)],
-    ):
+    players = getattr(_play_sfx, '_players', None)
+    if players is None:
+        players = []
+        if shutil.which('mpv'):
+            players.append(('mpv', ['--really-quiet', '--no-terminal', '--no-video']))
+        if shutil.which('ffplay'):
+            players.append(('ffplay', ['-nodisp', '-autoexit', '-loglevel', 'quiet']))
+        if shutil.which('paplay'):
+            players.append(('paplay', []))
+        if shutil.which('aplay'):
+            players.append(('aplay', ['-q']))
+        _play_sfx._players = players
+
+    for bin_name, args in players:
         try:
-            subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            subprocess.Popen([bin_name, *args, str(snd)], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
             return
         except Exception:
             continue
@@ -18588,7 +23156,79 @@ class Guide(QtWidgets.QDialog):
 
 
 def _msg(parent, title, text):
-    QtWidgets.QMessageBox.information(parent, str(title), str(text))
+    d = QtWidgets.QDialog(parent)
+    d.setWindowTitle(str(title or 'Info'))
+    d.setWindowFlags(QtCore.Qt.Dialog | QtCore.Qt.FramelessWindowHint)
+    d.setModal(True)
+    d.resize(900, 520)
+    d.setStyleSheet('''
+        QDialog { background:#d7dce1; border:2px solid rgba(239,244,248,0.78); }
+        QLabel#title {
+            color:#eef4f8;
+            background:qlineargradient(x1:0,y1:0,x2:1,y2:0, stop:0 #69717a, stop:1 #505860);
+            font-size:30px;
+            font-weight:800;
+            padding:8px 12px;
+        }
+        QLabel#body {
+            color:#1f2730;
+            font-size:24px;
+            font-weight:650;
+        }
+        QListWidget {
+            background:#e4e8ec;
+            color:#1f252c;
+            font-size:31px;
+            border:1px solid rgba(76,86,96,0.4);
+            outline:none;
+        }
+        QListWidget::item {
+            padding:7px 12px;
+            margin:1px 0px;
+        }
+        QListWidget::item:selected {
+            background:qlineargradient(x1:0,y1:0,x2:1,y2:0, stop:0 #5abc3e, stop:1 #3e9132);
+            color:#f4fff1;
+            border:1px solid rgba(249,255,248,0.4);
+        }
+        QLabel#hint { color:#1f252c; font-size:16px; font-weight:800; }
+    ''')
+    lay = QtWidgets.QVBoxLayout(d)
+    lay.setContentsMargins(0, 0, 0, 0)
+    lay.setSpacing(0)
+    hdr = QtWidgets.QLabel(str(title or 'Info'))
+    hdr.setObjectName('title')
+    lay.addWidget(hdr, 0)
+    body = QtWidgets.QWidget()
+    bl = QtWidgets.QVBoxLayout(body)
+    bl.setContentsMargins(16, 14, 16, 12)
+    bl.setSpacing(10)
+    txt = QtWidgets.QLabel(str(text or ''))
+    txt.setObjectName('body')
+    txt.setWordWrap(True)
+    bl.addWidget(txt, 1)
+    lw = QtWidgets.QListWidget()
+    lw.addItem('OK')
+    lw.setCurrentRow(0)
+    lw.itemActivated.connect(lambda *_: d.accept())
+    bl.addWidget(lw, 0)
+    hint = QtWidgets.QLabel('A/ENTER = Select | B/ESC = Back')
+    hint.setObjectName('hint')
+    bl.addWidget(hint, 0)
+    lay.addWidget(body, 1)
+
+    def _key(ev):
+        k = ev.key()
+        if k in (QtCore.Qt.Key_Escape, QtCore.Qt.Key_Back, QtCore.Qt.Key_B):
+            d.reject()
+            return
+        if k in (QtCore.Qt.Key_Return, QtCore.Qt.Key_Enter, QtCore.Qt.Key_A):
+            d.accept()
+            return
+        QtWidgets.QDialog.keyPressEvent(d, ev)
+
+    d.keyPressEvent = _key
+    d.exec_()
 
 
 def _launch_social_global(parent):
@@ -18789,6 +23429,10 @@ import urllib.request
 import uuid
 from pathlib import Path
 from PyQt5 import QtCore, QtGui, QtWidgets
+try:
+    from PyQt5 import QtGamepad
+except Exception:
+    QtGamepad = None
 
 XUI_HOME = Path.home() / '.xui'
 DATA_HOME = XUI_HOME / 'data'
@@ -19497,6 +24141,116 @@ class VirtualKeyboardDialog(QtWidgets.QDialog):
         super().keyPressEvent(e)
 
 
+class SocialMenuDialog(QtWidgets.QDialog):
+    def __init__(self, title, text, options=None, parent=None, default_choice='', cancel_choice=''):
+        super().__init__(parent)
+        opts = [str(x).strip() for x in (options or []) if str(x).strip()]
+        if not opts:
+            opts = ['OK']
+        self._options = opts
+        self._choice = str(default_choice or opts[0]).strip() or opts[0]
+        if self._choice not in self._options:
+            self._choice = self._options[0]
+        self._cancel_choice = str(cancel_choice or '').strip()
+        if self._cancel_choice not in self._options:
+            self._cancel_choice = 'Cancel' if 'Cancel' in self._options else self._options[-1]
+        self.setWindowTitle(str(title or 'Menu'))
+        self.setWindowFlags(QtCore.Qt.Dialog | QtCore.Qt.FramelessWindowHint)
+        self.setModal(True)
+        self.resize(860, 520)
+        self.setStyleSheet('''
+            QDialog { background:#d7dce1; border:2px solid rgba(239,244,248,0.78); }
+            QLabel#title {
+                color:#eef4f8;
+                background:qlineargradient(x1:0,y1:0,x2:1,y2:0, stop:0 #69717a, stop:1 #505860);
+                font-size:28px;
+                font-weight:800;
+                padding:8px 12px;
+            }
+            QLabel#body {
+                color:#1f2730;
+                font-size:22px;
+                font-weight:650;
+            }
+            QListWidget {
+                background:#e4e8ec;
+                color:#1f252c;
+                font-size:31px;
+                border:1px solid rgba(76,86,96,0.4);
+                outline:none;
+            }
+            QListWidget::item {
+                padding:7px 10px;
+                margin:1px 0px;
+            }
+            QListWidget::item:selected {
+                background:qlineargradient(x1:0,y1:0,x2:1,y2:0, stop:0 #5abc3e, stop:1 #3e9132);
+                color:#f4fff1;
+                border:1px solid rgba(249,255,248,0.4);
+            }
+            QLabel#hint {
+                color:#1f252c;
+                font-size:16px;
+                font-weight:800;
+            }
+        ''')
+        root = QtWidgets.QVBoxLayout(self)
+        root.setContentsMargins(0, 0, 0, 0)
+        root.setSpacing(0)
+        hdr = QtWidgets.QLabel(str(title or 'Menu'))
+        hdr.setObjectName('title')
+        root.addWidget(hdr, 0)
+        body = QtWidgets.QWidget()
+        bl = QtWidgets.QVBoxLayout(body)
+        bl.setContentsMargins(16, 14, 16, 12)
+        bl.setSpacing(10)
+        msg = QtWidgets.QLabel(str(text or ''))
+        msg.setObjectName('body')
+        msg.setWordWrap(True)
+        bl.addWidget(msg, 1)
+        self.listw = QtWidgets.QListWidget()
+        self.listw.addItems(self._options)
+        idx = self._options.index(self._choice) if self._choice in self._options else 0
+        self.listw.setCurrentRow(max(0, idx))
+        self.listw.itemActivated.connect(self._accept_current)
+        bl.addWidget(self.listw, 0)
+        hint = QtWidgets.QLabel('A/ENTER = Select | B/ESC = Back')
+        hint.setObjectName('hint')
+        bl.addWidget(hint, 0)
+        root.addWidget(body, 1)
+
+    def selected_choice(self):
+        return str(self._choice or '')
+
+    def _accept_current(self, *_):
+        it = self.listw.currentItem()
+        if it is not None:
+            self._choice = str(it.text()).strip() or self._choice
+        self.accept()
+
+    def showEvent(self, e):
+        super().showEvent(e)
+        parent = self.parentWidget()
+        if parent is not None:
+            w = min(max(760, int(parent.width() * 0.62)), max(760, parent.width() - 120))
+            h = min(max(440, int(parent.height() * 0.62)), max(440, parent.height() - 120))
+            self.resize(w, h)
+            x = parent.x() + (parent.width() - w) // 2
+            y = parent.y() + (parent.height() - h) // 2
+            self.move(max(0, x), max(0, y))
+
+    def keyPressEvent(self, e):
+        k = e.key()
+        if k in (QtCore.Qt.Key_Escape, QtCore.Qt.Key_Back, QtCore.Qt.Key_B):
+            self._choice = self._cancel_choice
+            self.reject()
+            return
+        if k in (QtCore.Qt.Key_Return, QtCore.Qt.Key_Enter, QtCore.Qt.Key_A):
+            self._accept_current()
+            return
+        super().keyPressEvent(e)
+
+
 class SocialChatWindow(QtWidgets.QWidget):
     def __init__(self):
         super().__init__()
@@ -19514,6 +24268,9 @@ class SocialChatWindow(QtWidgets.QWidget):
         self.call_active = False
         self._vk_opening = False
         self._vk_last_close = 0.0
+        self._gp = None
+        self._gp_prev = {}
+        self._gp_timer = None
         self._action_items = {}
         self._community_mode = 'messages'
         self._focus_zone = 0
@@ -19525,6 +24282,7 @@ class SocialChatWindow(QtWidgets.QWidget):
         self.timer = QtCore.QTimer(self)
         self.timer.timeout.connect(self._poll_events)
         self.timer.start(120)
+        self._setup_gamepad()
         self._append_system('LAN autodiscovery enabled (broadcast + probe). Add manual peer for Internet P2P.')
         self._append_system(f"World chat ready via relay ({self.engine.world_relay}) room: {self.engine.world_topic}")
 
@@ -19877,6 +24635,50 @@ class SocialChatWindow(QtWidgets.QWidget):
         row = max(0, min(n - 1, row + int(delta)))
         listw.setCurrentRow(row)
 
+    def _menu_notice(self, title, text):
+        d = SocialMenuDialog(
+            str(title or 'Info'),
+            str(text or ''),
+            ['OK'],
+            self,
+            default_choice='OK',
+            cancel_choice='OK',
+        )
+        d.exec_()
+
+    def _menu_pick(self, title, options, descriptions=None, default_choice=''):
+        opts = [str(x).strip() for x in (options or []) if str(x).strip()]
+        if not opts:
+            return None
+        desc_map = descriptions or {}
+        body = str(desc_map.get(default_choice, '') or '').strip()
+        d = SocialMenuDialog(
+            str(title or 'Menu'),
+            body or 'Select an option.',
+            opts,
+            self,
+            default_choice=str(default_choice or opts[0]),
+            cancel_choice='Cancel' if 'Cancel' in opts else ('Close' if 'Close' in opts else opts[-1]),
+        )
+        if desc_map:
+            def _upd(txt):
+                t = str(desc_map.get(str(txt or ''), '') or '').strip()
+                if t:
+                    d.body_lbl.setText(t)
+            d.listw.currentTextChanged.connect(_upd)
+            _upd(d.selected_choice())
+        if d.exec_() == QtWidgets.QDialog.Accepted:
+            return d.selected_choice()
+        return None
+
+    def _menu_input_text(self, title, label, text=''):
+        d = VirtualKeyboardDialog(str(text or ''), self)
+        d.setWindowTitle(str(title or 'Input'))
+        if d.exec_() == QtWidgets.QDialog.Accepted:
+            val = str(d.text() or '').strip()
+            return val, True
+        return str(text or ''), False
+
     def _select_message_peer(self, host='', port=0, name=''):
         host = str(host or '').strip().lower()
         try:
@@ -19989,8 +24791,120 @@ class SocialChatWindow(QtWidgets.QWidget):
                     QtCore.QTimer.singleShot(0, self._open_chat_keyboard)
         return super().eventFilter(obj, event)
 
+    def _setup_gamepad(self):
+        if QtGamepad is None:
+            return
+        try:
+            mgr = QtGamepad.QGamepadManager.instance()
+            ids = list(mgr.connectedGamepads())
+            if not ids:
+                return
+            self._gp = QtGamepad.QGamepad(ids[0], self)
+            self._gp_timer = QtCore.QTimer(self)
+            self._gp_timer.timeout.connect(self._poll_gamepad)
+            self._gp_timer.start(75)
+            self.status.setText('Controller: A select/send | B back | X quick action | Y tabs | LB/RB tabs')
+        except Exception:
+            self._gp = None
+
+    def _gpv(self, name, default=0.0):
+        gp = self._gp
+        if gp is None:
+            return default
+        v = getattr(gp, name, None)
+        try:
+            return v() if callable(v) else v
+        except Exception:
+            return default
+
+    def _send_key_focus(self, key):
+        w = QtWidgets.QApplication.activeModalWidget() or QtWidgets.QApplication.focusWidget() or self
+        press = QtGui.QKeyEvent(QtCore.QEvent.KeyPress, int(key), QtCore.Qt.NoModifier)
+        rel = QtGui.QKeyEvent(QtCore.QEvent.KeyRelease, int(key), QtCore.Qt.NoModifier)
+        QtWidgets.QApplication.postEvent(w, press)
+        QtWidgets.QApplication.postEvent(w, rel)
+
+    def _active_virtual_keyboard(self):
+        w = QtWidgets.QApplication.activeModalWidget()
+        if isinstance(w, VirtualKeyboardDialog) and bool(w.isVisible()):
+            return w
+        for tw in QtWidgets.QApplication.topLevelWidgets():
+            if isinstance(tw, VirtualKeyboardDialog) and bool(tw.isVisible()):
+                return tw
+        return None
+
+    def _poll_gamepad(self):
+        gp = self._gp
+        if gp is None:
+            return
+        cur = {
+            'left': bool(self._gpv('buttonLeft', False)) or float(self._gpv('axisLeftX', 0.0)) < -0.6,
+            'right': bool(self._gpv('buttonRight', False)) or float(self._gpv('axisLeftX', 0.0)) > 0.6,
+            'up': bool(self._gpv('buttonUp', False)) or float(self._gpv('axisLeftY', 0.0)) < -0.6,
+            'down': bool(self._gpv('buttonDown', False)) or float(self._gpv('axisLeftY', 0.0)) > 0.6,
+            'a': bool(self._gpv('buttonA', False)),
+            'b': bool(self._gpv('buttonB', False)),
+            'x': bool(self._gpv('buttonX', False)),
+            'y': bool(self._gpv('buttonY', False)),
+            'lb': bool(self._gpv('buttonL1', False)) or bool(self._gpv('buttonLeftShoulder', False)),
+            'rb': bool(self._gpv('buttonR1', False)) or bool(self._gpv('buttonRightShoulder', False)),
+            'start': bool(self._gpv('buttonStart', False)),
+        }
+
+        def pressed(name):
+            return cur.get(name, False) and not self._gp_prev.get(name, False)
+
+        vk = self._active_virtual_keyboard()
+        if vk is not None:
+            if pressed('b'):
+                self._send_key_focus(QtCore.Qt.Key_Escape)
+            elif pressed('a'):
+                self._send_key_focus(QtCore.Qt.Key_Return)
+            elif pressed('x'):
+                self._send_key_focus(QtCore.Qt.Key_Backspace)
+            elif pressed('y'):
+                self._send_key_focus(QtCore.Qt.Key_Space)
+            elif pressed('left'):
+                self._send_key_focus(QtCore.Qt.Key_Left)
+            elif pressed('right'):
+                self._send_key_focus(QtCore.Qt.Key_Right)
+            elif pressed('up'):
+                self._send_key_focus(QtCore.Qt.Key_Up)
+            elif pressed('down'):
+                self._send_key_focus(QtCore.Qt.Key_Down)
+            self._gp_prev = cur
+            return
+
+        if pressed('a'):
+            self._send_key_focus(QtCore.Qt.Key_Return)
+        elif pressed('b'):
+            self._send_key_focus(QtCore.Qt.Key_Escape)
+        elif pressed('x'):
+            self._send_key_focus(QtCore.Qt.Key_X)
+        elif pressed('y'):
+            self._send_key_focus(QtCore.Qt.Key_Y)
+        elif pressed('left'):
+            self._send_key_focus(QtCore.Qt.Key_Left)
+        elif pressed('right'):
+            self._send_key_focus(QtCore.Qt.Key_Right)
+        elif pressed('up'):
+            self._send_key_focus(QtCore.Qt.Key_Up)
+        elif pressed('down'):
+            self._send_key_focus(QtCore.Qt.Key_Down)
+        elif pressed('lb'):
+            self._send_key_focus(QtCore.Qt.Key_PageUp)
+        elif pressed('rb'):
+            self._send_key_focus(QtCore.Qt.Key_PageDown)
+        elif pressed('start'):
+            self._send_key_focus(QtCore.Qt.Key_Tab)
+        self._gp_prev = cur
+
     def keyPressEvent(self, e):
         k = e.key()
+        if k == QtCore.Qt.Key_A:
+            k = QtCore.Qt.Key_Return
+        elif k == QtCore.Qt.Key_B:
+            k = QtCore.Qt.Key_Escape
         if k in (QtCore.Qt.Key_Escape, QtCore.Qt.Key_Back):
             self.close()
             return
@@ -20205,11 +25119,10 @@ class SocialChatWindow(QtWidgets.QWidget):
         self._save_world_settings()
 
     def _change_world_room(self):
-        txt, ok = QtWidgets.QInputDialog.getText(
-            self,
+        txt, ok = self._menu_input_text(
             'World Chat Room',
             'Room/topic name (letters, numbers, -, _, .)',
-            text=self.engine.world_topic,
+            self.engine.world_topic,
         )
         if not ok:
             return
@@ -20269,7 +25182,7 @@ class SocialChatWindow(QtWidgets.QWidget):
     def _send_current(self):
         peer = self._current_peer()
         if not peer:
-            QtWidgets.QMessageBox.information(self, 'Peer required', 'Select a peer first.')
+            self._menu_notice('Peer required', 'Select a peer first.')
             return
         text = self.msg.text().strip()
         if not text:
@@ -20310,26 +25223,24 @@ class SocialChatWindow(QtWidgets.QWidget):
             return
         err = str(last_err) if last_err is not None else 'No reachable peer endpoint.'
         self.status.setText(f'Cannot send: {err}')
-        QtWidgets.QMessageBox.warning(
-            self,
+        self._menu_notice(
             'Send failed',
-            f'Could not connect to selected peer candidates.\n\n'
+            'Could not connect to selected peer candidates.\n\n'
             'If peer is on Internet, use Tailscale/ZeroTier or forward TCP 38600.\n'
-            f'Error: {err}'
+            f'Error: {err}',
         )
 
     def _add_peer_dialog(self):
-        txt, ok = QtWidgets.QInputDialog.getText(
-            self,
+        txt, ok = self._menu_input_text(
             'Add P2P peer',
             'Format: alias@host:port or host:port',
-            text=''
+            '',
         )
         if not ok:
             return
         parsed = parse_peer_input(txt)
         if not parsed:
-            QtWidgets.QMessageBox.warning(self, 'Invalid format', 'Use alias@host:port or host:port')
+            self._menu_notice('Invalid format', 'Use alias@host:port or host:port')
             return
         self._upsert_peer(parsed['name'], parsed['host'], parsed['port'], 'manual', persist=True)
         self._append_system(f'Manual peer added: {parsed["host"]}:{parsed["port"]}')
@@ -20349,11 +25260,11 @@ class SocialChatWindow(QtWidgets.QWidget):
         lines += [f'Call audio UDP port (default): {DEFAULT_CALL_AUDIO_PORT}']
         lines += [f'Call screen UDP port (default): {DEFAULT_CALL_VIDEO_PORT}']
         lines += ['', 'Tip: for Internet P2P use Tailscale/ZeroTier or router port-forward TCP 38600.']
-        QtWidgets.QMessageBox.information(self, 'My Peer IDs', '\n'.join(lines))
+        self._menu_notice('My Peer IDs', '\n'.join(lines))
 
     def _show_lan_status(self):
         out = subprocess.getoutput('/bin/sh -c "$HOME/.xui/bin/xui_lan_status.sh"')
-        QtWidgets.QMessageBox.information(self, 'LAN Status', out or 'No network data.')
+        self._menu_notice('LAN Status', out or 'No network data.')
 
     def _record_voice_clip(self, duration_sec):
         secs = max(1, min(int(duration_sec), 25))
@@ -20436,38 +25347,54 @@ class SocialChatWindow(QtWidgets.QWidget):
 
     def _open_voice_inbox(self):
         if not self.voice_inbox:
-            QtWidgets.QMessageBox.information(self, 'Voice Inbox', 'No voice messages yet.')
+            self._menu_notice('Voice Inbox', 'No voice messages yet.')
             return
-        lines = []
+        options = []
+        descriptions = {}
         for i, msg in enumerate(self.voice_inbox[:30], 1):
             hh = time.strftime('%H:%M:%S', time.localtime(int(msg.get('ts') or time.time())))
             who = str(msg.get('sender') or 'Unknown')
             dur = float(msg.get('duration') or 0.0)
-            lines.append(f'{i}. {who} ({dur:.0f}s) [{hh}]')
-        idx, ok = QtWidgets.QInputDialog.getInt(
-            self,
+            label = f'{i:02d}. {who} ({dur:.0f}s) [{hh}]'
+            options.append(label)
+            descriptions[label] = f'MIME: {msg.get("mime", "audio")} | Duration: {dur:.0f}s'
+        options.append('Cancel')
+        pick = self._menu_pick(
             'Voice Inbox',
-            'Select voice message number to play:\n\n' + '\n'.join(lines),
-            1,
-            1,
-            len(lines),
-            1,
+            options,
+            descriptions,
+            default_choice=options[0] if options else '',
         )
-        if not ok:
+        if not pick or pick == 'Cancel':
             return
-        sel = self.voice_inbox[int(idx) - 1]
+        try:
+            idx = int(str(pick).split('.', 1)[0]) - 1
+        except Exception:
+            return
+        if idx < 0 or idx >= len(self.voice_inbox):
+            return
+        sel = self.voice_inbox[idx]
         self._play_voice_file(sel.get('path'))
         self.status.setText(f"Playing voice from {sel.get('sender', 'Unknown')}")
 
     def _send_voice_message(self):
         peer = self._current_peer()
         if not peer or str(peer.get('source')) == 'WORLD':
-            QtWidgets.QMessageBox.information(self, 'Voice Message', 'Select a LAN/P2P peer first.')
+            self._menu_notice('Voice Message', 'Select a LAN/P2P peer first.')
             return
-        seconds, ok = QtWidgets.QInputDialog.getInt(
-            self, 'Voice Message', 'Duration seconds:', 6, 2, 20, 1
+        duration_opts = [str(v) for v in range(2, 21)]
+        duration_desc = {str(v): f'Record and send a {v}s voice clip.' for v in range(2, 21)}
+        pick = self._menu_pick(
+            'Voice Message',
+            duration_opts + ['Cancel'],
+            duration_desc,
+            default_choice='6',
         )
-        if not ok:
+        if not pick or pick == 'Cancel':
+            return
+        try:
+            seconds = int(str(pick).strip())
+        except Exception:
             return
         self.status.setText(f'Recording voice message ({seconds}s)...')
         QtWidgets.QApplication.processEvents()
@@ -20562,7 +25489,7 @@ class SocialChatWindow(QtWidgets.QWidget):
     def _start_p2p_call(self, with_screen=False):
         peer = self._current_peer()
         if not peer or str(peer.get('source')) == 'WORLD':
-            QtWidgets.QMessageBox.information(self, 'P2P Call', 'Select a LAN/P2P peer first.')
+            self._menu_notice('P2P Call', 'Select a LAN/P2P peer first.')
             return
         host = str(peer.get('host') or '').strip()
         if not host:
@@ -20591,7 +25518,7 @@ class SocialChatWindow(QtWidgets.QWidget):
     def _join_last_call_invite(self):
         inv = self.last_call_invite
         if not inv:
-            QtWidgets.QMessageBox.information(self, 'Join Call', 'No incoming call invite yet.')
+            self._menu_notice('Join Call', 'No incoming call invite yet.')
             return
         host = str(inv.get('host') or '').strip()
         if not host:
@@ -21151,12 +26078,25 @@ BASH
 set -euo pipefail
 as_root(){
   if [ "$(id -u)" -eq 0 ]; then "$@"; return $?; fi
+  if command -v sudo >/dev/null 2>&1 && sudo -n true >/dev/null 2>&1; then
+    sudo -n "$@"; return $?
+  fi
   if [ "${XUI_NONINTERACTIVE:-0}" = "1" ] || [ ! -t 0 ]; then
-    if command -v pkexec >/dev/null 2>&1; then pkexec "$@"; return $?; fi
-    if command -v sudo >/dev/null 2>&1; then sudo -n "$@"; return $?; fi
-  else
-    if command -v sudo >/dev/null 2>&1; then sudo "$@"; return $?; fi
-    if command -v pkexec >/dev/null 2>&1; then pkexec "$@"; return $?; fi
+    if [ "${XUI_ALLOW_NONINTERACTIVE_PKEXEC:-0}" = "1" ] && command -v pkexec >/dev/null 2>&1; then
+      pkexec "$@"; return $?
+    fi
+    echo "non-interactive root unavailable (no cached sudo): $*" >&2
+    return 1
+  fi
+  if command -v sudo >/dev/null 2>&1; then
+    sudo -v >/dev/null 2>&1 || true
+    if sudo -n true >/dev/null 2>&1; then
+      sudo -n "$@"; return $?
+    fi
+    sudo "$@"; return $?
+  fi
+  if command -v pkexec >/dev/null 2>&1; then
+    pkexec "$@"; return $?
   fi
   echo "root privileges unavailable: $*" >&2
   return 1
@@ -21256,12 +26196,25 @@ BASH
 set -euo pipefail
 as_root(){
   if [ "$(id -u)" -eq 0 ]; then "$@"; return $?; fi
+  if command -v sudo >/dev/null 2>&1 && sudo -n true >/dev/null 2>&1; then
+    sudo -n "$@"; return $?
+  fi
   if [ "${XUI_NONINTERACTIVE:-0}" = "1" ] || [ ! -t 0 ]; then
-    if command -v pkexec >/dev/null 2>&1; then pkexec "$@"; return $?; fi
-    if command -v sudo >/dev/null 2>&1; then sudo -n "$@"; return $?; fi
-  else
-    if command -v sudo >/dev/null 2>&1; then sudo "$@"; return $?; fi
-    if command -v pkexec >/dev/null 2>&1; then pkexec "$@"; return $?; fi
+    if [ "${XUI_ALLOW_NONINTERACTIVE_PKEXEC:-0}" = "1" ] && command -v pkexec >/dev/null 2>&1; then
+      pkexec "$@"; return $?
+    fi
+    echo "non-interactive root unavailable (no cached sudo): $*" >&2
+    return 1
+  fi
+  if command -v sudo >/dev/null 2>&1; then
+    sudo -v >/dev/null 2>&1 || true
+    if sudo -n true >/dev/null 2>&1; then
+      sudo -n "$@"; return $?
+    fi
+    sudo "$@"; return $?
+  fi
+  if command -v pkexec >/dev/null 2>&1; then
+    pkexec "$@"; return $?
   fi
   echo "root privileges unavailable: $*" >&2
   return 1
@@ -21361,12 +26314,25 @@ BASH
 set -euo pipefail
 as_root(){
   if [ "$(id -u)" -eq 0 ]; then "$@"; return $?; fi
+  if command -v sudo >/dev/null 2>&1 && sudo -n true >/dev/null 2>&1; then
+    sudo -n "$@"; return $?
+  fi
   if [ "${XUI_NONINTERACTIVE:-0}" = "1" ] || [ ! -t 0 ]; then
-    if command -v pkexec >/dev/null 2>&1; then pkexec "$@"; return $?; fi
-    if command -v sudo >/dev/null 2>&1; then sudo -n "$@"; return $?; fi
-  else
-    if command -v sudo >/dev/null 2>&1; then sudo "$@"; return $?; fi
-    if command -v pkexec >/dev/null 2>&1; then pkexec "$@"; return $?; fi
+    if [ "${XUI_ALLOW_NONINTERACTIVE_PKEXEC:-0}" = "1" ] && command -v pkexec >/dev/null 2>&1; then
+      pkexec "$@"; return $?
+    fi
+    echo "non-interactive root unavailable (no cached sudo): $*" >&2
+    return 1
+  fi
+  if command -v sudo >/dev/null 2>&1; then
+    sudo -v >/dev/null 2>&1 || true
+    if sudo -n true >/dev/null 2>&1; then
+      sudo -n "$@"; return $?
+    fi
+    sudo "$@"; return $?
+  fi
+  if command -v pkexec >/dev/null 2>&1; then
+    pkexec "$@"; return $?
   fi
   echo "root privileges unavailable: $*" >&2
   return 1
@@ -22321,10 +27287,12 @@ configure_dashboard_passwordless_sudo(){
 finish_setup(){
   info "Finalizing installation"
   run_user_systemctl(){
-    local rc
+    local rc=0
+    set +e
     if command -v timeout >/dev/null 2>&1; then
       timeout "${XUI_SYSTEMCTL_TIMEOUT_SEC:-15}" systemctl --user "$@" >/dev/null 2>&1
       rc=$?
+      set -e
       if [ "$rc" -eq 124 ]; then
         warn "systemctl --user $* timed out after ${XUI_SYSTEMCTL_TIMEOUT_SEC:-15}s"
         return 1
@@ -22332,6 +27300,9 @@ finish_setup(){
       return "$rc"
     fi
     systemctl --user "$@" >/dev/null 2>&1
+    rc=$?
+    set -e
+    return "$rc"
   }
   # make sure everything is executable
   chmod -R a+x "$BIN_DIR" || true
@@ -22339,6 +27310,20 @@ finish_setup(){
   chmod +x "$DASH_DIR/pyqt_dashboard.py" || true
   chmod +x "$BIN_DIR/xui_joy_listener.py" || true
   touch "$XUI_DIR/.xui_4_0xv_setup_done"
+  if command -v python3 >/dev/null 2>&1; then
+    python3 - "$DATA_DIR/update_channel.json" "${XUI_LINUX_UPDATE_BRANCH:-linux}" <<'PY' >/dev/null 2>&1 || true
+import json,sys,time,pathlib
+path=pathlib.Path(sys.argv[1])
+branch=str(sys.argv[2] or "linux").strip() or "linux"
+data={
+  "platform":"linux",
+  "branch":branch,
+  "updated_at_epoch":int(time.time()),
+}
+path.parent.mkdir(parents=True, exist_ok=True)
+path.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding='utf-8')
+PY
+  fi
   configure_dashboard_passwordless_sudo || warn "XUI may ask for credentials until sudoers rule is applied."
   info "Configuring autostart for each login"
   mkdir -p "$AUTOSTART_DIR" "$SYSTEMD_USER_DIR" || true
@@ -22369,9 +27354,9 @@ finish_setup(){
   fi
   if [ -x "$BIN_DIR/xui_install_fnae_deps.sh" ]; then
     if command -v timeout >/dev/null 2>&1; then
-      XUI_NONINTERACTIVE=1 timeout "${XUI_FNAE_DEPS_TIMEOUT_SEC:-120}" "$BIN_DIR/xui_install_fnae_deps.sh" || true
+      XUI_NONINTERACTIVE=1 timeout "${XUI_FNAE_DEPS_TIMEOUT_SEC:-120}" "$BIN_DIR/xui_install_fnae_deps.sh" >/dev/null 2>&1 || true
     else
-      XUI_NONINTERACTIVE=1 "$BIN_DIR/xui_install_fnae_deps.sh" || true
+      XUI_NONINTERACTIVE=1 "$BIN_DIR/xui_install_fnae_deps.sh" >/dev/null 2>&1 || true
     fi
   fi
   info "Installation complete."
@@ -22379,6 +27364,11 @@ finish_setup(){
 
 main(){
   parse_args "$@"
+  if [ "${XUI_ONLY_EXPORT_WIN:-0}" = "1" ]; then
+    info "Exporting Windows bundle only"
+    write_windows_bundle
+    exit 0
+  fi
   if [ "${XUI_ONLY_REFRESH_CONTROLLERS:-0}" = "1" ]; then
     info "Refreshing controller integration only (Joy-Con/Xbox)"
     ensure_dirs
@@ -22403,386 +27393,13 @@ main(){
     info "Now restart dashboard and open Store again."
     exit 0
   fi
-  write_dashboard_py_v2(){
-    mkdir -p "$DASH_DIR"
-    local script_dir src
-    script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-    src=""
-    for candidate in "$script_dir/pyqt_dashboard_improved_fixed2.py" "$script_dir/pyqt_dashboard_improved_fixed.py"; do
-      if [ -f "$candidate" ]; then src="$candidate"; break; fi
-    done
-    if [ -n "$src" ]; then
-      cp -f "$src" "$DASH_DIR/pyqt_dashboard_improved.py"
-      chmod a+x "$DASH_DIR/pyqt_dashboard_improved.py" || true
-      info "Wrote dashboard to $DASH_DIR/pyqt_dashboard_improved.py from $src"
-      return 0
-    fi
-    cat > "$DASH_DIR/pyqt_dashboard_improved.py" <<'PY'
-#!/usr/bin/env python3
-import sys
-import os
-import subprocess
-import random
-import json
-import shutil
-from pathlib import Path
-
-ASSETS = Path.home() / '.xui' / 'assets'
-DATA = Path.home() / '.xui' / 'data'
-DATA.mkdir(parents=True, exist_ok=True)
-SLOTS_FILE = DATA / 'slots.json'
-MISSIONS_FILE = DATA / 'missions.json'
-SETTINGS_FILE = DATA / 'settings.json'
-
-try:
-    from PyQt5 import QtWidgets, QtGui, QtCore
-except Exception:
-    print('PyQt5 not installed')
-    sys.exit(1)
-
-
-class SlotMachineDialog(QtWidgets.QDialog):
-    SYMBOLS = ['🍒', '🔔', '🍋', '⭐', '7']
-
-    def __init__(self, parent=None):
-        super().__init__(parent)
-        self.setWindowTitle('Casino - Tragaperras')
-        self.setModal(True)
-        try:
-            data = json.load(open(SLOTS_FILE)) if SLOTS_FILE.exists() else {}
-            self.credits = int(data.get('credits', 100))
-        except Exception:
-            self.credits = 100
-        try:
-            settings = json.load(open(SETTINGS_FILE)) if SETTINGS_FILE.exists() else {}
-            self.sounds = bool(settings.get('sounds', True))
-        except Exception:
-            self.sounds = True
-        v = QtWidgets.QVBoxLayout(self)
-        h = QtWidgets.QHBoxLayout()
-        self.reels = [QtWidgets.QLabel('') for _ in range(3)]
-        for r in self.reels:
-            r.setAlignment(QtCore.Qt.AlignCenter)
-            f = r.font()
-            f.setPointSize(48)
-            r.setFont(f)
-            r.setFixedSize(160, 160)
-            r.setStyleSheet('background:#123; color:white; border-radius:8px;')
-            h.addWidget(r)
-        v.addLayout(h)
-        ctr = QtWidgets.QHBoxLayout()
-        self.spin_btn = QtWidgets.QPushButton('Girar (10 créditos)')
-        self.spin_btn.clicked.connect(self.spin)
-        self.credits_lbl = QtWidgets.QLabel(f'Créditos: {self.credits}')
-        ctr.addWidget(self.spin_btn)
-        ctr.addWidget(self.credits_lbl)
-        v.addLayout(ctr)
-        self.timers = [QtCore.QTimer(self) for _ in range(3)]
-        for i, t in enumerate(self.timers):
-            t.timeout.connect(lambda i=i: self._advance_reel(i))
-
-    def _play_sound(self, fname):
-        if not self.sounds:
-            return
-        path = ASSETS / fname
-        if path.exists() and shutil.which('mpv'):
-            try:
-                if str(path).lower().endswith('.mp4'):
-                    subprocess.Popen(['mpv', '--really-quiet', str(path)])
-                else:
-                    subprocess.Popen(['mpv', '--no-video', '--really-quiet', str(path)])
-            except Exception:
-                pass
-
-    def _advance_reel(self, i):
-        self.reels[i].setText(random.choice(self.SYMBOLS))
-
-    def spin(self):
-        if self.credits < 10:
-            QtWidgets.QMessageBox.information(self, 'Sin créditos', 'No tienes suficientes créditos')
-            return
-        self.credits -= 10
-        self.credits_lbl.setText(f'Créditos: {self.credits}')
-        self._play_sound('click.mp3')
-        intervals = [50, 70, 90]
-        durations = [800, 1400, 2000]
-        for i, t in enumerate(self.timers):
-            t.start(intervals[i])
-            QtCore.QTimer.singleShot(durations[i], lambda t=t: t.stop())
-        QtCore.QTimer.singleShot(max(durations) + 50, self._resolve)
-
-    def _resolve(self):
-        vals = [r.text() for r in self.reels]
-        if vals[0] == vals[1] == vals[2]:
-            win = 200 if vals[0] == '7' else 50
-            self.credits += win
-            QtWidgets.QMessageBox.information(self, 'Ganaste!', f'¡Combinación {vals[0]}! Ganaste {win} créditos')
-            self._play_sound('startup.mp4')
-        elif vals[0] == vals[1] or vals[1] == vals[2] or vals[0] == vals[2]:
-            win = 20
-            self.credits += win
-            QtWidgets.QMessageBox.information(self, 'Pequeño premio', f'Combinación parcial {vals}. Ganaste {win} créditos')
-            self._play_sound('startup.mp4')
-        else:
-            QtWidgets.QMessageBox.information(self, 'Suerte', 'No hubo premio')
-        self.credits_lbl.setText(f'Créditos: {self.credits}')
-        try:
-            json.dump({'credits': self.credits}, open(SLOTS_FILE, 'w'))
-        except Exception:
-            pass
-
-
-class TileWidget(QtWidgets.QFrame):
-    def __init__(self, name, img_path=None, size=(220, 140), parent=None):
-        super().__init__(parent)
-        self.name = name
-        self.img_path = img_path
-        self.setObjectName('tile')
-        self.setFixedSize(*size)
-        self.setFocusPolicy(QtCore.Qt.StrongFocus)
-        self.setStyleSheet(self.default_style())
-        v = QtWidgets.QVBoxLayout(self)
-        v.setContentsMargins(12, 12, 12, 12)
-        v.setSpacing(10)
-        self.img_label = QtWidgets.QLabel()
-        self.img_label.setAlignment(QtCore.Qt.AlignCenter)
-        self.img_label.setFixedHeight(size[1] - 70)
-        self.img_label.setScaledContents(False)
-        self.title = QtWidgets.QLabel(name)
-        self.title.setAlignment(QtCore.Qt.AlignCenter)
-        self.title.setStyleSheet('color:white; font-weight:600; letter-spacing:0.5px;')
-        v.addWidget(self.img_label)
-        v.addWidget(self.title)
-        self.anim = QtCore.QPropertyAnimation(self, b"geometry")
-        self.load_image()
-
-    def default_style(self):
-        return "QFrame#tile { background: qlineargradient(spread:pad, x1:0, y1:0, x2:1, y2:1, stop:0 #0d3b7a, stop:1 #0f65c6); border: 2px solid #0b2c52; border-radius:10px; } QLabel { color: white; }"
-
-    def load_image(self):
-        if self.img_path and Path(self.img_path).exists():
-            pix = QtGui.QPixmap(str(self.img_path))
-            if not pix.isNull():
-                scaled = pix.scaled(self.img_label.size(), QtCore.Qt.KeepAspectRatio, QtCore.Qt.SmoothTransformation)
-                self.img_label.setPixmap(scaled)
-                return
-        placeholder = QtGui.QPixmap(self.img_label.width(), self.img_label.height())
-        placeholder.fill(QtGui.QColor('#0b1c2f'))
-        self.img_label.setPixmap(placeholder)
-
-    def resizeEvent(self, e):
-        self.load_image()
-        super().resizeEvent(e)
-
-    def focusInEvent(self, e):
-        rect = self.geometry()
-        self.anim.stop()
-        self.anim.setDuration(160)
-        self.anim.setStartValue(rect)
-        self.anim.setEndValue(QtCore.QRect(rect.x() - 6, rect.y() - 6, rect.width() + 12, rect.height() + 12))
-        self.anim.start()
-        self.setStyleSheet("QFrame#tile { background:#1a8dff; border: 3px solid #7fe8ff; border-radius:10px; box-shadow: 0 0 12px rgba(0,255,255,0.4);} QLabel { color: white; font-weight:bold; }")
-        super().focusInEvent(e)
-
-    def focusOutEvent(self, e):
-        self.anim.stop()
-        rect = self.geometry()
-        self.anim.setDuration(120)
-        self.anim.setStartValue(rect)
-        self.anim.setEndValue(QtCore.QRect(rect.x() + 6, rect.y() + 6, rect.width() - 12, rect.height() - 12))
-        self.anim.start()
-        self.setStyleSheet(self.default_style())
-        super().focusOutEvent(e)
-
-    def mousePressEvent(self, e):
-        win = QtWidgets.QApplication.activeWindow()
-        if win and hasattr(win, 'on_tile_clicked'):
-            win.on_tile_clicked(self.name)
-        else:
-            super().mousePressEvent(e)
-
-
-class MainWindow(QtWidgets.QMainWindow):
-    def __init__(self, windowed=False):
-        super().__init__()
-        self.setWindowTitle('XUI GUI - Xbox Style')
-        central = QtWidgets.QWidget()
-        main_l = QtWidgets.QHBoxLayout(central)
-        main_l.setContentsMargins(30, 26, 30, 26)
-        main_l.setSpacing(18)
-        left = QtWidgets.QVBoxLayout()
-        user_lbl = QtWidgets.QLabel('Usuario')
-        user_lbl.setStyleSheet('color:white; font-weight:bold; font-size:18px;')
-        left.addWidget(user_lbl)
-        left.addSpacing(12)
-        for t in ['Perfil', 'Compat X86']:
-            lbl = QtWidgets.QLabel(t)
-            lbl.setStyleSheet('background:#0C54A6; color:white; padding:10px; border-radius:8px;')
-            lbl.setFixedHeight(52)
-            left.addWidget(lbl)
-            left.addSpacing(8)
-        left.addStretch()
-        left_widget = QtWidgets.QFrame()
-        left_widget.setLayout(left)
-        left_widget.setFixedWidth(200)
-        left_widget.setStyleSheet('background:rgba(0,0,0,0.4); border:1px solid #0b2c52; border-radius:12px;')
-        center = QtWidgets.QWidget()
-        grid = QtWidgets.QGridLayout(center)
-        grid.setHorizontalSpacing(12)
-        grid.setVerticalSpacing(12)
-        hero = TileWidget('Casino', ASSETS / 'Casino.png', size=(420, 240))
-        grid.addWidget(hero, 0, 0, 2, 2)
-        others = ['Runner', 'Store', 'Misiones', 'LAN', 'Settings', 'Power Profile', 'Battery Saver']
-        positions = [(0, 2), (1, 2), (2, 0), (2, 1), (2, 2), (3, 0), (3, 1)]
-        self.tiles = [hero]
-        for name, pos in zip(others, positions):
-            img_webp = ASSETS / f"{name}.webp"
-            img_png = ASSETS / f"{name}.png"
-            img = img_webp if img_webp.exists() else (img_png if img_png.exists() else None)
-            tw = TileWidget(name, img if img is not None else None, size=(220, 140))
-            grid.addWidget(tw, pos[0], pos[1])
-            self.tiles.append(tw)
-        right = QtWidgets.QVBoxLayout()
-        right_title = QtWidgets.QLabel('Featured')
-        right_title.setStyleSheet('color:white; font-weight:bold; font-size:16px;')
-        right.addWidget(right_title)
-        for i in range(4):
-            lbl = QtWidgets.QLabel(f'Featured {i+1}')
-            lbl.setFixedHeight(72)
-            lbl.setAlignment(QtCore.Qt.AlignVCenter | QtCore.Qt.AlignLeft)
-            lbl.setStyleSheet('background:#0f1724; color:white; border:1px solid #1f2f45; padding:10px; border-radius:10px;')
-            right.addWidget(lbl)
-            right.addSpacing(10)
-        right.addStretch()
-        right_widget = QtWidgets.QFrame()
-        right_widget.setLayout(right)
-        right_widget.setFixedWidth(260)
-        right_widget.setStyleSheet('background:rgba(0,0,0,0.35); border:1px solid #0b2c52; border-radius:12px;')
-        main_l.addWidget(left_widget)
-        main_l.addWidget(center, 1)
-        main_l.addWidget(right_widget)
-        self.setCentralWidget(central)
-        self.current_index = 0
-        QtCore.QTimer.singleShot(120, self.update_focus)
-        self.windowed = windowed
-
-    def update_focus(self):
-        if 0 <= self.current_index < len(self.tiles):
-            self.tiles[self.current_index].setFocus()
-
-    def on_tile_clicked(self, name):
-        xui = str(Path.home() / '.xui')
-        if name == 'Casino':
-            dlg = SlotMachineDialog(self)
-            dlg.exec_()
-        elif name == 'LAN':
-            dlg = QtWidgets.QDialog(self)
-            dlg.setWindowTitle('LAN Info')
-            t = QtWidgets.QPlainTextEdit()
-            t.setReadOnly(True)
-            try:
-                out = subprocess.getoutput('ipconfig') if os.name == 'nt' else subprocess.getoutput('ip -4 addr show | sed -n "1,40p"')
-            except Exception:
-                out = 'No se pudo obtener red'
-            t.setPlainText(out)
-            l = QtWidgets.QVBoxLayout(dlg)
-            l.addWidget(t)
-            b = QtWidgets.QPushButton('Cerrar')
-            b.clicked.connect(dlg.accept)
-            l.addWidget(b)
-            dlg.exec_()
-        elif name == 'Settings':
-            dlg = QtWidgets.QDialog(self)
-            dlg.setWindowTitle('Settings')
-            layout = QtWidgets.QVBoxLayout(dlg)
-            sounds_cb = QtWidgets.QCheckBox('Enable sounds')
-            try:
-                s = json.load(open(SETTINGS_FILE)) if SETTINGS_FILE.exists() else {}
-                sounds_cb.setChecked(bool(s.get('sounds', True)))
-            except Exception:
-                sounds_cb.setChecked(True)
-            layout.addWidget(sounds_cb)
-            reset_btn = QtWidgets.QPushButton('Reset slot credits')
-
-            def do_reset():
-                try:
-                    json.dump({'credits': 100}, open(SLOTS_FILE, 'w'))
-                    QtWidgets.QMessageBox.information(dlg, 'Reset', 'Credits reset to 100')
-                except Exception:
-                    QtWidgets.QMessageBox.warning(dlg, 'Error', 'Could not reset')
-
-            reset_btn.clicked.connect(do_reset)
-            layout.addWidget(reset_btn)
-            ok = QtWidgets.QPushButton('Guardar')
-
-            def save_settings():
-                try:
-                    json.dump({'sounds': bool(sounds_cb.isChecked())}, open(SETTINGS_FILE, 'w'))
-                    dlg.accept()
-                except Exception:
-                    dlg.reject()
-
-            ok.clicked.connect(save_settings)
-            layout.addWidget(ok)
-            dlg.exec_()
-        elif name == 'Misiones':
-            dlg = QtWidgets.QDialog(self)
-            dlg.setWindowTitle('Misiones')
-            l = QtWidgets.QVBoxLayout(dlg)
-            try:
-                missions = json.load(open(MISSIONS_FILE)) if MISSIONS_FILE.exists() else [{'title': 'Demo Mision', 'desc': 'Haz algo divertido'}]
-            except Exception:
-                missions = [{'title': 'Demo Mision', 'desc': 'Haz algo divertido'}]
-            for m in missions:
-                w = QtWidgets.QGroupBox(m.get('title', 'Mision'))
-                v = QtWidgets.QVBoxLayout()
-                v.addWidget(QtWidgets.QLabel(m.get('desc', '')))
-                w.setLayout(v)
-                l.addWidget(w)
-            btn = QtWidgets.QPushButton('Cerrar')
-            btn.clicked.connect(dlg.accept)
-            l.addWidget(btn)
-            dlg.exec_()
-        else:
-            candidate = os.path.join(xui, name.lower(), f"{name}.py")
-            if os.path.exists(candidate):
-                QtCore.QProcess.startDetached(sys.executable, [candidate])
-            else:
-                script = os.path.join(xui, 'bin', f'xui_{name.lower()}.sh')
-                if os.path.exists(script):
-                    QtCore.QProcess.startDetached('/bin/sh', ['-c', script])
-
-
-if __name__ == '__main__':
-    windowed = '--windowed' in sys.argv
-    app = QtWidgets.QApplication(sys.argv)
-    app.setStyleSheet('''
-        QWidget { background: qradialgradient(cx:0.3, cy:0.3, radius:1.2, fx:0.3, fy:0.3, stop:0 #0a0f1a, stop:1 #081526); color: #e6eef6; }
-        QFrame#tile { background: #0C54A6; border-radius: 10px; }
-        QLabel { color: #e6eef6; }
-        QPushButton { background: #154a70; color: #fff; border-radius:8px; padding:10px; font-weight:600; }
-    ''')
-    w = MainWindow(windowed=windowed)
-    try:
-        if not windowed:
-            w.showFullScreen()
-        else:
-            w.resize(1280, 768)
-            w.show()
-    except Exception:
-        w.show()
-    sys.exit(app.exec_())
-PY
-    chmod a+x "$DASH_DIR/pyqt_dashboard_improved.py" || true
-    info "Wrote dashboard to $DASH_DIR/pyqt_dashboard_improved.py"
-  }
   info "Starting XUI Ultra Master installer"
   ensure_dirs
   install_dependencies
     install_browser
   create_basics
     post_create_assets
-  write_dashboard_py_v2
+  write_dashboard_py
   deploy_custom_dashboard
     write_apps_utilities
     write_more_apps
@@ -22805,6 +27422,9 @@ PY
         install_compat_layer
         write_battery_tools
         write_even_more_apps
+  if [ "${XUI_EXPORT_WIN:-0}" = "1" ]; then
+    write_windows_bundle || warn "Windows bundle export failed"
+  fi
   finish_setup
   if [ "${XUI_SKIP_LAUNCH_PROMPT:-0}" = "1" ]; then
     info "Skipping launch prompt (XUI_SKIP_LAUNCH_PROMPT=1)"
