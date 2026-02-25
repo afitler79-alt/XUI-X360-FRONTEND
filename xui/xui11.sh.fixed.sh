@@ -491,7 +491,7 @@ STATE_FILE = DATA_HOME / "update_state.json"
 CHANNEL_FILE = DATA_HOME / "update_channel.json"
 SRC = Path(os.environ.get("XUI_SOURCE_DIR", str(XUI_HOME / "src" / "XUI-X360-FRONTEND"))).expanduser()
 INSTALLER_NAME = os.environ.get("XUI_UPDATE_INSTALLER", "win/install_xui_windows.ps1").strip() or "win/install_xui_windows.ps1"
-DEFAULT_BRANCH = os.environ.get("XUI_DEFAULT_UPDATE_BRANCH", "windows").strip() or "windows"
+DEFAULT_BRANCH = os.environ.get("XUI_DEFAULT_UPDATE_BRANCH", "Windows").strip() or "Windows"
 
 
 def ensure_data_home() -> None:
@@ -865,7 +865,7 @@ BAT
 Param(
     [string]$SourceRoot = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path,
     [string]$XuiHome = "$HOME\.xui",
-    [string]$UpdateBranch = "windows",
+    [string]$UpdateBranch = "Windows",
     [switch]$EnableAutostart,
     [switch]$SkipPip
 )
@@ -980,7 +980,7 @@ if (Test-Path $launcherTemplate) {
 Write-Host "[INFO] Launcher: $launcherDest"
 
 if ([string]::IsNullOrWhiteSpace($UpdateBranch)) {
-    $UpdateBranch = "windows"
+    $UpdateBranch = "Windows"
 }
 $channelPath = Join-Path $xuiData "update_channel.json"
 $channelData = @{
@@ -1204,7 +1204,7 @@ Optional:
 Use a custom Windows update branch:
 
 ```powershell
-.\install_xui_windows.ps1 -UpdateBranch windows
+.\install_xui_windows.ps1 -UpdateBranch Windows
 ```
 
 One-click from cmd:
@@ -8935,7 +8935,8 @@ class Dashboard(QtWidgets.QMainWindow):
         self.page_stack = QtWidgets.QStackedWidget()
         sl = self.page_stack.layout()
         if isinstance(sl, QtWidgets.QStackedLayout):
-            sl.setStackingMode(QtWidgets.QStackedLayout.StackAll)
+            # Keep a single visible page in steady state; StackAll is used only during tab animation.
+            sl.setStackingMode(QtWidgets.QStackedLayout.StackOne)
         for tab_name in self.tabs:
             page = DashboardPage(tab_name, self.page_specs[tab_name], self)
             page.actionTriggered.connect(self.handle_action)
@@ -9124,14 +9125,23 @@ class Dashboard(QtWidgets.QMainWindow):
         if idx is None:
             idx = self.page_stack.currentIndex()
         idx = max(0, min(int(idx), len(self.pages) - 1))
-        if (not self._tab_animating) and int(getattr(self, '_visible_page_idx', -1)) == idx:
-            page = self.pages[idx]
-            if page.pos() != QtCore.QPoint(0, 0):
-                page.move(0, 0)
-            return
+        try:
+            self.page_stack.setCurrentIndex(idx)
+        except Exception:
+            pass
+        sl = self.page_stack.layout()
+        if isinstance(sl, QtWidgets.QStackedLayout):
+            sl.setStackingMode(QtWidgets.QStackedLayout.StackOne)
         for i, page in enumerate(self.pages):
             page.move(0, 0)
             page.setVisible(i == idx)
+            if i == idx:
+                page.raise_()
+            else:
+                try:
+                    page.setGraphicsEffect(None)
+                except Exception:
+                    pass
         self._visible_page_idx = idx
 
     def _animate_tab_transition(self, from_idx, to_idx):
@@ -9149,6 +9159,9 @@ class Dashboard(QtWidgets.QMainWindow):
         from_w = self.page_stack.widget(from_idx)
         to_w = self.page_stack.widget(to_idx)
         rect = self.page_stack.rect()
+        sl = self.page_stack.layout()
+        if isinstance(sl, QtWidgets.QStackedLayout):
+            sl.setStackingMode(QtWidgets.QStackedLayout.StackAll)
         direction = 1 if to_idx > from_idx else -1
         # Xbox-like side blade movement, but compact to keep GPU/CPU cost low.
         travel = int(max(56, rect.width() * (0.20 if self._low_power_ui else 0.28)))
