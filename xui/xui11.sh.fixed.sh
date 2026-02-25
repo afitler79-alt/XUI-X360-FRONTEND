@@ -20665,7 +20665,7 @@ SRC="${XUI_SOURCE_DIR:-$HOME/.xui/src/XUI-X360-FRONTEND}"
 INSTALLER_NAME="${XUI_UPDATE_INSTALLER:-xui11.sh.fixed.sh}"
 STATE_FILE="$HOME/.xui/data/update_state.json"
 CHANNEL_FILE="$HOME/.xui/data/update_channel.json"
-DEFAULT_BRANCH="${XUI_DEFAULT_UPDATE_BRANCH:-linux}"
+DEFAULT_BRANCH="${XUI_DEFAULT_UPDATE_BRANCH:-Main-XUI}"
 mkdir -p "$(dirname "$STATE_FILE")"
 
 require_cmd(){
@@ -27324,7 +27324,7 @@ finish_setup(){
   chmod +x "$BIN_DIR/xui_joy_listener.py" || true
   touch "$XUI_DIR/.xui_4_0xv_setup_done"
   if command -v python3 >/dev/null 2>&1; then
-    python3 - "$DATA_DIR/update_channel.json" "${XUI_LINUX_UPDATE_BRANCH:-linux}" <<'PY' >/dev/null 2>&1 || true
+    python3 - "$DATA_DIR/update_channel.json" "${XUI_LINUX_UPDATE_BRANCH:-Main-XUI}" <<'PY' >/dev/null 2>&1 || true
 import json,sys,time,pathlib
 path=pathlib.Path(sys.argv[1])
 branch=str(sys.argv[2] or "linux").strip() or "linux"
