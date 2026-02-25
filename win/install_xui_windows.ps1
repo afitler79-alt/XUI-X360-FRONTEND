@@ -1,7 +1,7 @@
 Param(
     [string]$SourceRoot = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path,
     [string]$XuiHome = "$HOME\.xui",
-    [string]$UpdateBranch = "windows",
+    [string]$UpdateBranch = "Windows",
     [switch]$EnableAutostart,
     [switch]$SkipPip
 )
@@ -116,7 +116,7 @@ if (Test-Path $launcherTemplate) {
 Write-Host "[INFO] Launcher: $launcherDest"
 
 if ([string]::IsNullOrWhiteSpace($UpdateBranch)) {
-    $UpdateBranch = "windows"
+    $UpdateBranch = "Windows"
 }
 $channelPath = Join-Path $xuiData "update_channel.json"
 $channelData = @{

@@ -28,7 +28,7 @@ Optional:
 Use a custom Windows update branch:
 
 ```powershell
-.\install_xui_windows.ps1 -UpdateBranch windows
+.\install_xui_windows.ps1 -UpdateBranch Windows
 ```
 
 One-click from cmd:
