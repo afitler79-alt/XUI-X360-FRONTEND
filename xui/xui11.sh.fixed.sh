@@ -149,7 +149,7 @@ confirm(){
 }
 
 install_dependencies(){
-    if [ "${AUTO_INSTALL_TOOLS:-1}" != "1" ]; then
+    if [ "${AUTO_INSTALL_TOOLS:-0}" != "1" ]; then
         info "AUTO_INSTALL_TOOLS=0; skipping dependency installation"
         return 0
     fi
@@ -300,8 +300,8 @@ install_browser(){
 }
 
 parse_args(){
-    # Auto-install enabled by default; use --no-auto-install to disable
-    AUTO_INSTALL_TOOLS=1
+    # System package installation is opt-in; use --yes-install to enable it.
+    AUTO_INSTALL_TOOLS=0
     XUI_INSTALL_SYSTEM=1
     XUI_USE_EXTERNAL_DASHBOARD=0
     XUI_SKIP_APT_WAIT=0
@@ -1911,8 +1911,11 @@ if Image is not None:
                                 f = ImageFont.truetype('DejaVuSans-Bold.ttf', max(24, size[1]//6))
                         except Exception:
                                 f = ImageFont.load_default()
-                        w,h = d.textsize(text, font=f)
-                        d.text(((size[0]-w)/2,(size[1]-h)/2), text, fill=(255,255,255,255), font=f)
+                        bbox = d.textbbox((0, 0), text, font=f)
+                        w, h = bbox[2] - bbox[0], bbox[3] - bbox[1]
+                        x = (size[0] - w) / 2 - bbox[0]
+                        y = (size[1] - h) / 2 - bbox[1]
+                        d.text((x, y), text, fill=(255,255,255,255), font=f)
                         im.save(p)
                 except Exception:
                         pass
@@ -19900,8 +19903,9 @@ try:
     except Exception:
         f=None
     text='XGUI'
-    w,h=d.textsize(text,font=f)
-    d.text(((512-w)/2,(512-h)/2),text,fill=(255,255,255,255),font=f)
+    bbox=d.textbbox((0,0),text,font=f)
+    w,h=bbox[2]-bbox[0],bbox[3]-bbox[1]
+    d.text(((512-w)/2-bbox[0],(512-h)/2-bbox[1]),text,fill=(255,255,255,255),font=f)
     im.save(out)
     print('logo_generated')
 except Exception:
@@ -19929,8 +19933,9 @@ try:
     except Exception:
         f=None
     txt='Salir'
-    w,h=d.textsize(txt,font=f)
-    d.text(((320-w)/2,(180-h)/2),txt,fill=(255,255,255,255),font=f)
+    bbox=d.textbbox((0,0),txt,font=f)
+    w,h=bbox[2]-bbox[0],bbox[3]-bbox[1]
+    d.text(((320-w)/2-bbox[0],(180-h)/2-bbox[1]),txt,fill=(255,255,255,255),font=f)
     im.save(out)
     print('exit_icon_generated')
 except Exception:
@@ -20329,8 +20334,9 @@ for n in names:
     except Exception:
         f = None
     txt = n
-    w,h = d.textsize(txt, font=f)
-    d.text(((320-w)/2,(180-h)/2), txt, font=f, fill=(255,255,255))
+    bbox = d.textbbox((0, 0), txt, font=f)
+    w, h = bbox[2] - bbox[0], bbox[3] - bbox[1]
+    d.text(((320-w)/2-bbox[0], (180-h)/2-bbox[1]), txt, font=f, fill=(255,255,255))
     img.save(fn)
 print('assets_generated')
 PY

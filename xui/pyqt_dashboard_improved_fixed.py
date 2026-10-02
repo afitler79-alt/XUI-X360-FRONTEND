@@ -167,6 +167,95 @@ class SlotMachineDialog(QtWidgets.QDialog):
 
         SYMBOLS = ['🍒', '🔔', '🍋', '⭐', '7']
 
+        def __init__(self, parent=None):
+            super().__init__(parent)
+            self.setWindowTitle('Casino - Tragaperras')
+            self.setModal(True)
+            try:
+                data = json.load(open(SLOTS_FILE)) if SLOTS_FILE.exists() else {}
+                self.credits = int(data.get('credits', 100))
+            except Exception:
+                self.credits = 100
+            try:
+                settings = json.load(open(SETTINGS_FILE)) if SETTINGS_FILE.exists() else {}
+                self.sounds = bool(settings.get('sounds', True))
+            except Exception:
+                self.sounds = True
+
+            layout = QtWidgets.QVBoxLayout(self)
+            reels_layout = QtWidgets.QHBoxLayout()
+            self.reels = [QtWidgets.QLabel('') for _ in range(3)]
+            for reel in self.reels:
+                reel.setAlignment(QtCore.Qt.AlignCenter)
+                font = reel.font()
+                font.setPointSize(48)
+                reel.setFont(font)
+                reel.setFixedSize(160, 160)
+                reel.setStyleSheet('background:#123; color:white; border-radius:8px;')
+                reels_layout.addWidget(reel)
+            layout.addLayout(reels_layout)
+
+            controls = QtWidgets.QHBoxLayout()
+            self.spin_btn = QtWidgets.QPushButton('Girar (10 créditos)')
+            self.spin_btn.clicked.connect(self.spin)
+            self.credits_lbl = QtWidgets.QLabel(f'Créditos: {self.credits}')
+            controls.addWidget(self.spin_btn)
+            controls.addWidget(self.credits_lbl)
+            layout.addLayout(controls)
+
+            self.timers = [QtCore.QTimer(self) for _ in range(3)]
+            for index, timer in enumerate(self.timers):
+                timer.timeout.connect(lambda index=index: self._advance_reel(index))
+
+        def _play_sound(self, filename):
+            if not self.sounds:
+                return
+            path = ASSETS / filename
+            if path.exists() and shutil.which('mpv'):
+                try:
+                    args = ['mpv', '--really-quiet', str(path)]
+                    if path.suffix.lower() != '.mp4':
+                        args.insert(1, '--no-video')
+                    subprocess.Popen(args)
+                except Exception:
+                    pass
+
+        def _advance_reel(self, index):
+            self.reels[index].setText(random.choice(self.SYMBOLS))
+
+        def spin(self):
+            if self.credits < 10:
+                QtWidgets.QMessageBox.information(self, 'Sin créditos', 'No tienes suficientes créditos')
+                return
+            self.credits -= 10
+            self.credits_lbl.setText(f'Créditos: {self.credits}')
+            self._play_sound('click.mp3')
+            intervals = [50, 70, 90]
+            durations = [800, 1400, 2000]
+            for index, timer in enumerate(self.timers):
+                timer.start(intervals[index])
+                QtCore.QTimer.singleShot(durations[index], timer.stop)
+            QtCore.QTimer.singleShot(max(durations) + 50, self._resolve)
+
+        def _resolve(self):
+            values = [reel.text() for reel in self.reels]
+            if values[0] == values[1] == values[2]:
+                reward = 200 if values[0] == '7' else 50
+                self.credits += reward
+                QtWidgets.QMessageBox.information(self, 'Ganaste!', f'¡Combinación {values[0]}! Ganaste {reward} créditos')
+                self._play_sound('startup.mp4')
+            elif values[0] == values[1] or values[1] == values[2] or values[0] == values[2]:
+                self.credits += 20
+                QtWidgets.QMessageBox.information(self, 'Pequeño premio', f'Combinación parcial {values}. Ganaste 20 créditos')
+                self._play_sound('startup.mp4')
+            else:
+                QtWidgets.QMessageBox.information(self, 'Suerte', 'No hubo premio')
+            self.credits_lbl.setText(f'Créditos: {self.credits}')
+            try:
+                json.dump({'credits': self.credits}, open(SLOTS_FILE, 'w'))
+            except Exception:
+                pass
+
 
 class GamepadListener(QtCore.QObject):
         """Polls pygame joysticks and emits directional/select/back/guide signals.
@@ -285,7 +374,7 @@ class GamepadListener(QtCore.QObject):
             except Exception:
                 pass
 
-        def __init__(self, parent=None):
+        def _legacy_slot_dialog_init(self, parent=None):
             super().__init__(parent)
             self.setWindowTitle('Casino - Tragaperras')
             self.setModal(True)

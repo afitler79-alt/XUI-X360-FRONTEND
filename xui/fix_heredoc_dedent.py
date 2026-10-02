@@ -1,7 +1,10 @@
 #!/usr/bin/env python3
 from pathlib import Path
 import re, textwrap, sys
-p=Path('/home/smr/Descargas/xui/xui11.sh.fixed')
+p=Path(sys.argv[1]).expanduser() if len(sys.argv) > 1 else Path(__file__).resolve().with_name('xui11.sh.fixed')
+if not p.is_file():
+    print(f'installer not found: {p}')
+    sys.exit(1)
 s=p.read_text(encoding='utf-8')
 start_pat = r"cat > \"\$DASH_DIR/pyqt_dashboard_improved.py\" <<'XUI_HEREDOC_4'\n"
 m = re.search(start_pat, s)

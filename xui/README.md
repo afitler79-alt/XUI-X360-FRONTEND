@@ -8,17 +8,18 @@ What this repo contains
 
 Quick install (Linux / WSL)
 
-1. Make script executable and run:
+1. From this directory, make the maintained installer executable and run it
+	without installing system packages:
 
 ```bash
-chmod +x xui11.sh
-./xui11.sh
+chmod +x xui11.sh.fixed.sh
+./xui11.sh.fixed.sh --no-auto-install
 ```
 
-2. If you want the installer to try to auto-install media tools, re-run with:
+2. To explicitly allow the installer to install system dependencies and tools:
 
 ```bash
-AUTO_INSTALL_TOOLS=1 ./xui11.sh
+./xui11.sh.fixed.sh --yes-install
 ```
 
 3. To run the dashboard immediately:
@@ -40,7 +41,7 @@ Example commands:
 python3 -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
-./xui11.sh --yes-install
+./xui11.sh.fixed.sh --yes-install
 ```
 
 
@@ -56,5 +57,5 @@ pip install -r requirements.txt
 
 Notes
 
-- The installer will generate placeholder images/audio when original files are missing (requires `python3` + `Pillow` and/or `ffmpeg`).
-- The script avoids performing privileged package installs unless `AUTO_INSTALL_TOOLS=1` is set and a compatible package manager is detected.
+- The installer generates placeholder images when original files are missing (requires `python3` + `Pillow`; startup video generation also requires `ffmpeg`).
+- System package installation is opt-in via `--yes-install`; `--no-auto-install` explicitly disables it.

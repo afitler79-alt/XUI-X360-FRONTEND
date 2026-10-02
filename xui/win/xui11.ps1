@@ -78,8 +78,11 @@ def make_img(fn, size=(320,180), text='XUI'):
         f = ImageFont.truetype('arial.ttf', max(24, size[1]//6))
     except Exception:
         f = ImageFont.load_default()
-    w,h = d.textsize(text, font=f)
-    d.text(((size[0]-w)/2,(size[1]-h)/2), text, fill=(255,255,255,255), font=f)
+    bbox = d.textbbox((0, 0), text, font=f)
+    w, h = bbox[2] - bbox[0], bbox[3] - bbox[1]
+    x = (size[0] - w) / 2 - bbox[0]
+    y = (size[1] - h) / 2 - bbox[1]
+    d.text((x, y), text, fill=(255,255,255,255), font=f)
     im.save(p)
 
 make_img('applogo.png', (512,512), 'XUI')

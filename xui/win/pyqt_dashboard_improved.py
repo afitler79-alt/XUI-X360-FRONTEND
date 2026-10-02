@@ -341,9 +341,21 @@ class MainWindow(QtWidgets.QMainWindow):
             if os.path.exists(candidate):
                 QtCore.QProcess.startDetached(sys.executable, [candidate])
             else:
-                script = os.path.join(xui, 'bin', f'xui_{name.lower()}.sh')
-                if os.path.exists(script):
-                    QtCore.QProcess.startDetached('/bin/sh', ['-c', script])
+                script_dir = os.path.join(xui, 'bin')
+                if os.name == 'nt':
+                    ps_script = os.path.join(script_dir, f'xui_{name.lower()}.ps1')
+                    cmd_script = os.path.join(script_dir, f'xui_{name.lower()}.cmd')
+                    if os.path.exists(ps_script):
+                        QtCore.QProcess.startDetached(
+                            'powershell.exe',
+                            ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', ps_script],
+                        )
+                    elif os.path.exists(cmd_script):
+                        QtCore.QProcess.startDetached('cmd.exe', ['/c', cmd_script])
+                else:
+                    script = os.path.join(script_dir, f'xui_{name.lower()}.sh')
+                    if os.path.exists(script):
+                        QtCore.QProcess.startDetached('/bin/sh', ['-c', script])
 
 
 if __name__ == '__main__':

@@ -95,8 +95,11 @@ if Image is not None:
                                 f = ImageFont.truetype('DejaVuSans-Bold.ttf', max(24, size[1]//6))
                         except Exception:
                                 f = ImageFont.load_default()
-                        w,h = d.textsize(text, font=f)
-                        d.text(((size[0]-w)/2,(size[1]-h)/2), text, fill=(255,255,255,255), font=f)
+                        bbox = d.textbbox((0, 0), text, font=f)
+                        w, h = bbox[2] - bbox[0], bbox[3] - bbox[1]
+                        x = (size[0] - w) / 2 - bbox[0]
+                        y = (size[1] - h) / 2 - bbox[1]
+                        d.text((x, y), text, fill=(255,255,255,255), font=f)
                         im.save(p)
                 except Exception:
                         pass
@@ -312,6 +315,7 @@ class MainWindow(QtWidgets.QMainWindow):
         center = QtWidgets.QWidget()
         grid = QtWidgets.QGridLayout(center)
         hero = TileWidget('Casino', ASSETS/'Casino.png', big=True, parent=self)
+        hero.clicked.connect(self.on_tile_clicked)
         grid.addWidget(hero, 0, 0, 2, 2)
         others = ['Runner','Store','Misiones','LAN','Power Profile','Battery Saver','Settings','System Info','Screenshot','Web Control','Update System','Salir al escritorio']
         positions = [(0,2),(1,2),(2,0),(2,1),(2,2),(3,0),(3,1),(3,2),(4,0),(4,1),(4,2),(5,0)]
@@ -677,19 +681,22 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         return http.server.SimpleHTTPRequestHandler.do_GET(self)
 
 def serve(port=8020):
-    with socketserver.TCPServer(('0.0.0.0',port), Handler) as httpd:
-        print(f'XUI web-control listening on {port}')
+    with socketserver.TCPServer(('127.0.0.1',port), Handler) as httpd:
+        print(f'XUI web-control listening on 127.0.0.1:{port}')
         httpd.serve_forever()
 
 if __name__=='__main__':
-    serve()
+    try:
+        serve(int(os.environ.get('XUI_WEB_PORT', '8020')))
+    except (TypeError, ValueError):
+        serve()
 PY
     chmod +x "$BIN_DIR/xui_web_api.py"
 
     cat > "$BIN_DIR/xui_web_control.sh" <<'BASH'
 #!/usr/bin/env bash
 PORT=${1:-8020}
-python3 "$HOME/.xui/bin/xui_web_api.py" &
+XUI_WEB_PORT="$PORT" python3 "$HOME/.xui/bin/xui_web_api.py" &
 echo "web-control started on port $PORT"
 BASH
     chmod +x "$BIN_DIR/xui_web_control.sh"
@@ -1095,8 +1102,9 @@ try:
     except Exception:
         f=None
     text='XGUI'
-    w,h=d.textsize(text,font=f)
-    d.text(((512-w)/2,(512-h)/2),text,fill=(255,255,255,255),font=f)
+    bbox=d.textbbox((0,0),text,font=f)
+    w,h=bbox[2]-bbox[0],bbox[3]-bbox[1]
+    d.text(((512-w)/2-bbox[0],(512-h)/2-bbox[1]),text,fill=(255,255,255,255),font=f)
     im.save(out)
     print('logo_generated')
 except Exception:
@@ -1124,8 +1132,9 @@ try:
     except Exception:
         f=None
     txt='Salir'
-    w,h=d.textsize(txt,font=f)
-    d.text(((320-w)/2,(180-h)/2),txt,fill=(255,255,255,255),font=f)
+    bbox=d.textbbox((0,0),txt,font=f)
+    w,h=bbox[2]-bbox[0],bbox[3]-bbox[1]
+    d.text(((320-w)/2-bbox[0],(180-h)/2-bbox[1]),txt,fill=(255,255,255,255),font=f)
     im.save(out)
     print('exit_icon_generated')
 except Exception:
@@ -1462,8 +1471,9 @@ for n in names:
     except Exception:
         f = None
     txt = n
-    w,h = d.textsize(txt, font=f)
-    d.text(((320-w)/2,(180-h)/2), txt, font=f, fill=(255,255,255))
+    bbox = d.textbbox((0, 0), txt, font=f)
+    w, h = bbox[2] - bbox[0], bbox[3] - bbox[1]
+    d.text(((320-w)/2-bbox[0], (180-h)/2-bbox[1]), txt, font=f, fill=(255,255,255))
     img.save(fn)
 print('assets_generated')
 PY
