@@ -59,3 +59,6 @@ Notes
 
 - The installer generates placeholder images when original files are missing (requires `python3` + `Pillow`; startup video generation also requires `ffmpeg`).
 - System package installation is opt-in via `--yes-install`; `--no-auto-install` explicitly disables it.
+- The dashboard includes an Xbox Guide notification center, separate Missions and Achievements screens, editable local Gamer Cards, and a game search that opens the filtered local catalog. Profile and notification data remain local in `~/.xui/data`; these features do not sign in to Xbox Live.
+- Social chat keeps bounded per-peer history in `~/.xui/data/social_conversations.json`; LAN sends are asynchronous and use matching-message acknowledgements when supported. LAN transport is not encrypted/authenticated, and the shared World relay is public—not end-to-end private. Declining a mandatory update no longer closes the dashboard.
+- Launching helper apps and utilities keeps the dashboard process alive; the in-dashboard service utility now only reports status instead of restarting XUI. Applying an actual system update remains the intentional exception because it replaces installed files.

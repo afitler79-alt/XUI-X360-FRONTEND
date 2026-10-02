@@ -2033,11 +2033,13 @@ ASSETS = Path.home() / '.xui' / 'assets'
 XUI_HOME = Path.home() / '.xui'
 DATA_HOME = XUI_HOME / 'data'
 RECENT_FILE = DATA_HOME / 'recent.json'
+NOTIFICATIONS_FILE = DATA_HOME / 'notifications.json'
 FRIENDS_FILE = DATA_HOME / 'friends.json'
 PROFILE_FILE = DATA_HOME / 'profile.json'
 PEERS_FILE = DATA_HOME / 'social_peers.json'
 WORLD_CHAT_FILE = DATA_HOME / 'world_chat.json'
 SOCIAL_MESSAGES_FILE = DATA_HOME / 'social_messages_recent.json'
+SOCIAL_CONVERSATIONS_FILE = DATA_HOME / 'social_conversations.json'
 FRIEND_REQUESTS_FILE = DATA_HOME / 'friend_requests.json'
 BEACONS_FILE = DATA_HOME / 'beacons.json'
 SOCIAL_PROFILE_FILE = DATA_HOME / 'social_profile.json'
@@ -2396,6 +2398,8 @@ class InlineSocialEngine:
             os.environ.get('XUI_WORLD_TOPIC', 'xui-world-global')
         )
         self.world_enabled = True
+        self._world_response = None
+        self._world_response_lock = threading.Lock()
         self.events = queue.Queue()
         self.running = False
         self.threads = []
@@ -2417,15 +2421,18 @@ class InlineSocialEngine:
         if new_topic == self.world_topic:
             return
         self.world_topic = new_topic
+        self._interrupt_world_stream()
         self._seen_world_ids.clear()
         self.events.put(('world_room', self.world_topic))
         self.events.put(('status', f'World chat room set to: {self.world_topic}'))
 
     def set_world_enabled(self, enabled):
         self.world_enabled = bool(enabled)
+        if not self.world_enabled:
+            self._interrupt_world_stream()
         self.events.put(('world_status', self.world_enabled, self.world_topic))
         if self.world_enabled:
-            self.events.put(('status', f'World chat connected: {self.world_topic}'))
+            self.events.put(('status', f'Connecting to public relay room: {self.world_topic}…'))
         else:
             self.events.put(('status', 'World chat disconnected'))
 
@@ -2463,15 +2470,36 @@ class InlineSocialEngine:
 
     def stop(self):
         self.running = False
+        self._interrupt_world_stream()
         for t in self.threads:
             t.join(timeout=0.2)
 
     def _send_packet(self, host, port, payload):
+        payload = dict(payload)
+        message_id = str(payload.get('message_id') or uuid.uuid4().hex)
+        payload['message_id'] = message_id
         body = (json.dumps(payload, ensure_ascii=False) + '\n').encode('utf-8', errors='ignore')
         with socket.create_connection((str(host), int(port)), timeout=4.0) as s:
             s.sendall(body)
+            s.shutdown(socket.SHUT_WR)
+            s.settimeout(4.0)
+            response = bytearray()
+            while len(response) <= 4096 and b'\n' not in response:
+                chunk = s.recv(1024)
+                if not chunk:
+                    break
+                response.extend(chunk)
+            if not response:
+                return False
+            try:
+                ack = json.loads(bytes(response).split(b'\n', 1)[0].decode('utf-8'))
+            except (ValueError, UnicodeError):
+                return False
+            if not isinstance(ack, dict) or str(ack.get('message_id') or '') != message_id:
+                return False
+            return bool(ack.get('ok'))
 
-    def send_chat(self, host, port, text):
+    def send_chat(self, host, port, text, message_id=''):
         payload = {
             'type': 'chat',
             'node_id': self.node_id,
@@ -2480,10 +2508,11 @@ class InlineSocialEngine:
             'text': str(text),
             'ts': time.time(),
             'reply_port': int(self.chat_port or 0),
+            'message_id': str(message_id or uuid.uuid4().hex),
         }
-        self._send_packet(host, port, payload)
+        return self._send_packet(host, port, payload)
 
-    def send_private_message(self, host, port, text):
+    def send_private_message(self, host, port, text, message_id=''):
         payload = {
             'type': 'private_message',
             'node_id': self.node_id,
@@ -2492,8 +2521,9 @@ class InlineSocialEngine:
             'text': str(text),
             'ts': time.time(),
             'reply_port': int(self.chat_port or 0),
+            'message_id': str(message_id or uuid.uuid4().hex),
         }
-        self._send_packet(host, port, payload)
+        return self._send_packet(host, port, payload)
 
     def send_friend_request(self, host, port, note=''):
         payload = {
@@ -2521,9 +2551,19 @@ class InlineSocialEngine:
         }
         self._send_packet(host, port, payload)
 
-    def _world_url(self, suffix=''):
-        topic = urllib.parse.quote(self.world_topic, safe='')
+    def _world_url(self, suffix='', topic=None):
+        topic = urllib.parse.quote(str(topic or self.world_topic), safe='')
         return f'{self.world_relay}/{topic}{suffix}'
+
+    def _interrupt_world_stream(self):
+        with self._world_response_lock:
+            response = self._world_response
+            self._world_response = None
+        if response is not None:
+            try:
+                response.close()
+            except Exception:
+                pass
 
     def _post_world_payload(self, payload):
         data = json.dumps(payload, ensure_ascii=False).encode('utf-8', errors='ignore')
@@ -2543,6 +2583,7 @@ class InlineSocialEngine:
     def send_world_event(self, kind, **extra):
         payload = {
             'kind': str(kind or ''),
+            'message_id': uuid.uuid4().hex,
             'node_id': self.node_id,
             'user_id': self.user_id,
             'from': self.nickname,
@@ -2640,7 +2681,7 @@ class InlineSocialEngine:
             return False
         return h.startswith('127.') or h in self.local_ips
 
-    def _upsert_peer(self, name, host, port, source='LAN', node_id=''):
+    def _upsert_peer(self, name, host, port, source='LAN', node_id='', user_id=''):
         if not host or not port:
             return
         key = self._peer_key(host, port)
@@ -2651,6 +2692,7 @@ class InlineSocialEngine:
             'port': int(port),
             'source': source,
             'node_id': str(node_id or ''),
+            'user_id': str(user_id or '')[:40],
             'last_seen': now,
         }
         changed = False
@@ -2658,7 +2700,11 @@ class InlineSocialEngine:
             prev = self.peers.get(key)
             if prev is None:
                 changed = True
-            elif prev.get('name') != data['name'] or prev.get('node_id') != data['node_id']:
+            elif (
+                prev.get('name') != data['name']
+                or prev.get('node_id') != data['node_id']
+                or prev.get('user_id') != data['user_id']
+            ):
                 changed = True
             self.peers[key] = data
         if changed:
@@ -2691,6 +2737,7 @@ class InlineSocialEngine:
         return {
             'type': 'announce',
             'node_id': self.node_id,
+            'user_id': self.user_id,
             'name': self.nickname,
             'chat_port': int(self.chat_port or 0),
             'reply_port': int(self.discovery_port),
@@ -2701,6 +2748,7 @@ class InlineSocialEngine:
         return {
             'type': 'probe',
             'node_id': self.node_id,
+            'user_id': self.user_id,
             'name': self.nickname,
             'chat_port': int(self.chat_port or 0),
             'reply_port': int(self.discovery_port),
@@ -2754,7 +2802,10 @@ class InlineSocialEngine:
                 pkt = json.loads(raw.decode('utf-8', errors='ignore'))
             except Exception:
                 continue
+            if not isinstance(pkt, dict):
+                continue
             remote_node = str(pkt.get('node_id') or '')
+            remote_user_id = str(pkt.get('user_id') or '').strip()[:40]
             if remote_node == self.node_id:
                 continue
             ptype = str(pkt.get('type') or '')
@@ -2770,14 +2821,73 @@ class InlineSocialEngine:
                 except Exception:
                     pass
                 if port > 0:
-                    self._upsert_peer(name, host, port, 'LAN', remote_node)
+                    self._upsert_peer(name, host, port, 'LAN', remote_node, user_id=remote_user_id)
                 continue
             if ptype != 'announce':
                 continue
             if port <= 0:
                 continue
-            self._upsert_peer(name, host, port, 'LAN', remote_node)
+            self._upsert_peer(name, host, port, 'LAN', remote_node, user_id=remote_user_id)
         sock.close()
+
+    def _handle_tcp_connection(self, conn, host):
+        try:
+            conn.settimeout(3.0)
+            data = bytearray()
+            while len(data) <= 1_500_000 and b'\n' not in data:
+                chunk = conn.recv(min(16384, 1_500_001 - len(data)))
+                if not chunk:
+                    break
+                data.extend(chunk)
+        except OSError:
+            return
+        if not data or len(data) > 1_500_000 or b'\n' not in data:
+            return
+        try:
+            msg = json.loads(bytes(data).split(b'\n', 1)[0].decode('utf-8'))
+        except (ValueError, UnicodeError):
+            return
+        if not isinstance(msg, dict):
+            return
+        mtype = str(msg.get('type') or '')
+        if mtype not in ('chat', 'private_message', 'friend_request', 'voice_message'):
+            return
+        sender = str(msg.get('from') or host).strip()[:48] or host
+        text = str(msg.get('text') or '').strip()
+        note = str(msg.get('note') or '').strip()[:500]
+        sender_node = str(msg.get('node_id') or '')[:64]
+        sender_user_id = str(msg.get('user_id') or '').strip()[:40]
+        message_id = str(msg.get('message_id') or '')[:80]
+        mime = str(msg.get('mime') or 'audio/ogg')[:80]
+        voice_blob = str(msg.get('audio') or '').strip()
+        try:
+            voice_dur = max(0.0, min(120.0, float(msg.get('duration') or 0.0)))
+        except (TypeError, ValueError, OverflowError):
+            voice_dur = 0.0
+        try:
+            reply_port = int(msg.get('reply_port') or 0)
+        except (TypeError, ValueError, OverflowError):
+            reply_port = 0
+        reply_port = reply_port if 0 < reply_port <= 65535 else 0
+        if mtype in ('chat', 'private_message') and (not text or len(text) > 4000):
+            return
+        if mtype == 'voice_message' and (not voice_blob or len(voice_blob) > 1_400_000 or voice_dur <= 0):
+            return
+        if reply_port > 0:
+            self._upsert_peer(sender, host, reply_port, 'LAN', sender_node, user_id=sender_user_id)
+        if mtype == 'friend_request':
+            self.events.put(('friend_request', sender, host, reply_port, note, sender_user_id))
+        elif mtype == 'voice_message':
+            self.events.put(('voice_message', sender, host, reply_port, mime, voice_dur, voice_blob, sender_user_id, message_id))
+        elif mtype == 'private_message':
+            self.events.put(('private_message', sender, text, sender_user_id, host, reply_port, message_id))
+        else:
+            self.events.put(('chat', sender, text, sender_user_id, host, reply_port, message_id))
+        try:
+            ack = json.dumps({'ok': True, 'message_id': message_id}, separators=(',', ':')).encode('utf-8') + b'\n'
+            conn.sendall(ack)
+        except OSError:
+            pass
 
     def _tcp_server_loop(self):
         if not self.chat_port:
@@ -2802,52 +2912,7 @@ class InlineSocialEngine:
                 continue
             host = addr[0]
             with conn:
-                try:
-                    data = conn.recv(65536).decode('utf-8', errors='ignore')
-                except Exception:
-                    data = ''
-            if not data.strip():
-                continue
-            for line in data.splitlines():
-                line = line.strip()
-                if not line:
-                    continue
-                try:
-                    msg = json.loads(line)
-                except Exception:
-                    continue
-                mtype = str(msg.get('type') or '')
-                if mtype not in ('chat', 'private_message', 'friend_request', 'voice_message'):
-                    continue
-                sender = str(msg.get('from') or host)
-                text = str(msg.get('text') or '').strip()
-                note = str(msg.get('note') or '').strip()
-                sender_node = str(msg.get('node_id') or '')
-                sender_user_id = str(msg.get('user_id') or '').strip()
-                mime = str(msg.get('mime') or 'audio/ogg')
-                voice_blob = str(msg.get('audio') or '').strip()
-                try:
-                    voice_dur = float(msg.get('duration') or 0.0)
-                except Exception:
-                    voice_dur = 0.0
-                try:
-                    reply_port = int(msg.get('reply_port') or 0)
-                except Exception:
-                    reply_port = 0
-                if reply_port > 0:
-                    self._upsert_peer(sender, host, reply_port, 'LAN', sender_node)
-                if mtype == 'friend_request':
-                    self.events.put(('friend_request', sender, host, int(reply_port or 0), note, sender_user_id))
-                    continue
-                if mtype == 'voice_message':
-                    if voice_blob:
-                        self.events.put(('voice_message', sender, host, int(reply_port or 0), mime, voice_dur, voice_blob, sender_user_id))
-                    continue
-                if text and mtype == 'private_message':
-                    self.events.put(('private_message', sender, text))
-                    continue
-                if text:
-                    self.events.put(('chat', sender, text))
+                self._handle_tcp_connection(conn, host)
         srv.close()
 
     def _world_recv_loop(self):
@@ -2856,7 +2921,8 @@ class InlineSocialEngine:
             if not self.world_enabled:
                 time.sleep(0.4)
                 continue
-            url = self._world_url('/json')
+            room = self.world_topic
+            url = self._world_url('/json', room)
             req = urllib.request.Request(
                 url,
                 headers={
@@ -2865,10 +2931,17 @@ class InlineSocialEngine:
                     'Connection': 'keep-alive',
                 },
             )
+            response = None
             try:
-                with urllib.request.urlopen(req, timeout=30) as resp:
+                with urllib.request.urlopen(req, timeout=35) as resp:
+                    response = resp
+                    with self._world_response_lock:
+                        self._world_response = resp
                     backoff = 1.2
+                    self.events.put(('world_connection', 'connected', room))
                     while self.running and self.world_enabled:
+                        if room != self.world_topic:
+                            break
                         raw = resp.readline()
                         if not raw:
                             break
@@ -2878,6 +2951,8 @@ class InlineSocialEngine:
                         try:
                             evt = json.loads(line)
                         except Exception:
+                            continue
+                        if not isinstance(evt, dict):
                             continue
                         if str(evt.get('event') or '') != 'message':
                             continue
@@ -2889,7 +2964,7 @@ class InlineSocialEngine:
                             if len(self._seen_world_ids) > 1200:
                                 self._seen_world_ids = set(list(self._seen_world_ids)[-600:])
                         body = str(evt.get('message') or '').strip()
-                        if not body:
+                        if not body or len(body) > 1_500_000:
                             continue
                         try:
                             payload = json.loads(body)
@@ -2902,6 +2977,8 @@ class InlineSocialEngine:
                                 'room': self.world_topic,
                                 'ts': evt.get('time', time.time()),
                             }
+                        if not isinstance(payload, dict):
+                            continue
                         kind = str(payload.get('kind') or 'xui_world_chat')
                         if str(payload.get('room') or self.world_topic) != self.world_topic:
                             continue
@@ -2988,10 +3065,17 @@ class InlineSocialEngine:
                                 if audio:
                                     self.events.put(('world_voice_message', who, from_user_id, party_id, mime, duration, audio))
                             continue
+                with self._world_response_lock:
+                    if self._world_response is resp:
+                        self._world_response = None
             except Exception as exc:
-                self.events.put(('status', f'World relay reconnecting: {exc}'))
-                time.sleep(min(8.0, backoff))
-                backoff = min(8.0, backoff * 1.5)
+                with self._world_response_lock:
+                    if self._world_response is response:
+                        self._world_response = None
+                if room == self.world_topic and self.world_enabled:
+                    self.events.put(('world_connection', 'reconnecting', room, str(exc)[:180]))
+                    time.sleep(min(8.0, backoff))
+                    backoff = min(8.0, backoff * 1.5)
 
 
 class SocialOverlay(QtWidgets.QDialog):
@@ -3015,6 +3099,8 @@ class SocialOverlay(QtWidgets.QDialog):
         }
         self._community_mode = 'messages'
         self._focus_zone = 0
+        self._active_conversation_key = ''
+        self._pending_sends = set()
         self.setModal(True)
         self.setWindowFlags(QtCore.Qt.Dialog | QtCore.Qt.FramelessWindowHint)
         self.setAttribute(QtCore.Qt.WA_TranslucentBackground, True)
@@ -3026,20 +3112,21 @@ class SocialOverlay(QtWidgets.QDialog):
         self._load_manual_peers()
         self._load_world_settings()
         self.engine.start()
-        try:
-            self.engine.send_world_event('xui_presence', chat_port=int(self.engine.chat_port or 0), tick=0)
-        except Exception:
-            pass
         if str(self.party_state.get('party_id') or '').strip():
-            try:
-                self.engine.send_world_party_state(str(self.party_state.get('party_id')), state='join')
-            except Exception:
-                pass
+            threading.Thread(
+                target=self.engine.send_world_party_state,
+                args=(str(self.party_state.get('party_id')),),
+                kwargs={'state': 'join'},
+                name='xui-party-presence',
+                daemon=True,
+            ).start()
         self._refresh_world_peer()
         self.timer = QtCore.QTimer(self)
         self.timer.timeout.connect(self._poll_events)
         self.timer.start(120)
         self._append_system('LAN autodiscovery enabled (broadcast + probe).')
+        self._append_system('Security: LAN P2P is not encrypted or authenticated; use it only on trusted networks.')
+        self._append_system('World room messages use a shared public relay; they are not private or end-to-end encrypted.')
         self._append_system(f"World chat ready via relay ({self.engine.world_relay}) room: {self.engine.world_topic}")
         self._append_system(f'Global social ID: {self.user_id}')
 
@@ -3049,8 +3136,8 @@ class SocialOverlay(QtWidgets.QDialog):
         self._action_items = {}
         self.setStyleSheet('''
             QFrame#social_panel {
-                background:#d2d7dc;
-                border:2px solid rgba(239,244,248,0.78);
+                background:#101923;
+                border:2px solid rgba(111,137,154,0.58);
                 border-radius:0px;
             }
             QFrame#social_header {
@@ -3058,16 +3145,16 @@ class SocialOverlay(QtWidgets.QDialog):
                 border:none;
             }
             QFrame#social_col {
-                background:#cad0d6;
-                border:1px solid rgba(111,120,129,0.46);
+                background:#16232d;
+                border:1px solid rgba(111,137,154,0.36);
             }
             QLabel#social_title { color:#f4f8fb; font-size:40px; font-weight:900; }
-            QLabel#social_hint { color:#23303d; font-size:16px; font-weight:700; }
-            QLabel#social_col_title { color:#1f2a35; font-size:20px; font-weight:900; }
+            QLabel#social_hint { color:#c0ccd6; font-size:16px; font-weight:700; }
+            QLabel#social_col_title { color:#f0f5f8; font-size:20px; font-weight:900; }
             QListWidget {
-                background:#d7dde2;
-                color:#20252b;
-                border:1px solid rgba(0,0,0,0.30);
+                background:#0c151d;
+                color:#e5edf3;
+                border:1px solid rgba(159,183,200,0.25);
                 font-size:21px;
                 font-weight:700;
                 outline:none;
@@ -3082,16 +3169,16 @@ class SocialOverlay(QtWidgets.QDialog):
                 border:1px solid rgba(255,255,255,0.35);
             }
             QPlainTextEdit {
-                background:#dce2e7;
-                border:1px solid rgba(32,39,48,0.35);
-                color:#17202a;
+                background:#0d1821;
+                border:1px solid rgba(159,183,200,0.30);
+                color:#edf4f8;
                 font-size:16px;
                 font-weight:700;
             }
             QLineEdit {
-                background:#e8edf2;
-                border:1px solid #7f8f9f;
-                color:#17202a;
+                background:#0d1821;
+                border:1px solid #52697a;
+                color:#edf4f8;
                 font-size:20px;
                 font-weight:700;
                 padding:8px;
@@ -3572,7 +3659,9 @@ class SocialOverlay(QtWidgets.QDialog):
         peer = self._selected_peer()
         if not peer:
             self.peer_meta.setText('Select a peer to chat.')
+            self._show_conversation_for(None)
             return
+        self._show_conversation_for(peer)
         src = str(peer.get('source') or '').upper()
         if src in ('FRIEND', 'PARTY', 'RECENT', 'GLOBAL'):
             name = str(peer.get('name') or 'Player')
@@ -3585,9 +3674,9 @@ class SocialOverlay(QtWidgets.QDialog):
                 self.peer_meta.setText(f'{name}{endpoint}  (RECENT){(" - " + last) if last else ""}')
             elif src == 'GLOBAL':
                 uid = str(peer.get('user_id') or '').strip()
-                self.peer_meta.setText(f'{name}  (GLOBAL)  {"Online" if online else "Offline"}  id:{uid or "-"}')
+                self.peer_meta.setText(f'{name}  (GLOBAL relay; not private)  {"Online" if online else "Offline"}  id:{uid or "-"}')
             else:
-                self.peer_meta.setText(f'{name}{endpoint}  ({src})  {"Online" if online else "Offline"}')
+                self.peer_meta.setText(f'{name}{endpoint}  ({src}; LAN is unencrypted)  {"Online" if online else "Offline"}')
             return
         if str(peer.get('source')) == 'WORLD':
             self.peer_meta.setText(f"WORLD relay room #{self.engine.world_topic}")
@@ -3713,9 +3802,98 @@ class SocialOverlay(QtWidgets.QDialog):
     def _append_system(self, text):
         self._append_line(f"[{time.strftime('%H:%M:%S')}] [SYSTEM] {text}")
 
-    def _append_chat(self, who, text):
-        self._append_line(f"[{time.strftime('%H:%M:%S')}] {who}: {text}")
+    def _append_chat(self, who, text, peer=None, message_id=''):
+        if isinstance(peer, dict):
+            self._save_conversation_message(peer, 'in', text, 'delivered', message_id)
+            if self._conversation_key(peer) != self._active_conversation_key:
+                self._push_recent_message(who, text)
+                return
+        else:
+            self._append_line(f"[{time.strftime('%H:%M:%S')}] {who}: {text}")
         self._push_recent_message(who, text)
+
+    def _conversation_key(self, peer=None, user_id='', host='', port=0):
+        peer = peer if isinstance(peer, dict) else {}
+        uid = str(user_id or peer.get('user_id') or '').strip()
+        if uid:
+            return f'user:{uid[:80]}'
+        source = str(peer.get('source') or '').upper()
+        if source == 'WORLD':
+            return f'world:{self.engine.world_topic}'
+        host = str(host or peer.get('host') or '').strip()
+        try:
+            port = int(port or peer.get('port') or 0)
+        except (TypeError, ValueError, OverflowError):
+            port = 0
+        if host:
+            return f'endpoint:{host[:120]}:{port}'
+        return ''
+
+    def _save_conversation_message(self, peer, direction, text, status='delivered', message_id='', user_id='', host='', port=0, ts=None):
+        key = self._conversation_key(peer, user_id=user_id, host=host, port=port)
+        body = str(text or '').strip()
+        if not key or not body:
+            return
+        data = safe_json_read(SOCIAL_CONVERSATIONS_FILE, {'conversations': {}})
+        if not isinstance(data, dict):
+            data = {'conversations': {}}
+        conversations = data.get('conversations')
+        if not isinstance(conversations, dict):
+            conversations = {}
+        rows = conversations.get(key)
+        if not isinstance(rows, list):
+            rows = []
+        record_id = str(message_id or uuid.uuid4().hex)[:80]
+        record = {
+            'id': record_id,
+            'ts': int(ts or time.time()),
+            'direction': 'out' if direction == 'out' else 'in',
+            'status': str(status or 'delivered')[:32],
+            'text': body[:4000],
+        }
+        existing_idx = next((i for i, row in enumerate(rows) if isinstance(row, dict) and str(row.get('id') or '') == record_id), -1)
+        if existing_idx >= 0:
+            rows[existing_idx].update(record)
+        else:
+            rows.append(record)
+        conversations[key] = rows[-100:]
+        if len(conversations) > 40:
+            oldest = sorted(conversations, key=lambda item: max((int(row.get('ts') or 0) for row in conversations[item] if isinstance(row, dict)), default=0))
+            for old_key in oldest[:-40]:
+                conversations.pop(old_key, None)
+        data['conversations'] = conversations
+        safe_json_write(SOCIAL_CONVERSATIONS_FILE, data)
+        if key == self._active_conversation_key:
+            self._render_conversation()
+
+    def _show_conversation_for(self, peer):
+        key = self._conversation_key(peer)
+        if key == self._active_conversation_key:
+            return
+        self._active_conversation_key = key
+        self._render_conversation()
+
+    def _render_conversation(self):
+        self.chat.clear()
+        if not self._active_conversation_key:
+            return
+        data = safe_json_read(SOCIAL_CONVERSATIONS_FILE, {'conversations': {}})
+        conversations = data.get('conversations', {}) if isinstance(data, dict) else {}
+        rows = conversations.get(self._active_conversation_key, []) if isinstance(conversations, dict) else []
+        if not isinstance(rows, list):
+            return
+        for row in rows[-100:]:
+            if not isinstance(row, dict):
+                continue
+            try:
+                stamp = time.strftime('%H:%M:%S', time.localtime(int(row.get('ts') or 0)))
+            except (TypeError, ValueError, OverflowError, OSError):
+                stamp = '--:--:--'
+            direction = 'You' if row.get('direction') == 'out' else 'Peer'
+            state = str(row.get('status') or 'delivered')
+            self.chat.appendPlainText(f'[{stamp}] {direction} [{state}]: {str(row.get("text") or "")}')
+        scrollbar = self.chat.verticalScrollBar()
+        scrollbar.setValue(scrollbar.maximum())
 
     def _push_recent_message(self, who, text):
         who_txt = str(who or '').strip() or 'Unknown'
@@ -4491,9 +4669,9 @@ class SocialOverlay(QtWidgets.QDialog):
     def _send_candidates(self, peer):
         selected_host = str(peer.get('host') or '')
         selected_port = int(peer.get('port') or 0)
-        selected_name = str(peer.get('name') or '').strip().lower()
         selected_node = str(peer.get('node_id') or '')
-        weighted = []
+        selected_user = str(peer.get('user_id') or '').strip()
+        candidates = []
         for key, p in self.peer_data.items():
             host = str(p.get('host') or '')
             if str(p.get('source') or '') == 'WORLD':
@@ -4504,23 +4682,25 @@ class SocialOverlay(QtWidgets.QDialog):
                 port = 0
             if not host or port <= 0:
                 continue
-            src = str(p.get('source') or '')
-            name = str(p.get('name') or '').strip().lower()
             node = str(p.get('node_id') or '')
-            rank = 9
-            if host == selected_host and port == selected_port:
-                rank = 0
-            elif selected_node and node and node == selected_node:
-                rank = 1
-            elif host == selected_host:
-                rank = 2
-            elif src == 'LAN' and selected_name and name == selected_name:
-                rank = 3
-            weighted.append((rank, self._host_priority(host), host, port, key))
-        weighted.sort(key=lambda x: (x[0], x[1], x[2], x[3]))
+            user_id = str(p.get('user_id') or '').strip()
+            exact_endpoint = host == selected_host and port == selected_port
+            same_identity = bool(
+                (selected_node and node and node == selected_node)
+                or (selected_user and user_id and user_id == selected_user)
+            )
+            same_host_identity = bool(
+                host == selected_host
+                and str(p.get('name') or '').strip().casefold()
+                == str(peer.get('name') or '').strip().casefold()
+            )
+            if exact_endpoint or same_identity or same_host_identity:
+                rank = 0 if exact_endpoint else 1
+                candidates.append((rank, self._host_priority(host), host, port, key))
+        candidates.sort(key=lambda row: (row[0], row[1], row[2], row[3]))
         out = []
         seen = set()
-        for _rank, _hp, host, port, key in weighted:
+        for _rank, _hp, host, port, key in candidates:
             endpoint = (host, int(port))
             if endpoint in seen:
                 continue
@@ -4659,64 +4839,74 @@ class SocialOverlay(QtWidgets.QDialog):
         txt = self.input.text().strip()
         if not txt:
             return
-        if str(peer.get('source')) == 'WORLD':
-            try:
-                self.engine.send_world_chat(txt)
-                self._append_line(f"[{time.strftime('%H:%M:%S')}] You -> WORLD: {txt}")
-                self._push_recent_message('You -> WORLD', txt)
-                self.status.setText(f"World sent to room {self.engine.world_topic}")
-                self.input.clear()
-            except Exception as e:
-                self.status.setText(f'World send failed: {e}')
+        if len(txt) > 4000:
+            self.status.setText('Message too long (maximum 4000 characters).')
             return
-        peer_uid = str(peer.get('user_id') or '').strip()
-        peer_src = str(peer.get('source') or '').upper()
-        if peer_uid and peer_src in ('GLOBAL', 'FRIEND', 'PARTY', 'RECENT'):
-            try:
-                self.engine.send_world_private_message(peer_uid, txt)
-                self._append_line(f"[{time.strftime('%H:%M:%S')}] You -> {peer.get('name', 'User')} [PM]: {txt}")
-                self._push_recent_message(f"You -> {peer.get('name', 'User')} [PM]", txt)
-                self.status.setText(f"PM sent to {peer.get('name', 'user')}")
-                self.input.clear()
-                return
-            except Exception as exc:
-                self.status.setText(f'Global PM failed: {exc}')
-                return
-        is_friend = self._is_friend(peer)
-        last_err = None
-        used = None
-        candidates = self._send_candidates(peer)
-        for host, port, key in candidates:
-            try:
-                if is_friend:
-                    self.engine.send_private_message(host, port, txt)
-                else:
-                    self.engine.send_chat(host, port, txt)
-                used = (host, int(port), key)
-                break
-            except Exception as e:
-                last_err = e
-                continue
-        if used:
-            host, port, key = used
-            if is_friend:
-                self._append_line(f"[{time.strftime('%H:%M:%S')}] You -> {peer['name']} [PM]: {txt}")
-                self._push_recent_message(f"You -> {peer['name']} [PM]", txt)
-            else:
-                self._append_chat(f"You -> {peer['name']}", txt)
-            if host == str(peer.get('host')) and int(port) == int(peer.get('port') or 0):
-                mode = 'PM' if is_friend else 'Chat'
-                self.status.setText(f"{mode} sent to {host}:{port}")
-            else:
-                mode = 'PM' if is_friend else 'Chat'
-                self.status.setText(f"{mode} sent via fallback {host}:{port}")
-                item = self.peer_items.get(key)
-                if item is not None:
-                    self.peers.setCurrentItem(item)
-            self.input.clear()
+        if len(self._pending_sends) >= 4:
+            self.status.setText('Several messages are still sending; wait a moment.')
             return
-        err_txt = str(last_err) if last_err is not None else 'No reachable peer endpoint.'
-        self.status.setText(f'Cannot send: {err_txt}')
+        message_id = uuid.uuid4().hex
+        peer = dict(peer)
+        peer['_is_friend'] = self._is_friend(peer)
+        peer['_send_candidates'] = self._send_candidates(peer)
+        self._pending_sends.add(message_id)
+        self.input.clear()
+        self.status.setText(f"Sending to {peer.get('name') or 'peer'}…")
+        self._save_conversation_message(peer, 'out', txt, status='pending', message_id=message_id)
+        worker = threading.Thread(
+            target=self._send_message_worker,
+            args=(dict(peer), txt, message_id),
+            name=f'xui-chat-send-{message_id[:8]}',
+            daemon=True,
+        )
+        worker.start()
+
+    def _send_message_worker(self, peer, text, message_id):
+        result = {
+            'peer': peer,
+            'text': text,
+            'message_id': message_id,
+            'ok': False,
+            'status': 'failed',
+            'detail': '',
+        }
+        try:
+            source = str(peer.get('source') or '').upper()
+            if source == 'WORLD':
+                self.engine.send_world_chat(text)
+                result.update(ok=True, status='relay accepted; public room', detail=f"Room #{self.engine.world_topic}; delivery is not confirmed.")
+            elif source in ('GLOBAL', 'FRIEND', 'PARTY', 'RECENT') and str(peer.get('user_id') or '').strip() and not int(peer.get('port') or 0):
+                self.engine.send_world_private_message(str(peer['user_id']), text)
+                result.update(ok=True, status='relay accepted; not private', detail='The shared public relay can read this message; end-to-end encryption is not enabled.')
+            else:
+                last_error = None
+                is_friend = bool(peer.get('_is_friend', False))
+                delivered = False
+                legacy_sent = False
+                used_endpoint = None
+                for host, port, _key in peer.get('_send_candidates', []):
+                    try:
+                        acknowledged = (
+                            self.engine.send_private_message(host, port, text, message_id)
+                            if is_friend
+                            else self.engine.send_chat(host, port, text, message_id)
+                        )
+                        used_endpoint = (host, port)
+                        delivered = bool(acknowledged)
+                        legacy_sent = not bool(acknowledged)
+                        break
+                    except Exception as exc:
+                        last_error = exc
+                if used_endpoint is None:
+                    raise RuntimeError(str(last_error or 'No endpoint for this peer identity was reachable.'))
+                result['endpoint'] = used_endpoint
+                if delivered:
+                    result.update(ok=True, status='delivered', detail=f'Delivery acknowledged by {used_endpoint[0]}:{used_endpoint[1]}.')
+                elif legacy_sent:
+                    result.update(ok=True, status='unconfirmed', detail='Peer accepted the TCP write but did not support delivery acknowledgements.')
+        except Exception as exc:
+            result['detail'] = str(exc)[:300]
+        self.engine.events.put(('send_result', result))
 
     def _touch_global_player(self, user_id, name, status='online'):
         uid = str(user_id or '').strip()
@@ -4791,7 +4981,22 @@ class SocialOverlay(QtWidgets.QDialog):
             except queue.Empty:
                 break
             kind = evt[0]
-            if kind == 'status':
+            if kind == 'send_result':
+                result = evt[1] if len(evt) > 1 and isinstance(evt[1], dict) else {}
+                message_id = str(result.get('message_id') or '')
+                self._pending_sends.discard(message_id)
+                peer = result.get('peer') if isinstance(result.get('peer'), dict) else {}
+                text = str(result.get('text') or '')
+                status = str(result.get('status') or 'failed')
+                if bool(result.get('ok')):
+                    self._save_conversation_message(peer, 'out', text, status, message_id)
+                    self._push_recent_message(f"You -> {peer.get('name') or 'peer'}", text)
+                    self.status.setText(str(result.get('detail') or 'Message sent.'))
+                else:
+                    self._save_conversation_message(peer, 'out', text, 'failed', message_id)
+                    self.status.setText(f"Message not delivered: {result.get('detail') or 'unknown error'}")
+                    self._append_system(f"Message to {peer.get('name') or 'peer'} failed: {result.get('detail') or 'unknown error'}")
+            elif kind == 'status':
                 self.status.setText(str(evt[1]))
             elif kind == 'peer_up':
                 _kind, _key, data = evt
@@ -4804,18 +5009,31 @@ class SocialOverlay(QtWidgets.QDialog):
                     self._mark_friend_online(peer, False)
                     self._remove_peer(key)
             elif kind == 'chat':
-                _kind, sender, text = evt
-                self._append_chat(sender, text)
+                _kind, sender, text = evt[:3]
+                sender_uid = str(evt[3] or '') if len(evt) > 3 else ''
+                host = str(evt[4] or '') if len(evt) > 4 else ''
+                port = int(evt[5] or 0) if len(evt) > 5 else 0
+                message_id = str(evt[6] or '') if len(evt) > 6 else ''
+                peer = {'name': sender, 'user_id': sender_uid, 'host': host, 'port': port, 'source': 'LAN'}
+                self._append_chat(sender, text, peer, message_id)
             elif kind == 'private_message':
-                _kind, sender, text = evt
-                self._append_line(f"[{time.strftime('%H:%M:%S')}] {sender} [PM]: {text}")
+                _kind, sender, text = evt[:3]
+                sender_uid = str(evt[3] or '') if len(evt) > 3 else ''
+                host = str(evt[4] or '') if len(evt) > 4 else ''
+                port = int(evt[5] or 0) if len(evt) > 5 else 0
+                message_id = str(evt[6] or '') if len(evt) > 6 else ''
+                peer = {'name': sender, 'user_id': sender_uid, 'host': host, 'port': port, 'source': 'FRIEND'}
+                self._save_conversation_message(peer, 'in', text, 'delivered', message_id)
+                if self._conversation_key(peer) == self._active_conversation_key:
+                    self.status.setText(f'Private message received from {sender}; LAN traffic is not encrypted.')
                 self._push_recent_message(f'{sender} [PM]', text)
             elif kind == 'world_private_message':
                 _kind, sender, sender_user_id, text = evt
-                self._append_line(f"[{time.strftime('%H:%M:%S')}] {sender} [GLOBAL PM]: {text}")
+                peer = {'name': sender, 'user_id': sender_user_id, 'source': 'GLOBAL'}
+                self._save_conversation_message(peer, 'in', text, 'relay', '')
                 self._push_recent_message(f'{sender} [PM]', text)
                 self._touch_global_player(sender_user_id, sender, 'pm')
-                self.status.setText(f'Private message from {sender}')
+                self.status.setText(f'Relay message from {sender}; it is not end-to-end private.')
             elif kind == 'friend_request':
                 sender = str(evt[1] if len(evt) > 1 else 'Unknown')
                 host = str(evt[2] if len(evt) > 2 else '')
@@ -4842,7 +5060,8 @@ class SocialOverlay(QtWidgets.QDialog):
                 self.status.setText(f'Friend added: {sender}')
             elif kind == 'world_chat':
                 _kind, sender, text = evt
-                self._append_line(f"[{time.strftime('%H:%M:%S')}] {sender} [WORLD]: {text}")
+                peer = {'name': sender, 'source': 'WORLD'}
+                self._save_conversation_message(peer, 'in', text, 'relay')
                 self._push_recent_message(f'{sender} [WORLD]', text)
             elif kind == 'world_presence':
                 _kind, data = evt
@@ -4920,10 +5139,16 @@ class SocialOverlay(QtWidgets.QDialog):
                 _kind, enabled, room = evt
                 self._update_world_toggle_button()
                 if bool(enabled):
-                    self.status.setText(f'World chat connected ({room})')
+                    self.status.setText(f'Connecting to public room #{room}…')
                 else:
                     self.status.setText('World chat disconnected')
                 self._refresh_world_peer()
+            elif kind == 'world_connection':
+                _kind, state, room, *detail = evt
+                if state == 'connected':
+                    self.status.setText(f'Connected to public room #{room}; messages are visible to relay subscribers.')
+                else:
+                    self.status.setText(f"Relay reconnecting ({room}): {detail[0] if detail else 'connection lost'}")
             elif kind == 'world_room':
                 _kind, room = evt
                 self._refresh_world_peer()
@@ -6855,7 +7080,7 @@ class XboxGuideMenu(QtWidgets.QDialog):
                 ('Settings', ['Xbox Home', 'Canjear codigo', 'Configuracion', 'Sign Out']),
             ]
         return [
-            ('Guide', ['Reciente', 'Mensajes recientes', 'Social global', 'Beacons', 'Mis juegos', 'Descargas activas', 'Canjear codigo']),
+            ('Guide', ['Reciente', 'Notifications', 'Mensajes recientes', 'Social global', 'Beacons', 'Mis juegos', 'Descargas activas', 'Canjear codigo']),
             (self.gamertag, ['Friends', 'Party', 'Messages', 'Chat', 'Beacons & Activity']),
             ('Dash', ['Inicio de Xbox', 'Configuracion', 'Cerrar app actual', 'Cerrar sesion']),
         ]
@@ -8031,16 +8256,10 @@ class DashboardPage(QtWidgets.QWidget):
     def _apply_scale_once(self, scale=1.0, compact=False):
         s = max(0.58, float(scale))
         compact_factor = 0.95 if compact else 1.0
-        left_w = max(112, int(220 * s * compact_factor))
-        right_w = max(96, int(170 * s * compact_factor))
         gap = max(4, int(12 * s * compact_factor))
         col_gap = max(3, int(7 * s * compact_factor))
         if self._body_layout is not None:
             self._body_layout.setSpacing(gap)
-        if self.left_col is not None:
-            self.left_col.setFixedWidth(left_w)
-        if self.right_col is not None:
-            self.right_col.setFixedWidth(right_w)
         if self.left_layout is not None:
             self.left_layout.setSpacing(col_gap)
         if self.center_layout is not None:
@@ -8052,6 +8271,12 @@ class DashboardPage(QtWidgets.QWidget):
         for group in (self.left_tiles, self.center_tiles, self.right_tiles):
             for tile in group:
                 tile.apply_scale(s, compact)
+        if self.left_col is not None:
+            left_tiles_width = max((tile.width() for tile in self.left_tiles), default=0)
+            self.left_col.setFixedWidth(max(left_tiles_width, int(220 * s * compact_factor)))
+        if self.right_col is not None:
+            right_tiles_width = max((tile.width() for tile in self.right_tiles), default=0)
+            self.right_col.setFixedWidth(max(right_tiles_width, int(170 * s * compact_factor)))
         if self.hero is not None:
             self.hero.apply_scale(s, compact)
 
@@ -8077,8 +8302,8 @@ class DashboardPage(QtWidgets.QWidget):
         for _ in range(10):
             self._apply_scale_once(fitted, compact)
             self.layout().activate()
-            avail_w = max(520, int(self.width()) - 8)
-            avail_h = max(300, int(self.height()) - 8)
+            avail_w = max(1, int(self.width()) - 8)
+            avail_h = max(1, int(self.height()) - 8)
             need_w, need_h = self._content_size_hint()
             if need_w <= avail_w and need_h <= avail_h:
                 break
@@ -8600,6 +8825,174 @@ class AchievementsHubDialog(QtWidgets.QDialog):
         super().keyPressEvent(e)
 
 
+class NotificationCenterDialog(QtWidgets.QDialog):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle('Notification Center')
+        self.setWindowFlags(QtCore.Qt.Dialog | QtCore.Qt.FramelessWindowHint)
+        self.setModal(True)
+        self.resize(900, 600)
+        self.rows = []
+
+        root = QtWidgets.QVBoxLayout(self)
+        root.setContentsMargins(16, 14, 16, 14)
+        header = QtWidgets.QHBoxLayout()
+        title = QtWidgets.QLabel('Notification Center')
+        title.setStyleSheet('font-size:28px;font-weight:800;color:#f4f8fb;')
+        self.summary = QtWidgets.QLabel('')
+        self.summary.setStyleSheet('font-size:16px;font-weight:700;color:#cbd7e2;')
+        header.addWidget(title)
+        header.addStretch(1)
+        header.addWidget(self.summary)
+        root.addLayout(header)
+
+        self.listw = QtWidgets.QListWidget()
+        self.listw.setStyleSheet('QListWidget{background:#d7dde2;color:#20252b;font-size:19px;} QListWidget::item{padding:9px;} QListWidget::item:selected{background:#328c38;color:white;}')
+        self.listw.itemActivated.connect(self._mark_selected_read)
+        root.addWidget(self.listw, 1)
+
+        buttons = QtWidgets.QHBoxLayout()
+        refresh = QtWidgets.QPushButton('Refresh')
+        mark_read = QtWidgets.QPushButton('Mark All Read')
+        clear_read = QtWidgets.QPushButton('Clear Read')
+        close_btn = QtWidgets.QPushButton('Close (B/ESC)')
+        refresh.clicked.connect(self.reload)
+        mark_read.clicked.connect(self._mark_all_read)
+        clear_read.clicked.connect(self._clear_read)
+        close_btn.clicked.connect(self.reject)
+        for button in (refresh, mark_read, clear_read):
+            buttons.addWidget(button)
+        buttons.addStretch(1)
+        buttons.addWidget(close_btn)
+        root.addLayout(buttons)
+        self.setStyleSheet('QDialog{background:#17212b;} QPushButton{background:#378f38;color:white;padding:8px 14px;border:0;font-weight:700;} QPushButton:hover{background:#48aa47;}')
+        self.reload()
+
+    @staticmethod
+    def _notification_id(kind, source):
+        raw = f'{kind}:{source}'
+        return hashlib.sha256(raw.encode('utf-8', errors='replace')).hexdigest()[:24]
+
+    @staticmethod
+    def _timestamp(value):
+        try:
+            return max(0, int(value or 0))
+        except (TypeError, ValueError, OverflowError):
+            return 0
+
+    def _collect_rows(self):
+        stored = safe_json_read(NOTIFICATIONS_FILE, [])
+        if not isinstance(stored, list):
+            stored = []
+        rows = [dict(row) for row in stored if isinstance(row, dict)]
+        known = {str(row.get('id') or '') for row in rows}
+
+        recent_messages = safe_json_read(SOCIAL_MESSAGES_FILE, [])
+        if isinstance(recent_messages, list):
+            for msg in recent_messages[:40]:
+                if not isinstance(msg, dict):
+                    continue
+                ts = self._timestamp(msg.get('ts'))
+                who = str(msg.get('from') or 'Unknown').strip()[:48]
+                body = str(msg.get('text') or '').strip()[:220]
+                if not body:
+                    continue
+                nid = self._notification_id('message', f'{ts}:{who}:{body}')
+                if nid not in known:
+                    rows.append({'id': nid, 'ts': ts, 'kind': 'message', 'text': f'Nuevo mensaje de {who}: {body}', 'read': False})
+                    known.add(nid)
+
+        requests = safe_json_read(FRIEND_REQUESTS_FILE, [])
+        if isinstance(requests, list):
+            for request in requests[:40]:
+                if not isinstance(request, dict):
+                    continue
+                who = str(request.get('name') or 'Unknown').strip()[:48]
+                ts = self._timestamp(request.get('ts'))
+                nid = self._notification_id('friend_request', f"{request.get('user_id', '')}:{who}:{ts}")
+                if nid not in known:
+                    rows.append({'id': nid, 'ts': ts, 'kind': 'friend_request', 'text': f'Solicitud de amistad de {who}', 'read': False})
+                    known.add(nid)
+
+        achievement_state = safe_json_read(DATA_HOME / 'achievements.json', {})
+        catalog = achievement_state.get('items', []) if isinstance(achievement_state, dict) else []
+        unlocked = achievement_state.get('unlocked', []) if isinstance(achievement_state, dict) else []
+        if isinstance(catalog, list) and isinstance(unlocked, list):
+            by_id = {str(item.get('id') or ''): item for item in catalog if isinstance(item, dict)}
+            for record in unlocked[-40:]:
+                if not isinstance(record, dict):
+                    continue
+                aid = str(record.get('id') or '').strip()
+                item = by_id.get(aid, {})
+                title = str(item.get('title') or aid or 'Logro')
+                ts = self._timestamp(record.get('ts'))
+                nid = self._notification_id('achievement', f'{aid}:{ts}')
+                if nid not in known:
+                    rows.append({'id': nid, 'ts': ts, 'kind': 'achievement', 'text': f'Logro desbloqueado: {title}', 'read': False})
+                    known.add(nid)
+
+        rows.sort(key=lambda row: int(row.get('ts') or 0), reverse=True)
+        rows = rows[:250]
+        safe_json_write(NOTIFICATIONS_FILE, rows)
+        return rows
+
+    def reload(self):
+        self.rows = self._collect_rows()
+        self.listw.clear()
+        unread = 0
+        for row in self.rows:
+            is_read = bool(row.get('read', False))
+            unread += not is_read
+            ts = self._timestamp(row.get('ts'))
+            stamp = time.strftime('%Y-%m-%d %H:%M', time.localtime(ts)) if ts > 0 else 'Ahora'
+            prefix = '  ' if is_read else '● '
+            item = QtWidgets.QListWidgetItem(f"{prefix}{stamp}  [{str(row.get('kind') or 'info').upper()}]  {row.get('text', '')}")
+            item.setData(QtCore.Qt.UserRole, str(row.get('id') or ''))
+            self.listw.addItem(item)
+        self.summary.setText(f'{unread} sin leer  |  {len(self.rows)} total')
+        if self.listw.count():
+            self.listw.setCurrentRow(0)
+
+    def _save_rows(self):
+        safe_json_write(NOTIFICATIONS_FILE, self.rows[:250])
+        self.reload()
+
+    def _mark_selected_read(self, item=None):
+        item = item or self.listw.currentItem()
+        if item is None:
+            return
+        selected_id = str(item.data(QtCore.Qt.UserRole) or '')
+        for row in self.rows:
+            if str(row.get('id') or '') == selected_id:
+                row['read'] = True
+                break
+        self._save_rows()
+
+    def _mark_all_read(self):
+        for row in self.rows:
+            row['read'] = True
+        self._save_rows()
+
+    def _clear_read(self):
+        self.rows = [row for row in self.rows if not bool(row.get('read', False))]
+        self._save_rows()
+
+    def keyPressEvent(self, event):
+        if event.key() in (QtCore.Qt.Key_Return, QtCore.Qt.Key_Enter):
+            self._mark_selected_read()
+            return
+        if event.key() in (QtCore.Qt.Key_Escape, QtCore.Qt.Key_Back, QtCore.Qt.Key_B):
+            self.reject()
+            return
+        if event.key() == QtCore.Qt.Key_X:
+            self._mark_all_read()
+            return
+        if event.key() == QtCore.Qt.Key_Y:
+            self.reload()
+            return
+        super().keyPressEvent(event)
+
+
 class Dashboard(QtWidgets.QMainWindow):
     def __init__(self):
         super().__init__()
@@ -8655,6 +9048,12 @@ class Dashboard(QtWidgets.QMainWindow):
                     ('Open Tray', 'Open Tray', (320, 170)),
                     ('My Pins', 'My Pins', (320, 170)),
                     ('Recent', 'Recent', (320, 170)),
+                ],
+                'center_bottom': [
+                    ('Notifications', 'Notifications', (190, 114)),
+                    ('Missions', 'Missions', (190, 114)),
+                    ('Achievements', 'Achievements', (190, 114)),
+                    ('Gamer Card', 'Gamer Card', (190, 114)),
                 ],
                 'right': [
                     ('Friends', 'Friends', (270, 130)),
@@ -8822,6 +9221,7 @@ class Dashboard(QtWidgets.QMainWindow):
         self._tab_animating = False
         self._tab_anim_group = None
         self._tab_anim_watchdog = None
+        self._tab_anim_generation = 0
         self._visible_page_idx = 0
         self._last_responsive_key = None
         self._web_windows = []
@@ -8834,6 +9234,8 @@ class Dashboard(QtWidgets.QMainWindow):
         self._achievement_last_sfx_at = 0.0
         self._achievement_toast = None
         self._startup_update_checked = False
+        self._allow_exit = False
+        self._mandatory_update_declined_until = 0.0
         self._mandatory_update_timer = None
         self._mandatory_update_dialog_open = False
         self._mandatory_update_in_progress = False
@@ -8962,12 +9364,12 @@ class Dashboard(QtWidgets.QMainWindow):
         self._games_inline.hide()
 
         main_bg = (
-            '#8f959c'
+            '#0b1219'
             if self._low_power_ui
-            else 'qlineargradient(x1:0.0,y1:0.0,x2:0.0,y2:1.0, stop:0 #4f555d, stop:0.44 #858b92, stop:1 #d7dbe0)'
+            else 'qlineargradient(x1:0.0,y1:0.0,x2:0.0,y2:1.0, stop:0 #08111b, stop:0.52 #101b25, stop:1 #17232c)'
         )
-        stage_bg = 'rgba(255,255,255,0.03)' if self._low_power_ui else 'rgba(255,255,255,0.06)'
-        stage_border = 'rgba(255,255,255,0.08)' if self._low_power_ui else 'rgba(255,255,255,0.10)'
+        stage_bg = 'rgba(12,20,29,0.42)' if self._low_power_ui else 'rgba(8,15,22,0.32)'
+        stage_border = 'rgba(255,255,255,0.08)' if self._low_power_ui else 'rgba(255,255,255,0.11)'
         self.setStyleSheet(
             f'''
             QMainWindow {{
@@ -8995,20 +9397,19 @@ class Dashboard(QtWidgets.QMainWindow):
             sh = max(480, g.height())
         vw = min(w, sw)
         vh = min(h, sh)
-        rw = vw / 1600.0
+        rw = vw / 1280.0
         rh = vh / 900.0
         base_scale = min(rw, rh)
         force_compact = os.environ.get('XUI_COMPACT_UI', '0') == '1'
         compact = force_compact or (vw <= 1366) or (vh <= 768)
         scale = min(1.0, base_scale)
         if compact:
-            floor = 0.74 if vh < 700 else 0.80
             boost = 1.08 if vh <= 800 else 1.0
-            scale = max(floor, min(1.0, scale * boost))
+            scale = min(1.0, scale * boost)
         if force_compact:
             scale = min(scale, 0.92)
         if self._low_power_ui:
-            scale = max(0.82 if vh >= 700 else 0.76, scale)
+            scale = max(0.58, scale)
         env_scale = str(os.environ.get('XUI_UI_SCALE', '')).strip()
         if env_scale:
             try:
@@ -9028,7 +9429,7 @@ class Dashboard(QtWidgets.QMainWindow):
         self._compact_ui = compact
         compact_factor = 0.80 if compact else 1.0
         if self._stage_layout is not None:
-            side = max(18, int(94 * scale * compact_factor))
+            side = max(16, int(min(self.width(), 1600) * 0.035 * (0.88 if compact else 1.0)))
             top = max(10, int(34 * scale * compact_factor))
             bottom = max(8, int(26 * scale * compact_factor))
             spacing = max(6, int(10 * scale * compact_factor))
@@ -9108,6 +9509,8 @@ class Dashboard(QtWidgets.QMainWindow):
 
     def resizeEvent(self, e):
         super().resizeEvent(e)
+        if self._tab_animating:
+            self._finish_tab_animation(self._tab_anim_generation, self.tab_idx)
         self._apply_responsive_layout()
 
     def _ensure_fullscreen(self):
@@ -9141,35 +9544,29 @@ class Dashboard(QtWidgets.QMainWindow):
                 pass
         for i, page in enumerate(self.pages):
             page.move(0, 0)
+            try:
+                page.setGraphicsEffect(None)
+            except Exception:
+                pass
             page.setVisible(i == idx)
             if i == idx:
                 page.raise_()
-            else:
-                try:
-                    page.setGraphicsEffect(None)
-                except Exception:
-                    pass
         self._visible_page_idx = idx
 
-    def _finish_tab_animation(self, to_idx, from_w=None, to_w=None, from_fx=None, to_fx=None):
+    def _finish_tab_animation(self, generation, to_idx):
+        if int(generation) != int(self._tab_anim_generation) or not self._tab_animating:
+            return
         to_idx = max(0, min(int(to_idx), len(self.pages) - 1))
+        group = self._tab_anim_group
+        self._tab_animating = False
+        self._tab_anim_group = None
+        if group is not None and group.state() != QtCore.QAbstractAnimation.Stopped:
+            group.stop()
         try:
             self.page_stack.setCurrentIndex(to_idx)
         except Exception:
             pass
         self._normalize_page_visibility(to_idx)
-        try:
-            if from_w is not None:
-                from_w.setGraphicsEffect(None)
-        except Exception:
-            pass
-        try:
-            if to_w is not None:
-                to_w.setGraphicsEffect(None)
-        except Exception:
-            pass
-        self._tab_animating = False
-        self._tab_anim_group = None
         wd = self._tab_anim_watchdog
         self._tab_anim_watchdog = None
         if wd is not None:
@@ -9195,83 +9592,39 @@ class Dashboard(QtWidgets.QMainWindow):
             self._normalize_page_visibility(to_idx)
             self.update_focus()
             return
-        from_w = self.page_stack.widget(from_idx)
         to_w = self.page_stack.widget(to_idx)
-        rect = self.page_stack.rect()
+        self._tab_anim_generation += 1
+        generation = self._tab_anim_generation
+        self._tab_animating = True
         sl = self.page_stack.layout()
         if hasattr(sl, 'setStackingMode'):
             try:
-                sl.setStackingMode(QtWidgets.QStackedLayout.StackAll)
+                sl.setStackingMode(QtWidgets.QStackedLayout.StackOne)
             except Exception:
                 pass
-        direction = 1 if to_idx > from_idx else -1
-        # Xbox-like side blade movement, but compact to keep GPU/CPU cost low.
-        travel = int(max(56, rect.width() * (0.20 if self._low_power_ui else 0.28)))
-        from_end_x = -direction * travel
-        to_start_x = direction * int(travel * (0.92 if self._low_power_ui else 1.05))
-
-        for i, page in enumerate(self.pages):
-            if i not in (from_idx, to_idx):
-                page.hide()
-        from_w.setGeometry(rect)
-        to_w.setGeometry(rect)
-        from_w.move(0, 0)
-        to_w.move(to_start_x, 0)
-        from_w.show()
-        to_w.show()
-        to_w.raise_()
-
-        self._tab_animating = True
+        self.page_stack.setCurrentIndex(to_idx)
+        self._normalize_page_visibility(to_idx)
         self._tab_anim_group = QtCore.QParallelAnimationGroup(self)
-        duration = 155 if self._low_power_ui else 215
-
-        anim_from = QtCore.QPropertyAnimation(from_w, b'pos')
-        anim_from.setDuration(duration)
-        anim_from.setStartValue(QtCore.QPoint(0, 0))
-        anim_from.setEndValue(QtCore.QPoint(from_end_x, 0))
-        anim_from.setEasingCurve(QtCore.QEasingCurve.OutCubic)
-
-        anim_to = QtCore.QPropertyAnimation(to_w, b'pos')
-        anim_to.setDuration(duration)
-        anim_to.setStartValue(QtCore.QPoint(to_start_x, 0))
-        anim_to.setEndValue(QtCore.QPoint(0, 0))
-        anim_to.setEasingCurve(QtCore.QEasingCurve.OutCubic)
-
-        self._tab_anim_group.addAnimation(anim_from)
-        self._tab_anim_group.addAnimation(anim_to)
-        from_fx = None
-        to_fx = None
-        if not self._low_power_ui:
-            from_fx = QtWidgets.QGraphicsOpacityEffect(from_w)
-            to_fx = QtWidgets.QGraphicsOpacityEffect(to_w)
-            from_fx.setOpacity(1.0)
-            to_fx.setOpacity(0.74)
-            from_w.setGraphicsEffect(from_fx)
-            to_w.setGraphicsEffect(to_fx)
-
-            fade_from = QtCore.QPropertyAnimation(from_fx, b'opacity')
-            fade_from.setDuration(duration)
-            fade_from.setStartValue(1.0)
-            fade_from.setEndValue(0.84)
-            fade_from.setEasingCurve(QtCore.QEasingCurve.OutCubic)
-
-            fade_to = QtCore.QPropertyAnimation(to_fx, b'opacity')
-            fade_to.setDuration(duration + 20)
-            fade_to.setStartValue(0.74)
-            fade_to.setEndValue(1.0)
-            fade_to.setEasingCurve(QtCore.QEasingCurve.OutCubic)
-            self._tab_anim_group.addAnimation(fade_from)
-            self._tab_anim_group.addAnimation(fade_to)
+        effect = QtWidgets.QGraphicsOpacityEffect(to_w)
+        effect.setOpacity(0.72)
+        to_w.setGraphicsEffect(effect)
+        duration = 120 if self._low_power_ui else 175
+        fade_in = QtCore.QPropertyAnimation(effect, b'opacity', self._tab_anim_group)
+        fade_in.setDuration(duration)
+        fade_in.setStartValue(0.72)
+        fade_in.setEndValue(1.0)
+        fade_in.setEasingCurve(QtCore.QEasingCurve.OutCubic)
+        self._tab_anim_group.addAnimation(fade_in)
 
         def done():
-            self._finish_tab_animation(to_idx, from_w, to_w, from_fx, to_fx)
+            self._finish_tab_animation(generation, to_idx)
 
         self._tab_anim_group.finished.connect(done)
         self._tab_anim_group.start(QtCore.QAbstractAnimation.DeleteWhenStopped)
         watchdog = QtCore.QTimer(self)
         watchdog.setSingleShot(True)
         watchdog.setInterval(max(280, duration + 220))
-        watchdog.timeout.connect(lambda: self._finish_tab_animation(to_idx, from_w, to_w, from_fx, to_fx))
+        watchdog.timeout.connect(lambda: self._finish_tab_animation(generation, to_idx))
         self._tab_anim_watchdog = watchdog
         watchdog.start()
 
@@ -9690,7 +10043,7 @@ class Dashboard(QtWidgets.QMainWindow):
     def _launch_mandatory_updater_and_quit(self):
         invocation = self._update_checker_invocation('apply', json_mode=False)
         if invocation is None:
-            QtWidgets.QApplication.quit()
+            self._msg('Update', 'Updater is unavailable. XUI will remain open.')
             return
         try:
             if self._mandatory_payload_proc is not None:
@@ -9789,7 +10142,7 @@ class Dashboard(QtWidgets.QMainWindow):
                     QtCore.QProcess.startDetached(pyexe, [str(dash)])
                 except Exception:
                     pass
-            QtCore.QTimer.singleShot(520, QtWidgets.QApplication.quit)
+            QtCore.QTimer.singleShot(520, self._request_application_exit)
             return
 
         helper = XUI_HOME / 'bin' / 'xui_postupdate_restart.sh'
@@ -9913,7 +10266,7 @@ exit 0
             'fi'
         )
         QtCore.QProcess.startDetached('/bin/sh', ['-lc', cmd])
-        QtCore.QTimer.singleShot(520, QtWidgets.QApplication.quit)
+        QtCore.QTimer.singleShot(520, self._request_application_exit)
 
     def _on_mandatory_update_error(self, err):
         self._on_mandatory_update_output()
@@ -10023,6 +10376,8 @@ exit 0
             return
         if not bool(payload.get('update_required', False)):
             return
+        if time.monotonic() < self._mandatory_update_declined_until:
+            return
         self._play_sfx('open')
         self._mandatory_update_dialog_open = True
         d = MandatoryUpdateDialog(payload, self)
@@ -10033,6 +10388,11 @@ exit 0
         if str(selected).strip().lower() == 'yes':
             self._launch_mandatory_updater_and_quit()
             return
+        self._mandatory_update_declined_until = time.monotonic() + 300.0
+        self._msg('Update', 'Update postponed. The dashboard will stay open; you can update later from Settings.')
+
+    def _request_application_exit(self):
+        self._allow_exit = True
         QtWidgets.QApplication.quit()
 
     def _save_recent(self, action):
@@ -10689,6 +11049,9 @@ exit 0
         if name == 'Friends':
             self.handle_action('Friends')
             return
+        if name == 'Notifications':
+            self.handle_action('Notifications')
+            return
         if name == 'Party':
             self.handle_action('Party')
             return
@@ -10718,8 +11081,11 @@ exit 0
             else:
                 self.handle_action('Bing Search')
             return
-        if name == 'Logros':
-            self._open_achievements_hub()
+        if name in ('Logros', 'Achievements'):
+            self.handle_action('Achievements')
+            return
+        if name in ('Misiones', 'Missions'):
+            self.handle_action('Missions')
             return
         if name == 'Premios':
             self.handle_action('Store')
@@ -10951,7 +11317,9 @@ exit 0
             'Close Active App': 'Try to close the currently active external window/app.',
             'Casino': 'Launch casino minigame.',
             'Runner': 'Launch runner minigame.',
-            'Missions': 'Open achievements hub (5000 logros) inside dashboard.',
+            'Missions': 'Open the local mission list and review completion rewards.',
+            'Achievements': 'Open the achievement collection and gamerscore hub.',
+            'Notifications': 'Review recent messages, friend requests, and unlocked achievements.',
             'Misiones': 'Open achievements hub (5000 logros) inside dashboard.',
             'Web Control': 'Control local web API service.',
             'Web Start': 'Start web control API service.',
@@ -11146,8 +11514,14 @@ exit 0
         elif action in ('Search Games', 'Games Search'):
             q, ok = self._input_text('Search Games', 'Game or app:', '')
             if ok and str(q).strip():
-                self._run('/bin/sh', ['-c', f'{xui}/bin/xui_store.sh'])
-                self._msg('Search Games', f'Store opened. Use search: {str(q).strip()}')
+                try:
+                    store_window = StoreWindow()
+                    store_window.search.setText(str(q).strip())
+                    store_window.showFullScreen()
+                    store_window.search.setFocus()
+                    self._web_windows.append(store_window)
+                except Exception as exc:
+                    self._msg('Search Games', f'Could not open filtered store: {exc}')
         elif action in ('Games Marketplace', 'Games Market'):
             self._run('/bin/sh', ['-c', f'{xui}/bin/xui_store.sh'])
         elif action == 'Game Marketplace':
@@ -11242,7 +11616,19 @@ exit 0
         elif action == 'Close Active App':
             out = subprocess.getoutput(f'/bin/sh -c "{xui}/bin/xui_close_active_app.sh"')
             self._msg('Close Active App', out or 'No output')
+        elif action == 'Notifications':
+            self._play_sfx('open')
+            dialog = NotificationCenterDialog(self)
+            dialog.exec_()
+            self._play_sfx('close')
         elif action in ('Missions', 'Misiones'):
+            mission_window = XUI_HOME / 'games' / 'missions.py'
+            python_launcher = XUI_HOME / 'bin' / 'xui_python.sh'
+            if mission_window.exists() and python_launcher.exists():
+                self._run('/bin/sh', ['-c', f'"{python_launcher}" "{mission_window}"'])
+            else:
+                self._msg('Missions', 'Mission center is not installed. Re-run the XUI installer to restore it.')
+        elif action in ('Achievements', 'Logros'):
             self._open_achievements_hub()
         elif action == 'LAN':
             self._menu('LAN', ['LAN Chat', 'LAN Status', 'P2P Internet Help'])
@@ -11260,12 +11646,33 @@ exit 0
         elif action == 'Party':
             self._open_social_chat('party')
         elif action == 'Gamer Card':
-            try:
-                p = json.loads(PROFILE_FILE.read_text()) if PROFILE_FILE.exists() else {}
-            except Exception:
-                p = {}
-            signed = 'Yes' if p.get('signed_in') else 'No'
-            self._msg('Gamer Card', f"Gamertag: {p.get('gamertag','Player1')}\nSigned In: {signed}")
+            profile = safe_json_read(PROFILE_FILE, {})
+            if not isinstance(profile, dict):
+                profile = {}
+            if self._ask_yes_no('Gamer Card', 'Edit your local player card?'):
+                for field, label, limit in (
+                    ('gamertag', 'Gamertag', 24),
+                    ('motto', 'Motto', 64),
+                    ('location', 'Location', 48),
+                    ('avatar', 'Avatar name', 32),
+                ):
+                    current = str(profile.get(field) or ('Player1' if field == 'gamertag' else ''))
+                    value, accepted = self._input_text(f'Edit {label}', f'{label}:', current)
+                    if not accepted:
+                        break
+                    profile[field] = ''.join(ch for ch in str(value).strip() if ch.isprintable())[:limit]
+                profile['gamertag'] = str(profile.get('gamertag') or 'Player1')[:24]
+                profile['updated_at'] = int(time.time())
+                safe_json_write(PROFILE_FILE, profile)
+            signed = 'Local profile active' if profile.get('signed_in') else 'Local profile offline'
+            self._msg(
+                'Gamer Card',
+                f"Gamertag: {profile.get('gamertag', 'Player1')}\n"
+                f"Motto: {profile.get('motto') or '—'}\n"
+                f"Location: {profile.get('location') or '—'}\n"
+                f"Avatar: {profile.get('avatar') or 'Default'}\n"
+                f"Status: {signed}\n\nThis profile is stored locally; it is not an Xbox Live account."
+            )
         elif action == 'Social Apps':
             self._menu('Social Apps', ['Friends', 'Messages', 'LAN Chat', 'LAN Status', 'P2P Internet Help', 'Party', 'Beacons', 'Avatar Store'])
         elif action == 'Friends':
@@ -11338,7 +11745,7 @@ exit 0
             ])
         elif action == 'Service Manager':
             self._menu('Service Manager', [
-                'Service Status', 'Web Start', 'Web Stop', 'Web Status', 'Restart Dashboard Service'
+                'Service Status', 'Web Start', 'Web Stop', 'Web Status', 'Dashboard Service Status'
             ])
         elif action == 'Service Status':
             self._run_terminal(f'"{xui}/bin/xui_service_status.sh"')
@@ -11544,9 +11951,9 @@ exit 0
             self._run_terminal(f'"{xui}/bin/xui_restore_last_backup.sh"')
         elif action == 'Plugin Manager':
             self._run_terminal(f'"{xui}/bin/xui_plugin_mgr.sh" list')
-        elif action == 'Restart Dashboard Service':
-            out = subprocess.getoutput('/bin/sh -c "systemctl --user restart xui-dashboard.service 2>&1 || true"')
-            self._msg('Dashboard Service', out or 'Restart requested.')
+        elif action == 'Dashboard Service Status':
+            out = subprocess.getoutput('/bin/sh -c "systemctl --user is-active xui-dashboard.service 2>&1 || true"')
+            self._msg('Dashboard Service', f'Service status: {out or "unknown"}\nXUI was not restarted.')
         elif action == 'Gamepad Test':
             self._run_terminal(f'"{xui}/bin/xui_gamepad_test.sh"')
         elif action == 'Controller Probe':
@@ -11592,10 +11999,10 @@ exit 0
             self._msg('Family', out or 'No profiles found.')
         elif action == 'Turn Off':
             if self._ask_yes_no('Turn Off', 'Apagar dashboard y salir?'):
-                QtWidgets.QApplication.quit()
+                self._request_application_exit()
         elif action == 'Exit':
             if self._ask_yes_no('Exit', 'Salir al escritorio?'):
-                QtWidgets.QApplication.quit()
+                self._request_application_exit()
         else:
             q = urllib.parse.quote_plus(str(action or '').strip())
             if q:
@@ -11712,6 +12119,15 @@ exit 0
             pass
 
     def closeEvent(self, e):
+        if not self._allow_exit:
+            e.ignore()
+            try:
+                self.showFullScreen()
+                self.raise_()
+                self.activateWindow()
+            except Exception:
+                pass
+            return
         try:
             if self._mandatory_update_timer is not None:
                 self._mandatory_update_timer.stop()
@@ -11786,7 +12202,7 @@ exit 0
                 self.update_focus()
                 return
             if self._ask_yes_no('Exit', 'Salir al escritorio?'):
-                QtWidgets.QApplication.quit()
+                self._request_application_exit()
             return
         if self._tab_animating:
             return
@@ -11898,6 +12314,7 @@ def main():
             pass
     app = QtWidgets.QApplication(sys.argv)
     app.setApplicationName('XUI Xbox Style')
+    app.setQuitOnLastWindowClosed(False)
     if ultra_low_ram:
         try:
             QtGui.QPixmapCache.setCacheLimit(6144)
@@ -13505,7 +13922,7 @@ def _action_seed():
         'Network Info', 'Disk Usage', 'Battery Info', 'Diagnostics', 'HTTP Server', 'Torrent',
         'Kodi', 'Screen Recorder', 'Clipboard Tool', 'Logs Viewer', 'JSON Browser', 'Archive Manager',
         'Hash Tool', 'Ping Test', 'Docker Status', 'VM Status', 'Emoji Picker', 'Cron Manager',
-        'Backup Data', 'Restore Last Backup', 'Plugin Manager', 'Restart Dashboard Service',
+        'Backup Data', 'Restore Last Backup', 'Plugin Manager', 'Dashboard Service Status',
         'Gamepad Test', 'Controller Probe', 'Controller Mappings', 'Controller L4T Fix',
         'Controller Profile', 'WiFi Toggle', 'Bluetooth Toggle', 'Power Profile', 'Battery Saver',
         'Update Check', 'System Update', 'Family', 'Turn Off', 'Exit', 'Canjear codigo', 'Logros',
@@ -22548,9 +22965,20 @@ BASH
 set -euo pipefail
 PID_FILE="$HOME/.xui/data/active_game.pid"
 PAUSED_FILE="$HOME/.xui/data/active_paused.pid"
+is_dashboard_pid(){
+    local candidate="$1" command_line
+    [[ "$candidate" =~ ^[0-9]+$ ]] || return 1
+    [[ -r "/proc/$candidate/cmdline" ]] || return 1
+    command_line="$(tr '\0' ' ' < "/proc/$candidate/cmdline" 2>/dev/null || true)"
+    [[ "$command_line" =~ pyqt_dashboard_improved\.py|xui_startup_and_dashboard|xui-dashboard\.service ]]
+}
 if [ -f "$PID_FILE" ]; then
   pid="$(cat "$PID_FILE" 2>/dev/null || true)"
-  if [ -n "${pid:-}" ] && kill -0 "$pid" 2>/dev/null; then
+    if [[ "$pid" =~ ^[0-9]+$ ]] && kill -0 "$pid" 2>/dev/null; then
+        if is_dashboard_pid "$pid"; then
+            echo "Tracked PID points to XUI dashboard; refusing to terminate it."
+            exit 1
+        fi
     kill "$pid" >/dev/null 2>&1 || true
     sleep 0.3
     kill -9 "$pid" >/dev/null 2>&1 || true
@@ -22575,6 +23003,10 @@ if echo "$name" | grep -Eiq 'xui|dashboard'; then
   exit 1
 fi
 pid="$(xdotool getwindowpid "$wid" 2>/dev/null || true)"
+if [ -n "${pid:-}" ] && is_dashboard_pid "$pid"; then
+    echo "Active window belongs to the XUI dashboard; refusing to close it."
+    exit 1
+fi
 xdotool windowactivate "$wid" key --clearmodifiers Alt+F4 >/dev/null 2>&1 || true
 sleep 0.3
 if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
