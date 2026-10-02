@@ -310,6 +310,7 @@ parse_args(){
     XUI_ONLY_REFRESH_CONTROLLERS=0
     XUI_EXPORT_WIN=0
     XUI_ONLY_EXPORT_WIN=0
+    XUI_SKIP_XENIA=0
     while [ "$#" -gt 0 ]; do
         case "$1" in
             --yes-install|-y)
@@ -320,6 +321,10 @@ parse_args(){
             --no-auto-install)
                 AUTO_INSTALL_TOOLS=0
                 XUI_INSTALL_SYSTEM=0
+                shift
+                ;;
+            --skip-xenia)
+                XUI_SKIP_XENIA=1
                 shift
                 ;;
             --use-external-dashboard)
@@ -357,14 +362,14 @@ parse_args(){
                 shift
                 ;;
             --help|-h)
-                echo "Usage: $0 [--yes-install|-y] [--no-auto-install] [--use-external-dashboard] [--skip-apt-wait] [--apt-wait-seconds N] [--refresh-store-ui] [--refresh-controllers] [--export-win] [--export-win-only]"; exit 0 ;;
+                echo "Usage: $0 [--yes-install|-y] [--no-auto-install] [--skip-xenia] [--use-external-dashboard] [--skip-apt-wait] [--apt-wait-seconds N] [--refresh-store-ui] [--refresh-controllers] [--export-win] [--export-win-only]"; exit 0 ;;
             *)
                 warn "Ignoring unknown argument: $1"
                 shift
                 ;;
         esac
     done
-    export AUTO_INSTALL_TOOLS XUI_INSTALL_SYSTEM XUI_USE_EXTERNAL_DASHBOARD XUI_SKIP_APT_WAIT XUI_APT_WAIT_SECONDS XUI_ONLY_REFRESH_STORE XUI_ONLY_REFRESH_CONTROLLERS XUI_EXPORT_WIN XUI_ONLY_EXPORT_WIN
+    export AUTO_INSTALL_TOOLS XUI_INSTALL_SYSTEM XUI_USE_EXTERNAL_DASHBOARD XUI_SKIP_APT_WAIT XUI_APT_WAIT_SECONDS XUI_ONLY_REFRESH_STORE XUI_ONLY_REFRESH_CONTROLLERS XUI_EXPORT_WIN XUI_ONLY_EXPORT_WIN XUI_SKIP_XENIA
 }
 
 ensure_dirs(){
@@ -9365,12 +9370,12 @@ class Dashboard(QtWidgets.QMainWindow):
         self._games_inline.hide()
 
         main_bg = (
-            '#0b1219'
+            '#8f959c'
             if self._low_power_ui
-            else 'qlineargradient(x1:0.0,y1:0.0,x2:0.0,y2:1.0, stop:0 #08111b, stop:0.52 #101b25, stop:1 #17232c)'
+            else 'qlineargradient(x1:0.0,y1:0.0,x2:0.0,y2:1.0, stop:0 #4f555d, stop:0.44 #858b92, stop:1 #d7dbe0)'
         )
-        stage_bg = 'rgba(12,20,29,0.42)' if self._low_power_ui else 'rgba(8,15,22,0.32)'
-        stage_border = 'rgba(255,255,255,0.08)' if self._low_power_ui else 'rgba(255,255,255,0.11)'
+        stage_bg = 'rgba(255,255,255,0.03)' if self._low_power_ui else 'rgba(255,255,255,0.06)'
+        stage_border = 'rgba(255,255,255,0.08)' if self._low_power_ui else 'rgba(255,255,255,0.10)'
         self.setStyleSheet(
             f'''
             QMainWindow {{
@@ -9902,6 +9907,27 @@ class Dashboard(QtWidgets.QMainWindow):
                 'install': 'Install RetroArch',
                 'uninstall': '',
                 'desc': 'RetroArch integration for local ROM libraries.',
+            },
+            {
+                'label': 'Xenia Canary',
+                'play': 'Xenia Canary',
+                'install': 'Install Xenia Canary',
+                'uninstall': '',
+                'desc': 'Launch the official Xenia Canary emulator for local Xbox 360 game dumps.',
+            },
+            {
+                'label': 'Xbox 360 Game Dump',
+                'play': 'Launch Xbox 360 Game Dump',
+                'install': '',
+                'uninstall': '',
+                'desc': 'Choose an owned ISO or XEX dump and open it in Xenia Canary.',
+            },
+            {
+                'label': 'Xbox 360 DVD Drive',
+                'play': 'Xbox 360 DVD Info',
+                'install': '',
+                'uninstall': '',
+                'desc': 'Inspect optical drives and read the Xenia disc compatibility note.',
             },
             {
                 'label': 'FNAE',
@@ -10826,6 +10852,11 @@ exit 0
                 'launch': xui_bin / 'xui_heroic.sh',
                 'install': xui_bin / 'xui_install_heroic.sh',
             },
+            'xenia-canary': {
+                'label': 'Xenia Canary',
+                'launch': xui_bin / 'xui_xenia_canary.sh',
+                'install': xui_bin / 'xui_install_xenia_canary.sh',
+            },
         }
 
     def _platform_available(self, launch_script):
@@ -11468,7 +11499,7 @@ exit 0
         elif action == 'My Pins':
             self._menu('My Pins', ['Casino', 'Runner', 'Gem Match', 'FNAE', 'Store', 'Web Browser', 'System Info', 'Web Control'])
         elif action == 'My Games':
-            self._menu('My Games', ['Runner', 'Casino', 'Gem Match', 'FNAE', 'Steam', 'RetroArch', 'Games Integrations'])
+            self._menu('My Games', ['Runner', 'Casino', 'Gem Match', 'FNAE', 'Xenia Canary', 'Launch Xbox 360 Game Dump', 'Xbox 360 DVD Info', 'Steam', 'RetroArch', 'Games Integrations'])
         elif action in ('Browse Games', 'Browse'):
             self._menu('Browse Games', ['Games Marketplace', 'Game Marketplace', 'Indie Channel', 'Steam', 'RetroArch', 'Store'])
         elif action == 'Xbox Home Feed':
@@ -11656,6 +11687,58 @@ exit 0
                 self._msg('FNAE', 'FNAE files removed from local install.')
         elif action == 'Steam':
             self._launch_platform('steam')
+        elif action == 'Xenia Canary':
+            self._launch_platform('xenia-canary')
+        elif action == 'Install Xenia Canary':
+            self._install_platform('xenia-canary')
+        elif action == 'Launch Xbox 360 Game Dump':
+            launcher = XUI_HOME / 'bin' / 'xui_xenia_canary.sh'
+            if not self._platform_available(launcher):
+                self._msg('Xenia Canary', 'Xenia Canary is not installed. Install it first; the installer downloads the official build and verifies its SHA-256.')
+                self._install_platform('xenia-canary')
+                return
+            game_path, _selected_filter = QtWidgets.QFileDialog.getOpenFileName(
+                self,
+                'Select an Xbox 360 game dump',
+                str(Path.home()),
+                'Xbox 360 game dumps (*.iso *.xex);;ISO images (*.iso);;XEX executables (*.xex);;All files (*)',
+            )
+            if game_path:
+                self._run(str(launcher), [str(Path(game_path).expanduser())])
+                self._unlock_achievement_event('launch', 'xenia_canary')
+        elif action == 'Xbox 360 DVD Info':
+            optical = []
+            try:
+                probe = subprocess.run(
+                    ['lsblk', '--json', '--output', 'NAME,TYPE,MODEL,MOUNTPOINTS'],
+                    capture_output=True,
+                    text=True,
+                    timeout=4,
+                    check=False,
+                )
+                payload = json.loads(probe.stdout or '{}') if probe.returncode == 0 else {}
+                def collect_optical(rows):
+                    for row in rows if isinstance(rows, list) else []:
+                        if not isinstance(row, dict):
+                            continue
+                        if str(row.get('type') or '').lower() == 'rom':
+                            mounts = row.get('mountpoints')
+                            mount = ', '.join(str(p) for p in mounts if p) if isinstance(mounts, list) else ''
+                            optical.append(f"/dev/{row.get('name', 'sr?')}  {row.get('model') or 'DVD drive'}  {mount or '(not mounted)'}")
+                        collect_optical(row.get('children', []))
+                collect_optical(payload.get('blockdevices', []))
+            except Exception:
+                pass
+            drives = '\n'.join(optical) if optical else 'No optical drive was detected by lsblk.'
+            self._msg(
+                'Xbox 360 DVD / Xenia',
+                f'{drives}\n\n'
+                'Xenia Canary cannot launch an Xbox 360 game directly from a regular PC DVD drive. '
+                'The disc must first be dumped with an Xbox 360 or a compatible dumping drive. '
+                'After that, choose the resulting owned .iso or .xex with “Launch Xbox 360 Game Dump”.\n\n'
+                'Use only game dumps you are legally entitled to use. Official guide: '
+                'https://github.com/xenia-canary/xenia-canary/wiki/Quickstart#how-to-rip-games',
+            )
         elif action in ('Store', 'Avatar Store'):
             self._run('/bin/sh', ['-c', f'{xui}/bin/xui_store.sh'])
         elif action == 'Web Browser':
@@ -27899,6 +27982,140 @@ PY
   info "Installation complete."
 }
 
+write_xenia_canary_tools(){
+  info "Writing Xenia Canary installer and launcher"
+  mkdir -p "$BIN_DIR" "$XUI_DIR/emulators/xenia-canary"
+  cat > "$BIN_DIR/xui_install_xenia_canary.sh" <<'BASH'
+#!/usr/bin/env bash
+set -euo pipefail
+DEST="$HOME/.xui/emulators/xenia-canary"
+APPIMAGE="$DEST/xenia_canary_linux.AppImage"
+VERSION_FILE="$DEST/release.json"
+ARCH="$(uname -m)"
+if [[ "$ARCH" != "x86_64" && "$ARCH" != "amd64" ]]; then
+  echo "Xenia Canary AppImage requires Linux x86_64; detected $ARCH." >&2
+  exit 2
+fi
+mkdir -p "$DEST"
+exec python3 - "$APPIMAGE" "$VERSION_FILE" <<'PY'
+import hashlib
+import json
+import os
+import pathlib
+import sys
+import tempfile
+import urllib.error
+import urllib.request
+
+app = pathlib.Path(sys.argv[1]).expanduser()
+version_file = pathlib.Path(sys.argv[2]).expanduser()
+api = 'https://api.github.com/repos/xenia-canary/xenia-canary/releases/latest'
+request = urllib.request.Request(api, headers={
+    'Accept': 'application/vnd.github+json',
+    'User-Agent': 'XUI-Xenia-Canary-Installer',
+})
+try:
+    with urllib.request.urlopen(request, timeout=15) as response:
+        release = json.load(response)
+except Exception as exc:
+    if app.is_file() and os.access(app, os.X_OK):
+        print(f'GitHub is unavailable; keeping installed Xenia Canary: {exc}')
+        raise SystemExit(0)
+    print(f'Cannot query official Xenia Canary releases: {exc}', file=sys.stderr)
+    raise SystemExit(1)
+
+tag = str(release.get('tag_name') or '').strip()
+asset = next((item for item in release.get('assets', [])
+              if item.get('name') == 'xenia_canary_linux.AppImage'), None)
+if not tag or not isinstance(asset, dict):
+    print('The latest official release has no Linux AppImage asset.', file=sys.stderr)
+    raise SystemExit(1)
+digest = str(asset.get('digest') or '')
+if not digest.startswith('sha256:') or len(digest) != 71:
+    print('GitHub did not provide a valid SHA-256 for the AppImage; refusing to install it.', file=sys.stderr)
+    raise SystemExit(1)
+expected_hash = digest.removeprefix('sha256:').lower()
+url = str(asset.get('browser_download_url') or '')
+if not url.startswith('https://github.com/xenia-canary/xenia-canary/releases/download/'):
+    print('Unexpected release download URL; refusing to install.', file=sys.stderr)
+    raise SystemExit(1)
+try:
+    installed = json.loads(version_file.read_text(encoding='utf-8'))
+except Exception:
+    installed = {}
+if app.is_file() and os.access(app, os.X_OK) and installed.get('tag') == tag:
+    print(f'Xenia Canary {tag} is already installed.')
+    raise SystemExit(0)
+
+app.parent.mkdir(parents=True, exist_ok=True)
+fd, temporary_name = tempfile.mkstemp(prefix='.xenia-canary-', suffix='.AppImage', dir=app.parent)
+temporary = pathlib.Path(temporary_name)
+hasher = hashlib.sha256()
+total = 0
+try:
+    request = urllib.request.Request(url, headers={'User-Agent': 'XUI-Xenia-Canary-Installer'})
+    with os.fdopen(fd, 'wb') as output, urllib.request.urlopen(request, timeout=60) as response:
+        while True:
+            chunk = response.read(1024 * 1024)
+            if not chunk:
+                break
+            total += len(chunk)
+            if total > 512 * 1024 * 1024:
+                raise RuntimeError('AppImage exceeded the 512 MiB safety limit.')
+            hasher.update(chunk)
+            output.write(chunk)
+        output.flush()
+        os.fsync(output.fileno())
+    if total < 1024 * 1024:
+        raise RuntimeError('Downloaded AppImage is unexpectedly small.')
+    actual_hash = hasher.hexdigest().lower()
+    if actual_hash != expected_hash:
+        raise RuntimeError(f'SHA-256 verification failed (expected {expected_hash}, got {actual_hash}).')
+    temporary.chmod(0o755)
+    temporary.replace(app)
+    version_file.write_text(json.dumps({
+        'tag': tag,
+        'asset': asset['name'],
+        'sha256': actual_hash,
+        'source': url,
+    }, indent=2) + '\n', encoding='utf-8')
+    print(f'Installed verified Xenia Canary {tag} at {app}')
+except Exception as exc:
+    try:
+        temporary.unlink(missing_ok=True)
+    except Exception:
+        pass
+    print(f'Xenia Canary installation failed: {exc}', file=sys.stderr)
+    raise SystemExit(1)
+PY
+BASH
+  chmod +x "$BIN_DIR/xui_install_xenia_canary.sh"
+
+  cat > "$BIN_DIR/xui_xenia_canary.sh" <<'BASH'
+#!/usr/bin/env bash
+set -euo pipefail
+APPIMAGE="$HOME/.xui/emulators/xenia-canary/xenia_canary_linux.AppImage"
+INSTALLER="$HOME/.xui/bin/xui_install_xenia_canary.sh"
+case "${1:-}" in
+  --check)
+    [[ -x "$APPIMAGE" ]]
+    exit $?
+    ;;
+  --install)
+    exec "$INSTALLER"
+    ;;
+esac
+if [[ ! -x "$APPIMAGE" ]]; then
+  echo "Xenia Canary is not installed. Run: $INSTALLER" >&2
+  exit 1
+fi
+# Fallback extracts AppImages without requiring system-wide FUSE installation.
+export APPIMAGE_EXTRACT_AND_RUN=1
+exec "$APPIMAGE" "$@"
+BASH
+  chmod +x "$BIN_DIR/xui_xenia_canary.sh"
+}
+
 main(){
   parse_args "$@"
   if [ "${XUI_ONLY_EXPORT_WIN:-0}" = "1" ]; then
@@ -27957,6 +28174,19 @@ main(){
         write_web_control
         write_theme_toggle
         install_compat_layer
+        write_xenia_canary_tools
+        if [ "${XUI_SKIP_XENIA:-0}" != "1" ]; then
+            case "$(uname -m)" in
+                x86_64|amd64)
+                    "$BIN_DIR/xui_install_xenia_canary.sh" || warn "Xenia Canary auto-install failed; run ~/.xui/bin/xui_install_xenia_canary.sh later"
+                    ;;
+                *)
+                    info "Skipping Xenia Canary AppImage auto-install: Linux x86_64 is required"
+                    ;;
+            esac
+        else
+            info "Skipping Xenia Canary auto-install (--skip-xenia)"
+        fi
         write_battery_tools
         write_even_more_apps
   if [ "${XUI_EXPORT_WIN:-0}" = "1" ]; then
