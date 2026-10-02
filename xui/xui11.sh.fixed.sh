@@ -3730,10 +3730,10 @@ class SocialOverlay(QtWidgets.QDialog):
         if k in (QtCore.Qt.Key_Escape, QtCore.Qt.Key_Back):
             self.reject()
             return
-        if k in (QtCore.Qt.Key_Prior,):
+        if k in (QtCore.Qt.Key_PageUp,):
             self._cycle_community_mode(-1)
             return
-        if k in (QtCore.Qt.Key_Next,):
+        if k in (QtCore.Qt.Key_PageDown,):
             self._cycle_community_mode(1)
             return
         if k in (QtCore.Qt.Key_Y, QtCore.Qt.Key_Space):
@@ -5841,8 +5841,8 @@ class QuickMenu(QtWidgets.QDialog):
         if k in (QtCore.Qt.Key_Return, QtCore.Qt.Key_Enter):
             self.accept()
             return
-        if k in (QtCore.Qt.Key_Prior, QtCore.Qt.Key_Next):
-            step = -8 if k == QtCore.Qt.Key_Prior else 8
+        if k in (QtCore.Qt.Key_PageUp, QtCore.Qt.Key_PageDown):
+            step = -8 if k == QtCore.Qt.Key_PageUp else 8
             n = int(self.listw.count())
             if n > 0:
                 row = int(self.listw.currentRow())
@@ -6092,10 +6092,10 @@ class GamesHubMenu(QtWidgets.QDialog):
         if e.key() in (QtCore.Qt.Key_Return, QtCore.Qt.Key_Enter):
             self._accept_current()
             return
-        if e.key() in (QtCore.Qt.Key_Prior, QtCore.Qt.Key_Next):
+        if e.key() in (QtCore.Qt.Key_PageUp, QtCore.Qt.Key_PageDown):
             n = int(self.listw.count())
             if n > 0:
-                step = -7 if e.key() == QtCore.Qt.Key_Prior else 7
+                step = -7 if e.key() == QtCore.Qt.Key_PageUp else 7
                 row = int(self.listw.currentRow())
                 if row < 0:
                     row = 0
@@ -7386,10 +7386,10 @@ class XboxGuideMenu(QtWidgets.QDialog):
         if k in (QtCore.Qt.Key_X, QtCore.Qt.Key_Space):
             self._sign_out()
             return
-        if k in (QtCore.Qt.Key_Prior, QtCore.Qt.Key_PageUp, QtCore.Qt.Key_BracketLeft):
+        if k in (QtCore.Qt.Key_PageUp, QtCore.Qt.Key_BracketLeft):
             self._cycle_section(-1)
             return
-        if k in (QtCore.Qt.Key_Next, QtCore.Qt.Key_PageDown, QtCore.Qt.Key_BracketRight):
+        if k in (QtCore.Qt.Key_PageDown, QtCore.Qt.Key_BracketRight):
             self._cycle_section(1)
             return
         if k in (QtCore.Qt.Key_Escape, QtCore.Qt.Key_Back, QtCore.Qt.Key_B):
@@ -7655,10 +7655,10 @@ class GamesInlineOverlay(QtWidgets.QFrame):
         if k == QtCore.Qt.Key_Tab:
             self._uninstall_current()
             return
-        if k in (QtCore.Qt.Key_Prior, QtCore.Qt.Key_Next):
+        if k in (QtCore.Qt.Key_PageUp, QtCore.Qt.Key_PageDown):
             n = int(self.listw.count())
             if n > 0:
-                step = -6 if k == QtCore.Qt.Key_Prior else 6
+                step = -6 if k == QtCore.Qt.Key_PageUp else 6
                 row = int(self.listw.currentRow())
                 if row < 0:
                     row = 0
@@ -8804,10 +8804,10 @@ class AchievementsHubDialog(QtWidgets.QDialog):
         if e.key() in (QtCore.Qt.Key_Return, QtCore.Qt.Key_Enter):
             self._show_current_detail()
             return
-        if e.key() in (QtCore.Qt.Key_Prior, QtCore.Qt.Key_Next):
+        if e.key() in (QtCore.Qt.Key_PageUp, QtCore.Qt.Key_PageDown):
             n = int(self.listw.count())
             if n > 0:
-                step = -8 if e.key() == QtCore.Qt.Key_Prior else 8
+                step = -8 if e.key() == QtCore.Qt.Key_PageUp else 8
                 row = int(self.listw.currentRow())
                 if row < 0:
                     row = 0
@@ -9222,6 +9222,7 @@ class Dashboard(QtWidgets.QMainWindow):
         self._tab_anim_group = None
         self._tab_anim_watchdog = None
         self._tab_anim_generation = 0
+        self._tab_transition_overlay = None
         self._visible_page_idx = 0
         self._last_responsive_key = None
         self._web_windows = []
@@ -9341,7 +9342,7 @@ class Dashboard(QtWidgets.QMainWindow):
         self.page_stack = QtWidgets.QStackedWidget()
         sl = self.page_stack.layout()
         if isinstance(sl, QtWidgets.QStackedLayout):
-            # Keep a single visible page in steady state; StackAll is used only during tab animation.
+            # Keep only the selected dashboard page visible; transitions use a temporary snapshot overlay.
             sl.setStackingMode(QtWidgets.QStackedLayout.StackOne)
         for tab_name in self.tabs:
             page = DashboardPage(tab_name, self.page_specs[tab_name], self)
@@ -9567,6 +9568,15 @@ class Dashboard(QtWidgets.QMainWindow):
         except Exception:
             pass
         self._normalize_page_visibility(to_idx)
+        overlay = self._tab_transition_overlay
+        self._tab_transition_overlay = None
+        if overlay is not None:
+            try:
+                overlay.hide()
+                overlay.setGraphicsEffect(None)
+                overlay.deleteLater()
+            except Exception:
+                pass
         wd = self._tab_anim_watchdog
         self._tab_anim_watchdog = None
         if wd is not None:
@@ -9592,7 +9602,17 @@ class Dashboard(QtWidgets.QMainWindow):
             self._normalize_page_visibility(to_idx)
             self.update_focus()
             return
+        from_w = self.page_stack.widget(from_idx)
         to_w = self.page_stack.widget(to_idx)
+        page_rect = self.page_stack.rect()
+        snapshot = None
+        if not self._ultra_low_ram and page_rect.width() > 0 and page_rect.height() > 0:
+            try:
+                snapshot = from_w.grab()
+                if snapshot.isNull():
+                    snapshot = None
+            except Exception:
+                snapshot = None
         self._tab_anim_generation += 1
         generation = self._tab_anim_generation
         self._tab_animating = True
@@ -9606,15 +9626,42 @@ class Dashboard(QtWidgets.QMainWindow):
         self._normalize_page_visibility(to_idx)
         self._tab_anim_group = QtCore.QParallelAnimationGroup(self)
         effect = QtWidgets.QGraphicsOpacityEffect(to_w)
-        effect.setOpacity(0.72)
+        effect.setOpacity(0.90 if snapshot is not None else 0.76)
         to_w.setGraphicsEffect(effect)
-        duration = 120 if self._low_power_ui else 175
+        duration = 235 if self._low_power_ui else 300
         fade_in = QtCore.QPropertyAnimation(effect, b'opacity', self._tab_anim_group)
         fade_in.setDuration(duration)
-        fade_in.setStartValue(0.72)
+        fade_in.setStartValue(0.90 if snapshot is not None else 0.76)
         fade_in.setEndValue(1.0)
         fade_in.setEasingCurve(QtCore.QEasingCurve.OutCubic)
         self._tab_anim_group.addAnimation(fade_in)
+
+        if snapshot is not None:
+            overlay = QtWidgets.QLabel(self.page_stack)
+            overlay.setAttribute(QtCore.Qt.WA_TransparentForMouseEvents, True)
+            overlay.setAttribute(QtCore.Qt.WA_OpaquePaintEvent, True)
+            overlay.setPixmap(snapshot)
+            overlay.setGeometry(page_rect)
+            overlay.show()
+            overlay.raise_()
+            self._tab_transition_overlay = overlay
+            overlay_effect = QtWidgets.QGraphicsOpacityEffect(overlay)
+            overlay_effect.setOpacity(1.0)
+            overlay.setGraphicsEffect(overlay_effect)
+            direction = 1 if to_idx > from_idx else -1
+            travel = max(54, min(180, int(page_rect.width() * 0.14)))
+            slide = QtCore.QPropertyAnimation(overlay, b'pos', self._tab_anim_group)
+            slide.setDuration(duration)
+            slide.setStartValue(QtCore.QPoint(page_rect.x(), page_rect.y()))
+            slide.setEndValue(QtCore.QPoint(page_rect.x() - (direction * travel), page_rect.y()))
+            slide.setEasingCurve(QtCore.QEasingCurve.OutCubic)
+            fade_out = QtCore.QPropertyAnimation(overlay_effect, b'opacity', self._tab_anim_group)
+            fade_out.setDuration(duration)
+            fade_out.setStartValue(1.0)
+            fade_out.setEndValue(0.0)
+            fade_out.setEasingCurve(QtCore.QEasingCurve.OutCubic)
+            self._tab_anim_group.addAnimation(slide)
+            self._tab_anim_group.addAnimation(fade_out)
 
         def done():
             self._finish_tab_animation(generation, to_idx)
@@ -25398,10 +25445,10 @@ class SocialChatWindow(QtWidgets.QWidget):
         if k in (QtCore.Qt.Key_Escape, QtCore.Qt.Key_Back):
             self.close()
             return
-        if k in (QtCore.Qt.Key_Prior,):
+        if k in (QtCore.Qt.Key_PageUp,):
             self._cycle_community_mode(-1)
             return
-        if k in (QtCore.Qt.Key_Next,):
+        if k in (QtCore.Qt.Key_PageDown,):
             self._cycle_community_mode(1)
             return
         if k in (QtCore.Qt.Key_Y, QtCore.Qt.Key_Space):
