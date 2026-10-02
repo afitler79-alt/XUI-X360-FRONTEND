@@ -2085,7 +2085,7 @@ def play_media(path, video=False, blocking=False):
         if probes.get('mpv'):
             cmd = ['mpv', '--really-quiet', '--no-terminal']
             if video:
-                cmd.extend(['--fullscreen', '--ontop'])
+                cmd.extend(['--fullscreen', '--ontop', '--loop-file=no'])
             else:
                 cmd.append('--no-video')
             cmd.append(str(p))
@@ -8140,7 +8140,6 @@ class DashboardPage(QtWidgets.QWidget):
         self.right_layout = None
         self._last_apply_key = None
         self._build()
-        self._setup_guide_shortcuts()
 
     def _build_tiles(self, defs, target, layout, alignment=QtCore.Qt.AlignLeft, tile_opts=None):
         opts = dict(tile_opts or {})
@@ -9262,6 +9261,7 @@ class Dashboard(QtWidgets.QMainWindow):
         self._install_task_launch_cmd = ''
         self._install_task_label = 'App'
         self._guide_open_last_at = 0.0
+        self._guide_shortcuts = []
         self._games_inline = None
         self._qgamepads = {}
         self._gp_last_emit = {}
@@ -9305,6 +9305,7 @@ class Dashboard(QtWidgets.QMainWindow):
             'achievement': ['archievements.mp3', 'achievement.mp3', 'select.mp3'],
         }
         self._build()
+        self._setup_guide_shortcuts()
         self._setup_achievement_toast()
         try:
             ensure_achievements(5000)
@@ -12596,7 +12597,6 @@ play_video(){
   fi
   return 1
 }
-PLAYED_STARTUP=0
 if [ -f "$ASSETS_DIR/startup.mp4" ]; then
   info "Playing startup video"
   if play_video "$ASSETS_DIR/startup.mp4"; then
@@ -20617,6 +20617,10 @@ SETUP_SCRIPT="$TARGET_HOME/.xui/bin/xui_first_setup.py"
 SETUP_STATE="$TARGET_HOME/.xui/data/setup_state.json"
 PY_RUNNER="$TARGET_HOME/.xui/bin/xui_python.sh"
 LOCK_FILE="$TARGET_HOME/.xui/data/dashboard-session.lock"
+SESSION_STATE_DIR="${XDG_RUNTIME_DIR:-$TARGET_HOME/.xui/data}"
+SESSION_KEY="${XDG_SESSION_ID:-$(cat /proc/sys/kernel/random/boot_id 2>/dev/null || echo boot)}"
+SESSION_KEY="$(printf '%s' "$SESSION_KEY" | tr -c 'A-Za-z0-9._-' '_')"
+STARTUP_VIDEO_STATE="$SESSION_STATE_DIR/xui-startup-video-${UID:-$(id -u)}-${SESSION_KEY}.done"
 
 info(){ echo -e "\e[34m[INFO]\e[0m $*"; }
 warn(){ echo -e "\e[33m[WARN]\e[0m $*" >&2; }
@@ -20661,7 +20665,7 @@ play_video(){
     local file="$1"
     if [ ! -f "$file" ]; then return 1; fi
     if command -v mpv >/dev/null 2>&1; then
-        mpv --no-terminal --really-quiet --fullscreen "$file"
+        mpv --no-terminal --really-quiet --fullscreen --loop-file=no "$file"
         return $?
     elif command -v ffplay >/dev/null 2>&1; then
         ffplay -autoexit -fs -loglevel quiet "$file"
@@ -20720,11 +20724,16 @@ PY
 # Play startup video (blocking) if present
 PLAYED_STARTUP=0
 if [ -f "$ASSETS_DIR/startup.mp4" ]; then
-    info "Playing startup video"
-    if play_video "$ASSETS_DIR/startup.mp4"; then
-        PLAYED_STARTUP=1
+    if [ "${XUI_FORCE_STARTUP_VIDEO:-0}" = "1" ] || [ ! -f "$STARTUP_VIDEO_STATE" ]; then
+        info "Playing startup video once for this session"
+        if play_video "$ASSETS_DIR/startup.mp4"; then
+            mkdir -p "$SESSION_STATE_DIR" 2>/dev/null || true
+            : > "$STARTUP_VIDEO_STATE" 2>/dev/null || true
+        else
+            warn "Startup video could not be played; continuing directly to dashboard."
+        fi
     else
-        warn "Startup video playback failed; dashboard fallback will try again."
+        info "Startup video already played this session; skipping playback."
     fi
 fi
 
@@ -20734,14 +20743,9 @@ if [ ! -f "$DASH_SCRIPT" ]; then
     warn "Dashboard script not found: $DASH_SCRIPT"
     exit 1
 fi
+export XUI_SKIP_STARTUP_VIDEO=1
 if [ -x "$PY_RUNNER" ]; then
-    if [ "$PLAYED_STARTUP" = "1" ]; then
-        export XUI_SKIP_STARTUP_VIDEO=1
-    fi
     exec "$PY_RUNNER" "$DASH_SCRIPT"
-fi
-if [ "$PLAYED_STARTUP" = "1" ]; then
-    export XUI_SKIP_STARTUP_VIDEO=1
 fi
 exec python3 "$DASH_SCRIPT"
 SH
@@ -26684,23 +26688,31 @@ BASH
         cat > "$BIN_DIR/xui_update_system.sh" <<'BASH'
 #!/usr/bin/env bash
 set -euo pipefail
-if [ "${XUI_INSTALL_SYSTEM:-0}" != "1" ]; then
-  echo "Run installer with --yes-install to allow system updates"
-  exit 1
-fi
+as_root(){
+    if [ "$(id -u)" -eq 0 ]; then
+        "$@"
+    elif command -v sudo >/dev/null 2>&1; then
+        sudo "$@"
+    elif command -v pkexec >/dev/null 2>&1; then
+        pkexec "$@"
+    else
+        echo "System updates need root privileges; install sudo or polkit (pkexec)." >&2
+        return 1
+    fi
+}
+
 if command -v apt >/dev/null 2>&1; then
-  sudo apt update && sudo apt upgrade -y
+    as_root apt-get update
+    as_root apt-get upgrade -y
 elif command -v dnf >/dev/null 2>&1; then
-  sudo dnf upgrade -y
+    as_root dnf upgrade -y
 elif command -v pacman >/dev/null 2>&1; then
-  sudo pacman -Syu --noconfirm
+    as_root pacman -Syu --noconfirm
 else
-  echo "Unsupported package manager"
+    echo "Unsupported package manager (supported: apt, dnf, pacman)." >&2
   exit 1
 fi
-if [ -x "$HOME/.xui/bin/xui_install_fnae_deps.sh" ]; then
-  "$HOME/.xui/bin/xui_install_fnae_deps.sh" || true
-fi
+echo "System package update completed."
 BASH
         chmod +x "$BIN_DIR/xui_update_system.sh"
 
