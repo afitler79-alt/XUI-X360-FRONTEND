@@ -7868,6 +7868,7 @@ class WebKioskWindow(QtWidgets.QMainWindow):
             self._guide_keys.add(key_super_l)
         if key_super_r is not None:
             self._guide_keys.add(key_super_r)
+        self._guide_shortcuts = []
         self._setup_gamepad()
 
     def _configure_web_runtime(self):
@@ -8139,6 +8140,7 @@ class DashboardPage(QtWidgets.QWidget):
         self.right_layout = None
         self._last_apply_key = None
         self._build()
+        self._setup_guide_shortcuts()
 
     def _build_tiles(self, defs, target, layout, alignment=QtCore.Qt.AlignLeft, tile_opts=None):
         opts = dict(tile_opts or {})
@@ -9326,6 +9328,13 @@ class Dashboard(QtWidgets.QMainWindow):
                     seen.add(action)
                     out.append(action)
         return out
+
+    def _setup_guide_shortcuts(self):
+        for sequence in ('F1', 'Ctrl+G'):
+            shortcut = QtWidgets.QShortcut(QtGui.QKeySequence(sequence), self)
+            shortcut.setContext(QtCore.Qt.ApplicationShortcut)
+            shortcut.activated.connect(self._show_xbox_guide)
+            self._guide_shortcuts.append(shortcut)
 
     def _build(self):
         root = QtWidgets.QWidget()
@@ -12228,9 +12237,12 @@ exit 0
             gp.buttonLeftChanged.connect(lambda p, did=did: p and self._gp_emit(QtCore.Qt.Key_Left, channel=f'{did}_dl'))
             gp.buttonRightChanged.connect(lambda p, did=did: p and self._gp_emit(QtCore.Qt.Key_Right, channel=f'{did}_dr'))
 
-            if hasattr(gp, 'buttonGuideChanged'):
-                gp.buttonGuideChanged.connect(lambda p, did=did: p and self._gp_emit(QtCore.Qt.Key_F1, channel=f'{did}_guide'))
-            gp.buttonCenterChanged.connect(lambda p, did=did: p and self._gp_emit(QtCore.Qt.Key_F1, channel=f'{did}_center'))
+            guide_signal = getattr(gp, 'buttonGuideChanged', None)
+            if guide_signal is not None:
+                guide_signal.connect(lambda pressed, did=did: pressed and self._show_xbox_guide())
+            center_signal = getattr(gp, 'buttonCenterChanged', None)
+            if center_signal is not None:
+                center_signal.connect(lambda pressed, did=did: pressed and self._show_xbox_guide())
 
             gp.axisLeftXChanged.connect(lambda v, did=did: self._gp_axis('lx', v))
             gp.axisLeftYChanged.connect(lambda v, did=did: self._gp_axis('ly', v))
@@ -12334,6 +12346,9 @@ exit 0
             if self._ask_yes_no('Exit', 'Salir al escritorio?'):
                 self._request_application_exit()
             return
+        if k in self._guide_keys:
+            self._show_xbox_guide()
+            return
         if self._tab_animating:
             return
         page = self._current_page()
@@ -12427,9 +12442,6 @@ exit 0
             else:
                 if page.right_tiles:
                     self.handle_action(page.right_tiles[self.focus_idx].action)
-            return
-        if k in self._guide_keys:
-            self._show_xbox_guide()
             return
         super().keyPressEvent(e)
 
