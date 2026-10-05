@@ -9261,6 +9261,7 @@ class Dashboard(QtWidgets.QMainWindow):
         self._install_task_launch_cmd = ''
         self._install_task_label = 'App'
         self._guide_open_last_at = 0.0
+        self._guide_shortcut_cooldown = 0.35
         self._guide_shortcuts = []
         self._games_inline = None
         self._qgamepads = {}
@@ -9270,13 +9271,16 @@ class Dashboard(QtWidgets.QMainWindow):
         self._gp_axis_release_zone = 0.22
         self._last_audio_ready_at = 0.0
         self._sfx_path_cache = {}
-        self._guide_keys = {QtCore.Qt.Key_F1, QtCore.Qt.Key_Home, QtCore.Qt.Key_Meta}
-        key_super_l = getattr(QtCore.Qt, 'Key_Super_L', None)
-        key_super_r = getattr(QtCore.Qt, 'Key_Super_R', None)
-        if key_super_l is not None:
-            self._guide_keys.add(key_super_l)
-        if key_super_r is not None:
-            self._guide_keys.add(key_super_r)
+        self._guide_keys = {
+            QtCore.Qt.Key_F1,
+            QtCore.Qt.Key_Home,
+            QtCore.Qt.Key_Menu,
+            QtCore.Qt.Key_G,
+            QtCore.Qt.Key_Meta,
+            getattr(QtCore.Qt, 'Key_Super_L', None),
+            getattr(QtCore.Qt, 'Key_Super_R', None),
+        }
+        self._guide_keys = {k for k in self._guide_keys if k is not None}
         self._gc_timer = None
         if self._ultra_low_ram:
             try:
@@ -9330,11 +9334,29 @@ class Dashboard(QtWidgets.QMainWindow):
                     out.append(action)
         return out
 
+    def _trigger_guide_action(self):
+        now = time.monotonic()
+        if now - self._guide_open_last_at < self._guide_shortcut_cooldown:
+            return
+        self._guide_open_last_at = now
+        self._show_xbox_guide()
+
+    def _is_guide_key_event(self, event):
+        key = self._canonical_gamepad_key(event.key())
+        mods = event.modifiers()
+        if key in (QtCore.Qt.Key_F1, QtCore.Qt.Key_Home, QtCore.Qt.Key_Menu):
+            return True
+        if key in self._guide_keys:
+            return True
+        if key == QtCore.Qt.Key_G and mods & (QtCore.Qt.ControlModifier | QtCore.Qt.MetaModifier | QtCore.Qt.AltModifier):
+            return True
+        return False
+
     def _setup_guide_shortcuts(self):
-        for sequence in ('F1', 'Ctrl+G'):
+        for sequence in ('F1', 'Ctrl+G', 'Alt+G', 'Meta+G', 'Home'):
             shortcut = QtWidgets.QShortcut(QtGui.QKeySequence(sequence), self)
             shortcut.setContext(QtCore.Qt.ApplicationShortcut)
-            shortcut.activated.connect(self._show_xbox_guide)
+            shortcut.activated.connect(self._trigger_guide_action)
             self._guide_shortcuts.append(shortcut)
 
     def _build(self):
@@ -12240,10 +12262,10 @@ exit 0
 
             guide_signal = getattr(gp, 'buttonGuideChanged', None)
             if guide_signal is not None:
-                guide_signal.connect(lambda pressed, did=did: pressed and self._show_xbox_guide())
+                guide_signal.connect(lambda pressed, did=did: pressed and self._trigger_guide_action())
             center_signal = getattr(gp, 'buttonCenterChanged', None)
             if center_signal is not None:
-                center_signal.connect(lambda pressed, did=did: pressed and self._show_xbox_guide())
+                center_signal.connect(lambda pressed, did=did: pressed and self._trigger_guide_action())
 
             gp.axisLeftXChanged.connect(lambda v, did=did: self._gp_axis('lx', v))
             gp.axisLeftYChanged.connect(lambda v, did=did: self._gp_axis('ly', v))
@@ -12347,8 +12369,8 @@ exit 0
             if self._ask_yes_no('Exit', 'Salir al escritorio?'):
                 self._request_application_exit()
             return
-        if k in self._guide_keys:
-            self._show_xbox_guide()
+        if self._is_guide_key_event(e):
+            self._trigger_guide_action()
             return
         if self._tab_animating:
             return
