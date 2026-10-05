@@ -7087,7 +7087,7 @@ class XboxGuideMenu(QtWidgets.QDialog):
         return [
             ('Guide', ['Reciente', 'Notifications', 'Mensajes recientes', 'Social global', 'Beacons', 'Mis juegos', 'Descargas activas', 'Canjear codigo']),
             (self.gamertag, ['Friends', 'Party', 'Messages', 'Chat', 'Beacons & Activity']),
-            ('Dash', ['Inicio de Xbox', 'Configuracion', 'Cerrar app actual', 'Cerrar sesion']),
+            ('Dash', ['Inicio de Xbox', 'Quick Control Center', 'System Monitor', 'Network Test', 'Manage Favorites', 'Configuracion', 'Cerrar app actual', 'Cerrar sesion']),
         ]
 
     def _current_list(self):
@@ -9201,15 +9201,16 @@ class Dashboard(QtWidgets.QMainWindow):
                     ('Update Check', 'Update Check', (190, 114)),
                     ('System Update', 'System Update', (190, 114)),
                     ('Setup Wizard', 'Setup Wizard', (190, 114)),
-                    ('Turn Off', 'Turn Off', (190, 114)),
+                    ('Quick Control Center', 'Quick Controls', (190, 114)),
                 ],
                 'right': [
                     ('Account Security', 'Account', (270, 130)),
                     ('Theme Toggle', 'Account', (270, 130)),
                     ('WiFi Toggle', 'WiFi', (270, 130)),
                     ('Battery Info', 'Battery', (270, 130)),
-                    ('Setup Wizard', 'Setup', (270, 130)),
-                    ('Turn Off', 'Turn Off', (270, 130)),
+                    ('Network Test', 'Network Test', (270, 130)),
+                    ('Manage Favorites', 'Favorites', (270, 130)),
+                    ('System Monitor', 'Monitor', (270, 130)),
                 ],
             },
         }
@@ -11178,6 +11179,7 @@ exit 0
             'Open Tray', 'Video Marketplace', 'YouTube', 'Netflix', 'Twitch',
             'Movie Trailers', 'Music Marketplace', 'System Music',
             'System Settings', 'Account Security', 'Network Setup', 'Family', 'Theme Toggle',
+            'Quick Control Center', 'System Monitor', 'Network Test', 'Manage Favorites',
         }
         if name in passthrough:
             self.handle_action(name)
@@ -11504,6 +11506,157 @@ exit 0
                 out[opt] = f'{prefix}: {opt}'
         return out
 
+    def _system_snapshot_text(self):
+        lines = []
+        try:
+            lines.append(f'Platform: {subprocess.check_output(["uname", "-srmo"], text=True, timeout=2).strip()}')
+        except Exception:
+            lines.append(f'Platform: {sys.platform}')
+        try:
+            mem = {}
+            with open('/proc/meminfo', 'r', encoding='utf-8', errors='ignore') as src:
+                for row in src:
+                    key, _, value = row.partition(':')
+                    if key in ('MemTotal', 'MemAvailable'):
+                        mem[key] = int(value.strip().split()[0])
+            total = mem.get('MemTotal', 0) // 1024
+            available = mem.get('MemAvailable', 0) // 1024
+            lines.append(f'Memory: {max(0, total - available)} MB used / {total} MB total')
+        except Exception:
+            lines.append('Memory: not available')
+        try:
+            disk = shutil.disk_usage(Path.home())
+            lines.append(f'Home storage: {disk.free // (1024 ** 3)} GB free / {disk.total // (1024 ** 3)} GB')
+        except Exception:
+            lines.append('Home storage: not available')
+        try:
+            uptime = float(Path('/proc/uptime').read_text().split()[0])
+            hours, rem = divmod(int(uptime), 3600)
+            days, hours = divmod(hours, 24)
+            lines.append(f'System uptime: {days}d {hours}h {rem // 60}m')
+        except Exception:
+            pass
+        lines.append(f'CPU threads: {os.cpu_count() or "unknown"}')
+        return '\n'.join(lines)
+
+    def _show_system_monitor(self):
+        self._msg('System Monitor', self._system_snapshot_text())
+
+    def _network_test(self):
+        results = []
+        for host in ('1.1.1.1', 'example.com'):
+            started = time.perf_counter()
+            try:
+                with socket.create_connection((host, 443), timeout=3):
+                    elapsed = (time.perf_counter() - started) * 1000
+                results.append(f'{host}: reachable ({elapsed:.0f} ms)')
+            except Exception as exc:
+                results.append(f'{host}: failed ({str(exc)[:100]})')
+        self._msg('Network Test', '\n'.join(results))
+
+    def _clean_xui_cache(self):
+        cache_dir = XUI_HOME / 'cache'
+        if cache_dir.is_symlink():
+            self._msg('Clean Cache', 'Cache cleanup skipped because ~/.xui/cache is a symbolic link.')
+            return
+        if not cache_dir.exists():
+            self._msg('Clean Cache', 'There is no XUI cache to clean yet.')
+            return
+        try:
+            size = 0
+            for entry in cache_dir.rglob('*'):
+                if entry.is_file() and not entry.is_symlink():
+                    size += entry.stat().st_size
+            if not self._ask_yes_no('Clean Cache', f'Remove XUI cache files only? This will free about {size / (1024 ** 2):.1f} MB.'):
+                return
+            for entry in cache_dir.iterdir():
+                if entry.is_symlink() or entry.is_file():
+                    entry.unlink(missing_ok=True)
+                elif entry.is_dir():
+                    shutil.rmtree(entry)
+            self._msg('Clean Cache', f'XUI cache cleared ({size / (1024 ** 2):.1f} MB).')
+        except Exception as exc:
+            self._msg('Clean Cache', f'Could not clean XUI cache: {exc}')
+
+    def _manage_favorites(self):
+        favorites_file = DATA_HOME / 'favorites.json'
+        favorites = safe_json_read(favorites_file, [])
+        if not isinstance(favorites, list):
+            favorites = []
+        favorites = list(dict.fromkeys(str(item) for item in favorites if str(item).strip()))[:40]
+        while True:
+            choice = self._choose_from_menu('My Pins', ['Launch favorite', 'Add favorite', 'Remove favorite', 'Cancel'])
+            if choice in (None, 'Cancel'):
+                safe_json_write(favorites_file, favorites)
+                return
+            if choice == 'Add favorite':
+                candidates = [
+                    'My Games', 'Games Marketplace', 'Steam', 'RetroArch', 'Xenia Canary',
+                    'Media Player', 'Music Marketplace', 'Web Browser', 'System Info',
+                    'Quick Control Center', 'Controller Center', 'Missions', 'Achievements',
+                    'Screenshot', 'File Manager', 'Network Test', 'System Monitor',
+                ]
+                available = [item for item in candidates if item not in favorites]
+                if not available:
+                    self._msg('My Pins', 'All supported favorite actions are already pinned.')
+                    continue
+                selected = self._choose_from_menu('Add Favorite', available)
+                if selected:
+                    favorites.append(selected)
+                    safe_json_write(favorites_file, favorites)
+            elif choice == 'Remove favorite':
+                if not favorites:
+                    self._msg('My Pins', 'No favorites to remove.')
+                    continue
+                selected = self._choose_from_menu('Remove Favorite', favorites)
+                if selected in favorites:
+                    favorites.remove(selected)
+                    safe_json_write(favorites_file, favorites)
+            elif choice == 'Launch favorite':
+                if not favorites:
+                    self._msg('My Pins', 'No favorites yet. Add some first.')
+                    continue
+                selected = self._choose_from_menu('Launch Favorite', favorites)
+                if selected:
+                    safe_json_write(favorites_file, favorites)
+                    self.handle_action(selected)
+                    return
+
+    def _show_quick_control_center(self):
+        dialog = QtWidgets.QDialog(self)
+        dialog.setWindowTitle('Quick Control Center')
+        dialog.setModal(True)
+        dialog.resize(660, 500)
+        layout = QtWidgets.QVBoxLayout(dialog)
+        title = QtWidgets.QLabel('Quick Control Center')
+        title.setStyleSheet('font-size:26px; font-weight:800; color:#f4f7fb;')
+        layout.addWidget(title)
+        summary = QtWidgets.QLabel(self._system_snapshot_text())
+        summary.setTextInteractionFlags(QtCore.Qt.TextSelectableByMouse)
+        summary.setStyleSheet('font-size:15px; padding:12px; background:rgba(0,0,0,0.24); border-radius:8px;')
+        layout.addWidget(summary)
+        grid = QtWidgets.QGridLayout()
+        layout.addLayout(grid)
+        actions = [
+            ('System Monitor', 'System Monitor'),
+            ('Network Test', 'Network Test'),
+            ('Screenshot', 'Screenshot'),
+            ('Storage', 'Storage'),
+            ('Controller Center', 'Controller Center'),
+            ('Logs Viewer', 'Logs Viewer'),
+            ('Clean XUI Cache', 'Clean XUI Cache'),
+            ('Update Check', 'Update Check'),
+        ]
+        for index, (label, action) in enumerate(actions):
+            button = QtWidgets.QPushButton(label)
+            button.setMinimumHeight(42)
+            button.clicked.connect(lambda _checked=False, act=action: (dialog.accept(), QtCore.QTimer.singleShot(0, lambda: self.handle_action(act))))
+            grid.addWidget(button, index // 2, index % 2)
+        close_button = QtWidgets.QPushButton('Close')
+        close_button.clicked.connect(dialog.accept)
+        layout.addWidget(close_button)
+        dialog.exec_()
+
     def handle_action(self, action):
         self._save_recent(action)
         self._play_sfx('select')
@@ -11529,7 +11682,17 @@ exit 0
         elif action == 'Open Tray':
             self._open_tray_dashboard_menu()
         elif action == 'My Pins':
-            self._menu('My Pins', ['Casino', 'Runner', 'Gem Match', 'FNAE', 'Store', 'Web Browser', 'System Info', 'Web Control'])
+            self._manage_favorites()
+        elif action == 'Manage Favorites':
+            self._manage_favorites()
+        elif action == 'Quick Control Center':
+            self._show_quick_control_center()
+        elif action == 'System Monitor':
+            self._show_system_monitor()
+        elif action == 'Network Test':
+            self._network_test()
+        elif action == 'Clean XUI Cache':
+            self._clean_xui_cache()
         elif action == 'My Games':
             self._menu('My Games', ['Runner', 'Casino', 'Gem Match', 'FNAE', 'Xenia Canary', 'Launch Xbox 360 Game Dump', 'Xbox 360 DVD Info', 'Steam', 'RetroArch', 'Games Integrations'])
         elif action in ('Browse Games', 'Browse'):
@@ -11875,6 +12038,7 @@ exit 0
             self._menu('Party Center', ['Party', 'Friends', 'Messages', 'LAN Chat', 'LAN Status'])
         elif action == 'Utilities':
             self._menu('Utilities', [
+                'Quick Control Center', 'System Monitor', 'Network Test', 'Manage Favorites', 'Clean XUI Cache',
                 'System Info', 'Web Control', 'Theme Toggle', 'Power Profile', 'Battery Saver',
                 'Update Check', 'System Update', 'Steam', 'Compat X86', 'File Manager',
                 'Gallery', 'Screenshot', 'Calculator', 'Gamepad Test', 'Controller Probe', 'Controller Mappings',
@@ -12647,11 +12811,14 @@ write_autostart(){
 [Desktop Entry]
 Type=Application
 Name=XUI Dashboard
-Exec=$BIN_DIR/xui_startup_and_dashboard.sh
+Comment=Start the XUI dashboard when the graphical session begins
+Exec="$BIN_DIR/xui_startup_and_dashboard.sh"
 Terminal=false
 StartupNotify=false
-X-GNOME-Autostart-enabled=false
-Hidden=true
+X-GNOME-Autostart-enabled=true
+Hidden=false
+NoDisplay=false
+DBusActivatable=false
 DESK
   info "Wrote autostart desktop to $AUTOSTART_DIR/xui-dashboard.desktop"
 }
@@ -19999,19 +20166,14 @@ write_systemd_and_autostart(){
   cat > "$SYSTEMD_USER_DIR/xui-dashboard.service" <<UNIT
 [Unit]
 Description=XUI Dashboard (user)
-DefaultDependencies=no
-After=graphical-session-pre.target
-Before=graphical-session.target
+After=graphical-session.target
 PartOf=graphical-session.target
 
 [Service]
 Type=simple
 ExecStart=%h/.xui/bin/xui_startup_and_dashboard.sh
-# Ensure a display and runtime dir are available for GUI startup under systemd --user
-Environment=DISPLAY=:0
-Environment=XDG_RUNTIME_DIR=/run/user/%U
 Restart=on-failure
-RestartSec=0.5
+RestartSec=3
 Nice=-8
 IOSchedulingClass=best-effort
 IOSchedulingPriority=0
@@ -20412,12 +20574,15 @@ cat > "$AUTOSTART_DIR/xui-dashboard.desktop" <<DESK
 [Desktop Entry]
 Type=Application
 Name=XUI Dashboard
-Exec=$BIN_DIR/xui_startup_and_dashboard.sh
+Comment=Start the XUI dashboard when the graphical session begins
+Exec="$BIN_DIR/xui_startup_and_dashboard.sh"
 Icon=$ASSETS_DIR/logo.png
 Terminal=false
 StartupNotify=false
-X-GNOME-Autostart-enabled=false
-Hidden=true
+X-GNOME-Autostart-enabled=true
+Hidden=false
+NoDisplay=false
+DBusActivatable=false
 DESK
 
 # Ensure assets/logo.png exists: prefer installer-provided logo in script dir, else try to generate a placeholder with Pillow
@@ -20790,10 +20955,8 @@ write_enable_autostart_script(){
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Installs autostart for XUI PyQt dashboard:
-# - copies .desktop to ~/.config/autostart
-# - installs systemd --user unit and enables it
-# Run as the target user (not root). If you want system-wide boot before login you'll need a different approach.
+# Installs XDG autostart for the XUI PyQt dashboard and writes an optional systemd user unit.
+# Run as the target user (not root). The desktop entry is the primary graphical-session launcher.
 
 XUI_HOME="$HOME/.xui"
 AUTOSTART_DIR="$HOME/.config/autostart"
@@ -20801,7 +20964,6 @@ SYSTEMD_USER_DIR="$HOME/.config/systemd/user"
 DESKTOP_FILE_NAME="xui-dashboard.desktop"
 SERVICE_NAME="xui-dashboard.service"
 START_WRAPPER="$XUI_HOME/bin/xui_startup_and_dashboard.sh"
-RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
 
 mkdir -p "$AUTOSTART_DIR"
 mkdir -p "$SYSTEMD_USER_DIR"
@@ -20812,11 +20974,12 @@ cat > "$AUTOSTART_DIR/$DESKTOP_FILE_NAME" <<EOF
 Type=Application
 Name=XUI Dashboard
 Comment=Start XUI fullscreen dashboard
-Exec=$START_WRAPPER
+Exec="$START_WRAPPER"
 Terminal=false
-X-GNOME-Autostart-enabled=false
-Hidden=true
+X-GNOME-Autostart-enabled=true
+Hidden=false
 NoDisplay=false
+DBusActivatable=false
 Categories=Utility;
 EOF
 
@@ -20824,22 +20987,18 @@ EOF
 cat > "$SYSTEMD_USER_DIR/$SERVICE_NAME" <<EOF
 [Unit]
 Description=XUI GUI Dashboard (user service)
-DefaultDependencies=no
-After=graphical-session-pre.target
-Before=graphical-session.target
+After=graphical-session.target
 PartOf=graphical-session.target
 
 [Service]
 Type=simple
 ExecStart=$START_WRAPPER
 Restart=on-failure
-RestartSec=0.5
+RestartSec=3
 Nice=-8
 IOSchedulingClass=best-effort
 IOSchedulingPriority=0
 OOMScoreAdjust=-700
-Environment=DISPLAY=:0
-Environment=XDG_RUNTIME_DIR=$RUNTIME_DIR
 Environment=XUI_SKIP_STARTUP_AUDIO=1
 
 [Install]
@@ -20854,40 +21013,18 @@ touch "$OPENBOX_FILE" "$XPROFILE_FILE"
 sed -i '/xui_startup_and_dashboard.sh/d' "$OPENBOX_FILE" 2>/dev/null || true
 sed -i '/xui_startup_and_dashboard.sh/d' "$XPROFILE_FILE" 2>/dev/null || true
 
-# Reload user systemd and enable service
+# Reload user systemd and keep the optional dashboard service disabled.
 if command -v systemctl >/dev/null 2>&1; then
-    systemctl --user daemon-reload || true
-    systemctl --user enable --now "$SERVICE_NAME" || {
-        echo "Failed to enable systemd user service; you can enable it with: systemctl --user enable --now $SERVICE_NAME"
-    }
-else
-    echo "systemctl not found; enable ~/.config/autostart/xui-dashboard.desktop manually."
-fi
-
-# Configure passwordless sudo for all XUI actions (no prompt in updates/installers)
-if command -v sudo >/dev/null 2>&1; then
-    SUDOERS_FILE="/etc/sudoers.d/xui-autosudo-$USER"
-    TMPF="$(mktemp)"
-    {
-        printf '# XUI automatic sudo (generated)\n'
-        printf 'Defaults:%s !requiretty\n' "$USER"
-        printf '%s ALL=(root) NOPASSWD: ALL\n' "$USER"
-    } > "$TMPF"
-    if sudo -n install -m 0440 "$TMPF" "$SUDOERS_FILE" >/dev/null 2>&1; then
-        if command -v visudo >/dev/null 2>&1; then
-            sudo -n visudo -cf "$SUDOERS_FILE" >/dev/null 2>&1 || true
-        fi
-        echo "Configured passwordless sudo for XUI actions: $SUDOERS_FILE"
-    else
-        echo "Warning: could not configure $SUDOERS_FILE with sudo -n."
-    fi
-    rm -f "$TMPF"
+    systemctl --user daemon-reload >/dev/null 2>&1 || true
+    # Avoid racing the desktop session with a user service that may lack DISPLAY/Wayland variables.
+    systemctl --user disable "$SERVICE_NAME" >/dev/null 2>&1 || true
 fi
 
 # Feedback
 echo "Installed autostart .desktop to $AUTOSTART_DIR/$DESKTOP_FILE_NAME"
-echo "Installed systemd user unit to $SYSTEMD_USER_DIR/$SERVICE_NAME (enabled)."
+echo "Installed systemd user unit to $SYSTEMD_USER_DIR/$SERVICE_NAME (optional, disabled to prevent graphical-session races)."
 echo "Cleaned legacy Openbox/X profile startup hooks to prevent duplicate launches."
+echo "The enabled XDG desktop entry will start XUI at graphical login."
 
 echo "Note: systemd user services run after you log in. If you want the GUI before login, configure auto-login or use a display-manager-level autostart."
 BASH
@@ -28003,19 +28140,22 @@ PY
   sed -i '/xui_startup_and_dashboard.sh/d' "$xprofile_file" 2>/dev/null || true
   info "Cleaned Openbox/Xprofile duplicate hooks."
 
-  # Keep desktop autostart disabled when systemd user service is available.
+    # Always keep the XDG entry enabled: it inherits the actual X11/Wayland session environment.
   if [ -f "$AUTOSTART_DIR/xui-dashboard.desktop" ]; then
-    sed -i 's/^Hidden=.*/Hidden=true/' "$AUTOSTART_DIR/xui-dashboard.desktop" 2>/dev/null || true
-    sed -i 's/^X-GNOME-Autostart-enabled=.*/X-GNOME-Autostart-enabled=false/' "$AUTOSTART_DIR/xui-dashboard.desktop" 2>/dev/null || true
+        sed -i 's/^Hidden=.*/Hidden=false/' "$AUTOSTART_DIR/xui-dashboard.desktop" 2>/dev/null || true
+        sed -i 's/^X-GNOME-Autostart-enabled=.*/X-GNOME-Autostart-enabled=true/' "$AUTOSTART_DIR/xui-dashboard.desktop" 2>/dev/null || true
   fi
   if command -v systemctl >/dev/null 2>&1; then
     if run_user_systemctl daemon-reload; then
-      run_user_systemctl enable --now xui-dashboard.service xui-joy.service || true
+            # The desktop entry is the dashboard autostart source of truth. Disable an old
+            # systemd dashboard link so it cannot race the graphical session or grab the lock early.
+            run_user_systemctl disable xui-dashboard.service || true
+            run_user_systemctl enable --now xui-joy.service || true
       run_user_systemctl enable --now xui-battery-monitor.service || true
       run_user_systemctl enable --now xui-power-opt.service || true
-      info "Attempted to enable user services: xui-dashboard, xui-joy, xui-battery-monitor, xui-power-opt"
+            info "Enabled XDG dashboard autostart and user services: xui-joy, xui-battery-monitor, xui-power-opt"
     else
-      warn "systemctl --user daemon-reload failed; using desktop autostart only"
+            warn "systemctl --user daemon-reload failed; XDG desktop autostart remains enabled"
     fi
   fi
   if [ -x "$BIN_DIR/xui_install_fnae_deps.sh" ]; then

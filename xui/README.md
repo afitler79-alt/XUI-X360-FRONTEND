@@ -59,3 +59,13 @@ Notes
 
 - The installer generates placeholder images when original files are missing (requires `python3` + `Pillow`; startup video generation also requires `ffmpeg`).
 - System package installation is opt-in via `--yes-install`; `--no-auto-install` explicitly disables it.
+
+Dashboard features
+------------------
+
+- Open the Xbox Guide with `F1`, `Home`, `Ctrl+G`, `Alt+G`, or `Meta+G`; supported controllers can use their Guide/Center button.
+- The Settings page and Guide include a Quick Control Center with system status and shortcuts to screenshots, storage, controller tools, logs, update checks, and cache cleanup.
+- System Monitor reports CPU thread count, memory, home-disk capacity, and system uptime. Network Test checks DNS/IP connectivity over HTTPS.
+- My Pins / Manage Favorites stores a per-user list of launchable dashboard actions in `~/.xui/data/favorites.json`.
+- Cache cleanup only removes contents of `~/.xui/cache` and asks for confirmation first.
+- Automatic startup uses an enabled `~/.config/autostart/xui-dashboard.desktop` entry so the dashboard inherits the active X11/Wayland session; the optional systemd dashboard unit stays disabled to avoid launching before the desktop is ready.
