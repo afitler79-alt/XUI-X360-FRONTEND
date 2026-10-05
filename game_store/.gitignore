@@ -1,0 +1,23 @@
+# Directorios generados
+games/
+downloads/
+
+# Archivos temporales
+*.zip
+*.7z
+*.tar.gz
+*.tar.bz2
+*.rar
+*.tmp
+*.log
+
+# Archivos del sistema
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+
+# Cache
+__pycache__/
+*.pyc
+*.pyo
