@@ -9336,10 +9336,6 @@ class Dashboard(QtWidgets.QMainWindow):
         return out
 
     def _trigger_guide_action(self):
-        now = time.monotonic()
-        if now - self._guide_open_last_at < self._guide_shortcut_cooldown:
-            return
-        self._guide_open_last_at = now
         self._show_xbox_guide()
 
     def _is_guide_key_event(self, event):
@@ -11117,7 +11113,8 @@ exit 0
 
     def _show_xbox_guide(self):
         now = time.monotonic()
-        if (now - float(self._guide_open_last_at)) < 0.65:
+        last_open = float(self._guide_open_last_at)
+        if last_open > 0.0 and (now - last_open) < self._guide_shortcut_cooldown:
             return
         self._guide_open_last_at = now
         self._play_sfx('open')
@@ -15883,6 +15880,7 @@ PY
   cat > "$GAMES_DIR/store.py" <<'PY'
 #!/usr/bin/env python3
 import hashlib
+import http.cookiejar
 import json
 import random
 import re
@@ -15947,6 +15945,98 @@ def _catalog_url(url):
     return value
 
 
+def _github_headers(url):
+    import os
+    parsed = urllib.parse.urlparse(str(url or ''))
+    headers = {'User-Agent': 'XUI-Homebrew-Store/1.0'}
+    if parsed.hostname not in ('github.com', 'raw.githubusercontent.com'):
+        return headers
+    token = (
+        os.environ.get('XUI_360_GITHUB_TOKEN')
+        or os.environ.get('GH_TOKEN')
+        or os.environ.get('GITHUB_TOKEN')
+    )
+    if not token and shutil.which('gh'):
+        try:
+            result = subprocess.run(
+                ['gh', 'auth', 'token'], capture_output=True, text=True,
+                timeout=3, check=True,
+            )
+            token = result.stdout.strip()
+        except Exception:
+            token = ''
+    if token:
+        headers['Authorization'] = 'Bearer ' + token
+        headers['Accept'] = 'application/vnd.github.raw+json'
+    return headers
+
+
+def _github_api_url(url):
+    parsed = urllib.parse.urlparse(str(url or ''))
+    if parsed.hostname != 'raw.githubusercontent.com':
+        return str(url or '')
+    parts = parsed.path.lstrip('/').split('/', 3)
+    if len(parts) < 4:
+        return str(url or '')
+    owner, repo, branch, path = parts
+    return 'https://api.github.com/repos/{}/{}/contents/{}?{}'.format(
+        urllib.parse.quote(owner, safe=''), urllib.parse.quote(repo, safe=''),
+        urllib.parse.quote(path, safe='/'), urllib.parse.urlencode({'ref': branch}),
+    )
+
+
+def _drive_file_id(url):
+    parsed = urllib.parse.urlparse(str(url or ''))
+    host = (parsed.hostname or '').lower()
+    if not (host == 'drive.google.com' or host.endswith('.drive.google.com') or host == 'docs.google.com'):
+        return ''
+    query = urllib.parse.parse_qs(parsed.query)
+    file_id = (query.get('id') or [''])[0]
+    if not file_id:
+        match = re.search(r'/(?:file/)?d/([A-Za-z0-9_-]+)', parsed.path)
+        file_id = match.group(1) if match else ''
+    return file_id if re.fullmatch(r'[A-Za-z0-9_-]{10,}', file_id or '') else ''
+
+
+def _open_game_download(url):
+    file_id = _drive_file_id(url)
+    headers = {'User-Agent': 'Mozilla/5.0 (X11; Linux x86_64) XUI-Homebrew-Store/1.0'}
+    if not file_id:
+        return urllib.request.urlopen(
+            urllib.request.Request(url, headers=_github_headers(url)), timeout=90
+        )
+
+    cookies = http.cookiejar.CookieJar()
+    opener = urllib.request.build_opener(urllib.request.HTTPCookieProcessor(cookies))
+    candidates = [
+        'https://drive.google.com/uc?' + urllib.parse.urlencode({'export': 'download', 'id': file_id}),
+        'https://drive.usercontent.google.com/download?' + urllib.parse.urlencode(
+            {'id': file_id, 'export': 'download', 'confirm': 't'}
+        ),
+    ]
+    last_reason = ''
+    while candidates:
+        request = urllib.request.Request(candidates.pop(0), headers=headers)
+        response = opener.open(request, timeout=90)
+        content_type = str(response.headers.get('Content-Type', '')).lower()
+        if 'text/html' not in content_type:
+            return response
+        page = response.read(2 * 1024 * 1024).decode('utf-8', errors='replace')
+        response.close()
+        token = next((c.value for c in cookies if c.name.startswith('download_warning')), '')
+        if token:
+            candidates.insert(0, 'https://drive.google.com/uc?' + urllib.parse.urlencode(
+                {'export': 'download', 'id': file_id, 'confirm': token}
+            ))
+        confirm = re.search(r'[?&]confirm=([0-9A-Za-z_-]+)', page)
+        if confirm:
+            candidates.insert(0, 'https://drive.google.com/uc?' + urllib.parse.urlencode(
+                {'export': 'download', 'id': file_id, 'confirm': confirm.group(1)}
+            ))
+        last_reason = 'Google Drive devolvió una página de vista previa/permisos, no el archivo.'
+    raise ValueError(last_reason or 'Google Drive no permitió descargar el archivo; comprueba que el enlace sea público.')
+
+
 def _catalog_entries(payload):
     try:
         parsed = json.loads(payload)
@@ -15986,8 +16076,11 @@ def _catalog_entries(payload):
             continue
         seen.add(url)
         if not name:
+            drive_id = _drive_file_id(url)
             leaf = Path(urllib.parse.unquote(urllib.parse.urlparse(url).path)).name
-            name = re.sub(r'\.(zip|7z|rar|tar|gz|bz2|xz|iso)$', '', leaf, flags=re.IGNORECASE) or 'Xbox 360 Homebrew'
+            name = re.sub(r'\.(zip|7z|rar|tar|gz|bz2|xz|iso)$', '', leaf, flags=re.IGNORECASE)
+            if not name or name.lower().startswith('view'):
+                name = f'Xbox 360 Homebrew {drive_id[-6:]}' if drive_id else 'Xbox 360 Homebrew'
         name = str(name).strip()[:120]
         game_id = 'x360_' + hashlib.sha256(url.encode('utf-8')).hexdigest()[:16]
         clean.append({
@@ -16024,7 +16117,11 @@ def _sync_xbox360_catalog():
     url = _catalog_url(configured_url or XBOX360_REPO_URL)
     if not url:
         raise ValueError('La URL del catálogo debe usar HTTP o HTTPS.')
-    request = urllib.request.Request(url, headers={'User-Agent': 'XUI-Homebrew-Store/1.0'})
+    headers = _github_headers(url)
+    request_url = _github_api_url(url) if 'Authorization' in headers else url
+    if request_url != url:
+        headers['Accept'] = 'application/vnd.github.raw+json'
+    request = urllib.request.Request(request_url, headers=headers)
     with urllib.request.urlopen(request, timeout=45) as response:
         payload = response.read(8 * 1024 * 1024 + 1)
     if len(payload) > 8 * 1024 * 1024:
@@ -16118,19 +16215,23 @@ def _install_xbox360_game(game_id):
     root.mkdir(parents=True, exist_ok=True)
     downloads = Path.home() / '.xui' / 'cache' / 'xbox360_downloads' / str(game_id)
     downloads.mkdir(parents=True, exist_ok=True)
-    leaf = Path(urllib.parse.unquote(urllib.parse.urlparse(url).path)).name
-    if not leaf or leaf in ('.', '..'):
-        leaf = slug + '.download'
-    archive = downloads / leaf
-    partial = archive.with_name(archive.name + '.part')
-    request = urllib.request.Request(url, headers={'User-Agent': 'XUI-Homebrew-Store/1.0'})
     print(f'Descargando {item.get("name", slug)}...')
+    partial = None
     try:
-        with urllib.request.urlopen(request, timeout=60) as response, partial.open('wb') as output:
+        with _open_game_download(url) as response:
             content_type = str(response.headers.get('Content-Type', '')).lower()
             if 'text/html' in content_type:
                 raise ValueError('El enlace entrega una página web, no el archivo del juego.')
-            shutil.copyfileobj(response, output, length=1024 * 1024)
+            leaf = response.headers.get_filename() or Path(
+                urllib.parse.unquote(urllib.parse.urlparse(response.geturl()).path)
+            ).name
+            leaf = Path(str(leaf or '').replace('\\', '/')).name
+            if not leaf or leaf in ('.', '..') or leaf.lower() in ('download', 'view'):
+                leaf = slug + '.download'
+            archive = downloads / leaf
+            partial = archive.with_name(archive.name + '.part')
+            with partial.open('wb') as output:
+                shutil.copyfileobj(response, output, length=1024 * 1024)
         partial.replace(archive)
         staging = destination.with_name(destination.name + '.installing')
         if staging.exists():
@@ -16145,7 +16246,8 @@ def _install_xbox360_game(game_id):
             shutil.rmtree(staging, ignore_errors=True)
             raise
     except Exception:
-        partial.unlink(missing_ok=True)
+        if partial is not None:
+            partial.unlink(missing_ok=True)
         raise
     print(f'Instalado en: {destination}')
 
