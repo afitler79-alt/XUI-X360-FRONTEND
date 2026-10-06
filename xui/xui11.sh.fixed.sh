@@ -8072,12 +8072,24 @@ class WebKioskWindow(QtWidgets.QMainWindow):
         self._gp_timer = None
         self.setWindowTitle(url)
         self.setAttribute(QtCore.Qt.WA_DeleteOnClose, True)
+        self.setWindowState(self.windowState() | QtCore.Qt.WindowFullScreen)
         self.resize(1280, 720)
         self.setStyleSheet('background:#000;')
         self.view = QtWebEngineWidgets.QWebEngineView(self)
         self._configure_web_runtime()
         self.setCentralWidget(self.view)
         self.view.load(QtCore.QUrl(url))
+        self.keyboard_button = QtWidgets.QPushButton('KB', self)
+        self.keyboard_button.setToolTip('On-screen keyboard (F2 / Ctrl+K / controller X)')
+        self.keyboard_button.setAccessibleName('Open on-screen keyboard')
+        self.keyboard_button.setFixedSize(58, 48)
+        self.keyboard_button.setStyleSheet(
+            'QPushButton{background:rgba(24,35,42,0.92);color:#f3f7f8;'
+            'border:1px solid rgba(255,255,255,0.44);font-size:17px;font-weight:800;}'
+            'QPushButton:hover,QPushButton:focus{background:#358f4a;}'
+        )
+        self.keyboard_button.clicked.connect(self._open_virtual_keyboard_for_page)
+        self.keyboard_button.raise_()
         self._esc = QtWidgets.QShortcut(QtGui.QKeySequence(QtCore.Qt.Key_Escape), self)
         self._esc.activated.connect(self.close)
         self._back = QtWidgets.QShortcut(QtGui.QKeySequence(QtCore.Qt.Key_Back), self)
@@ -8167,13 +8179,20 @@ class WebKioskWindow(QtWidgets.QMainWindow):
   const editable = el.isContentEditable || tag === 'textarea' ||
     (tag === 'input' && !['button','submit','checkbox','radio','range','color','file','image','reset'].includes(tp));
   if (!editable) return false;
-  const txt = {payload};
+    const txt = {payload};
   if (el.isContentEditable) {{
     try {{ document.execCommand('insertText', false, txt); }} catch (_e) {{ el.textContent = (el.textContent || '') + txt; }}
   }} else {{
-    el.value = (el.value || '') + txt;
+        const proto = tag === 'textarea' ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype;
+        const setter = Object.getOwnPropertyDescriptor(proto, 'value')?.set;
+        const value = el.value || '';
+        const start = Number.isInteger(el.selectionStart) ? el.selectionStart : value.length;
+        const end = Number.isInteger(el.selectionEnd) ? el.selectionEnd : start;
+        const next = value.slice(0, start) + txt + value.slice(end);
+        if (setter) setter.call(el, next); else el.value = next;
+        try {{ el.setSelectionRange(start + txt.length, start + txt.length); }} catch (_e) {{}}
   }}
-  el.dispatchEvent(new Event('input', {{ bubbles: true }}));
+    el.dispatchEvent(new InputEvent('input', {{ bubbles: true, inputType: 'insertText', data: txt }}));
   el.dispatchEvent(new Event('change', {{ bubbles: true }}));
   return true;
 }})();
@@ -8346,6 +8365,12 @@ class WebKioskWindow(QtWidgets.QMainWindow):
         except Exception:
             pass
         super().closeEvent(e)
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        if hasattr(self, 'keyboard_button'):
+            self.keyboard_button.move(self.width() - self.keyboard_button.width() - 22, self.height() - self.keyboard_button.height() - 22)
+            self.keyboard_button.raise_()
 
 
 class DashboardPage(QtWidgets.QWidget):
@@ -14442,11 +14467,10 @@ class ControllerBridge:
         if self._active_window_dashboard():
             emit_key('F1')
             return True
-        tracked_pid = self._tracked_external_game_pid()
-        if tracked_pid is None:
-            return False
         active_pid = self._active_external_window_pid()
-        if active_pid is None or int(active_pid) != int(tracked_pid):
+        if active_pid is None:
+            active_pid = self._tracked_external_game_pid()
+        if active_pid is None:
             return False
         if not os.path.exists(GUIDE_SCRIPT):
             return False
@@ -25549,6 +25573,8 @@ class Guide(QtWidgets.QDialog):
             g = scr.geometry()
             self.setGeometry(g)
             self.showFullScreen()
+        self.raise_()
+        self.activateWindow()
         _play_sfx('open')
         self._refresh_meta()
         self._animate_open()
@@ -25801,11 +25827,7 @@ def main():
 
     app = QtWidgets.QApplication(sys.argv)
     app.setQuitOnLastWindowClosed(True)
-    pid = _pick_target_pid()
-    if pid:
-        _pause_pid(pid)
-
-    d = Guide(gamertag=_profile_gamertag(), paused_pid=pid)
+    d = Guide(gamertag=_profile_gamertag())
     try:
         d.show()
     except Exception:
