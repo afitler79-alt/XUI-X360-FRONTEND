@@ -15882,13 +15882,19 @@ PY
 
   cat > "$GAMES_DIR/store.py" <<'PY'
 #!/usr/bin/env python3
+import hashlib
 import json
 import random
+import re
 import shlex
 import shutil
 import subprocess
 import sys
+import tarfile
 import time
+import urllib.parse
+import urllib.request
+import zipfile
 from datetime import date
 from pathlib import Path
 from PyQt5 import QtCore, QtGui, QtWidgets
@@ -15908,6 +15914,9 @@ STORE_FILE = DATA_HOME / 'store.json'
 XUI_BIN = Path.home() / '.xui' / 'bin'
 COVER_CACHE = Path.home() / '.xui' / 'cache' / 'store_covers'
 EXTERNAL_STORE_FILE = DATA_HOME / 'store_external.json'
+XBOX360_CATALOG_FILE = DATA_HOME / 'xbox360_homebrew.json'
+XBOX360_REPO_CONFIG = DATA_HOME / 'xbox360_repo_url.txt'
+XBOX360_REPO_URL = 'https://raw.githubusercontent.com/afitler79-alt/XUI_360GAMES_REP/main/xui360repo.txt'
 EXTERNAL_STALE_SECONDS = 6 * 60 * 60
 DAILY_ACTIVE_COUNT = 360
 ALWAYS_VISIBLE_IDS = {
@@ -15925,6 +15934,220 @@ def _safe_write(path, data):
     p = Path(path)
     p.parent.mkdir(parents=True, exist_ok=True)
     p.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding='utf-8')
+
+
+def _catalog_url(url):
+    value = str(url or '').strip().rstrip('),.;]')
+    match = re.match(r'^https://github\.com/([^/]+)/([^/]+)/blob/([^/]+)/(.*)$', value)
+    if match:
+        value = 'https://raw.githubusercontent.com/{}/{}/{}/{}'.format(*match.groups())
+    parsed = urllib.parse.urlparse(value)
+    if parsed.scheme not in ('http', 'https') or not parsed.netloc:
+        return ''
+    return value
+
+
+def _catalog_entries(payload):
+    try:
+        parsed = json.loads(payload)
+    except Exception:
+        parsed = None
+    if isinstance(parsed, dict):
+        parsed = parsed.get('games', parsed.get('items', parsed.get('games360', [])))
+    entries = []
+    if isinstance(parsed, list):
+        for raw in parsed:
+            if isinstance(raw, str):
+                raw = {'url': raw}
+            if isinstance(raw, dict):
+                url = raw.get('url') or raw.get('link') or raw.get('download') or raw.get('download_url')
+                name = raw.get('name') or raw.get('title') or raw.get('id') or ''
+                if url:
+                    entries.append((str(name).strip(), str(url).strip()))
+    else:
+        for line in str(payload or '').splitlines():
+            text = line.strip()
+            if not text or text.startswith(('#', '//')):
+                continue
+            links = re.findall(r'https?://[^\s<>"\']+', text, flags=re.IGNORECASE)
+            if not links:
+                continue
+            url = links[0].rstrip('),.;]')
+            prefix = text[:text.find(links[0])].strip(' \t|;,=-')
+            suffix = text[text.find(links[0]) + len(links[0]):].strip(' \t|;,=-')
+            name = prefix or suffix
+            entries.append((name, url))
+
+    clean = []
+    seen = set()
+    for name, raw_url in entries:
+        url = _catalog_url(raw_url)
+        if not url or url in seen:
+            continue
+        seen.add(url)
+        if not name:
+            leaf = Path(urllib.parse.unquote(urllib.parse.urlparse(url).path)).name
+            name = re.sub(r'\.(zip|7z|rar|tar|gz|bz2|xz|iso)$', '', leaf, flags=re.IGNORECASE) or 'Xbox 360 Homebrew'
+        name = str(name).strip()[:120]
+        game_id = 'x360_' + hashlib.sha256(url.encode('utf-8')).hexdigest()[:16]
+        clean.append({
+            'id': game_id,
+            'name': name,
+            'price': 0,
+            'pricing': 'free',
+            'category': 'Xbox 360 Homebrew',
+            'source': 'XUI 360 Homebrew',
+            'desc': 'Homebrew package from the XUI 360 catalog. Downloads and extracts locally.',
+            'download_url': url,
+            'install': 'xui360repo:' + game_id,
+        })
+    return clean
+
+
+def _load_xbox360_items():
+    try:
+        data = json.loads(XBOX360_CATALOG_FILE.read_text(encoding='utf-8'))
+        items = data.get('items', []) if isinstance(data, dict) else []
+        return [x for x in items if isinstance(x, dict)]
+    except Exception:
+        return []
+
+
+def _sync_xbox360_catalog():
+    import os
+    configured_url = os.environ.get('XUI_360_REPO_URL', '').strip()
+    if not configured_url:
+        try:
+            configured_url = XBOX360_REPO_CONFIG.read_text(encoding='utf-8').strip()
+        except Exception:
+            configured_url = ''
+    url = _catalog_url(configured_url or XBOX360_REPO_URL)
+    if not url:
+        raise ValueError('La URL del catálogo debe usar HTTP o HTTPS.')
+    request = urllib.request.Request(url, headers={'User-Agent': 'XUI-Homebrew-Store/1.0'})
+    with urllib.request.urlopen(request, timeout=45) as response:
+        payload = response.read(8 * 1024 * 1024 + 1)
+    if len(payload) > 8 * 1024 * 1024:
+        raise ValueError('El catálogo supera el límite de 8 MiB.')
+    items = _catalog_entries(payload.decode('utf-8-sig', errors='replace'))
+    if not items:
+        raise ValueError('El catálogo no contiene enlaces HTTP/HTTPS reconocibles.')
+    _safe_write(XBOX360_CATALOG_FILE, {'source': url, 'updated': int(time.time()), 'items': items})
+    print(f'Catálogo sincronizado: {len(items)} juegos homebrew.')
+
+
+def _safe_archive_target(root, member_name):
+    raw = str(member_name or '').replace('\\', '/')
+    normalized = raw.rstrip('/')
+    path = Path(normalized)
+    if not normalized or path.is_absolute() or any(part in ('..', '') for part in normalized.split('/')):
+        raise ValueError('El archivo contiene una ruta no segura.')
+    target = (root / path).resolve()
+    if target != root.resolve() and root.resolve() not in target.parents:
+        raise ValueError('El archivo intenta salir de la carpeta de instalación.')
+    return target
+
+
+def _extract_game_archive(archive, destination):
+    suffix = ''.join(Path(archive).suffixes).lower()
+    if suffix.endswith('.zip'):
+        with zipfile.ZipFile(archive) as bundle:
+            for member in bundle.infolist():
+                target = _safe_archive_target(destination, member.filename)
+                mode = (member.external_attr >> 16) & 0o170000
+                if mode == 0o120000:
+                    raise ValueError('No se permiten enlaces simbólicos dentro del ZIP.')
+                if member.is_dir():
+                    target.mkdir(parents=True, exist_ok=True)
+                else:
+                    target.parent.mkdir(parents=True, exist_ok=True)
+                    with bundle.open(member) as src, target.open('wb') as dst:
+                        shutil.copyfileobj(src, dst, length=1024 * 1024)
+        return True
+    if suffix.endswith(('.tar', '.tar.gz', '.tgz', '.tar.xz', '.txz', '.tar.bz2', '.tbz2')):
+        with tarfile.open(archive, 'r:*') as bundle:
+            for member in bundle.getmembers():
+                target = _safe_archive_target(destination, member.name)
+                if member.issym() or member.islnk() or not (member.isdir() or member.isfile()):
+                    raise ValueError('El TAR contiene enlaces o tipos de archivo no permitidos.')
+                if member.isdir():
+                    target.mkdir(parents=True, exist_ok=True)
+                else:
+                    source = bundle.extractfile(member)
+                    if source is None:
+                        continue
+                    target.parent.mkdir(parents=True, exist_ok=True)
+                    with source, target.open('wb') as output:
+                        shutil.copyfileobj(source, output, length=1024 * 1024)
+        return True
+    if suffix.endswith(('.7z', '.rar')):
+        extractor = shutil.which('7z') or shutil.which('7zz')
+        if not extractor:
+            raise ValueError('Este paquete es 7z/RAR. Instala p7zip-full o 7zip para extraerlo automáticamente.')
+        listing = subprocess.run(
+            [extractor, 'l', '-slt', str(archive)], capture_output=True, text=True, check=True
+        ).stdout
+        for line in listing.splitlines():
+            if line.startswith('Path = '):
+                member_path = line.partition('=')[2].strip()
+                if member_path not in (str(archive), archive.name):
+                    _safe_archive_target(destination, member_path)
+            elif line.startswith('Symbolic Link = ') or line.startswith('Hard Link = '):
+                raise ValueError('No se permiten enlaces simbólicos dentro del archivo.')
+        subprocess.run(
+            [extractor, 'x', '-y', f'-o{destination}', str(archive)],
+            check=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
+        )
+        return True
+    return False
+
+
+def _install_xbox360_game(game_id):
+    item = next((row for row in _load_xbox360_items() if str(row.get('id')) == str(game_id)), None)
+    if item is None:
+        raise ValueError('Juego no encontrado; sincroniza el catálogo de Xbox 360 primero.')
+    url = _catalog_url(item.get('download_url', ''))
+    if not url:
+        raise ValueError('El enlace de descarga del juego no es válido.')
+    slug = re.sub(r'[^A-Za-z0-9._-]+', '_', str(item.get('name', game_id))).strip('._')[:80] or str(game_id)
+    root = Path.home() / '.xui' / 'GAMES' / 'Xbox360'
+    destination = root / slug
+    if destination.exists():
+        print(f'Ya está descargado: {destination}')
+        return
+    root.mkdir(parents=True, exist_ok=True)
+    downloads = Path.home() / '.xui' / 'cache' / 'xbox360_downloads' / str(game_id)
+    downloads.mkdir(parents=True, exist_ok=True)
+    leaf = Path(urllib.parse.unquote(urllib.parse.urlparse(url).path)).name
+    if not leaf or leaf in ('.', '..'):
+        leaf = slug + '.download'
+    archive = downloads / leaf
+    partial = archive.with_name(archive.name + '.part')
+    request = urllib.request.Request(url, headers={'User-Agent': 'XUI-Homebrew-Store/1.0'})
+    print(f'Descargando {item.get("name", slug)}...')
+    try:
+        with urllib.request.urlopen(request, timeout=60) as response, partial.open('wb') as output:
+            content_type = str(response.headers.get('Content-Type', '')).lower()
+            if 'text/html' in content_type:
+                raise ValueError('El enlace entrega una página web, no el archivo del juego.')
+            shutil.copyfileobj(response, output, length=1024 * 1024)
+        partial.replace(archive)
+        staging = destination.with_name(destination.name + '.installing')
+        if staging.exists():
+            shutil.rmtree(staging)
+        staging.mkdir(parents=True)
+        try:
+            extracted = _extract_game_archive(archive, staging)
+            if not extracted:
+                shutil.copy2(archive, staging / archive.name)
+            staging.replace(destination)
+        except Exception:
+            shutil.rmtree(staging, ignore_errors=True)
+            raise
+    except Exception:
+        partial.unlink(missing_ok=True)
+        raise
+    print(f'Instalado en: {destination}')
 
 
 def _norm_item(raw):
@@ -16258,11 +16481,14 @@ def ensure_catalog_minimum(min_count=620):
         raw_items = []
     items = []
     seen = set()
+    xbox360_ids = set()
     for raw in raw_items:
         item = _norm_item(raw)
         if item is None:
             continue
         iid = item['id']
+        if item.get('category') == 'Xbox 360 Homebrew':
+            xbox360_ids.add(iid)
         if iid.startswith('auto_') or iid.startswith('itch_page_') or iid.startswith('gamejolt_page_'):
             continue
         if iid in seen:
@@ -16287,7 +16513,14 @@ def ensure_catalog_minimum(min_count=620):
             continue
         seen.add(item['id'])
         items.append(item)
-    active_items, day_key = _daily_rotated_items(items, ALWAYS_VISIBLE_IDS, DAILY_ACTIVE_COUNT)
+    for raw in _load_xbox360_items():
+        item = _norm_item(raw)
+        if item is None or item['id'] in seen:
+            continue
+        seen.add(item['id'])
+        xbox360_ids.add(item['id'])
+        items.append(item)
+    active_items, day_key = _daily_rotated_items(items, ALWAYS_VISIBLE_IDS | xbox360_ids, DAILY_ACTIVE_COUNT)
     out = {
         'catalog_version': 'xui-real-sources',
         'rotation_day': day_key,
@@ -16825,7 +17058,7 @@ class StoreWindow(QtWidgets.QMainWindow):
     FILTER_MAP = {
         'All': None,
         'Xbox One': {'Games'},
-        'Xbox 360': {'MiniGames'},
+        'Xbox 360': {'Xbox 360 Homebrew'},
         'Windows 8': {'Apps', 'Themes'},
         'Windows Phone': {'Accessories', 'MiniGames'},
         'Web': {'Browser'},
@@ -16868,6 +17101,7 @@ class StoreWindow(QtWidgets.QMainWindow):
             pass
         self.reload()
         self._setup_gamepad()
+        QtCore.QTimer.singleShot(900, self._sync_xbox360_if_needed)
 
     def _build(self):
         root = QtWidgets.QWidget()
@@ -16991,6 +17225,7 @@ class StoreWindow(QtWidgets.QMainWindow):
         inv_btn = QtWidgets.QPushButton('Inventory')
         refresh_btn = QtWidgets.QPushButton('Refresh')
         sync_btn = QtWidgets.QPushButton('Sync Sources')
+        self.sync_360_btn = QtWidgets.QPushButton('Sync 360 Homebrew')
         close_btn = QtWidgets.QPushButton('Close')
         self.buy_btn.clicked.connect(self.buy_selected)
         self.install_btn.clicked.connect(self.install_selected)
@@ -16998,6 +17233,7 @@ class StoreWindow(QtWidgets.QMainWindow):
         inv_btn.clicked.connect(self.show_inventory)
         refresh_btn.clicked.connect(self.reload)
         sync_btn.clicked.connect(self.sync_sources)
+        self.sync_360_btn.clicked.connect(self.sync_xbox360_catalog)
         close_btn.clicked.connect(self.close)
         actions.addWidget(self.buy_btn)
         actions.addWidget(self.install_btn)
@@ -17005,6 +17241,7 @@ class StoreWindow(QtWidgets.QMainWindow):
         actions.addWidget(inv_btn)
         actions.addWidget(refresh_btn)
         actions.addWidget(sync_btn)
+        actions.addWidget(self.sync_360_btn)
         actions.addStretch(1)
         actions.addWidget(close_btn)
 
@@ -17156,7 +17393,7 @@ class StoreWindow(QtWidgets.QMainWindow):
 
     def _set_busy(self, busy=True):
         busy = bool(busy)
-        controls = [self.buy_btn, self.install_btn, self.launch_btn, self.search]
+        controls = [self.buy_btn, self.install_btn, self.launch_btn, self.search, self.sync_360_btn]
         if busy:
             self._busy_prev = {id(w): bool(w.isEnabled()) for w in controls}
             for w in controls:
@@ -17180,6 +17417,27 @@ class StoreWindow(QtWidgets.QMainWindow):
         self.sync_proc.setArguments(['-lc', script])
         self.sync_proc.finished.connect(self._on_sync_finished)
         self.sync_proc.start()
+
+    def _sync_xbox360_if_needed(self):
+        try:
+            stale = not XBOX360_CATALOG_FILE.exists()
+            if not stale:
+                age = max(0.0, time.time() - XBOX360_CATALOG_FILE.stat().st_mtime)
+                stale = age > EXTERNAL_STALE_SECONDS
+            if stale:
+                self.sync_xbox360_catalog()
+        except Exception:
+            pass
+
+    def sync_xbox360_catalog(self):
+        command = ' '.join(shlex.quote(part) for part in (
+            sys.executable, str(Path(__file__).resolve()), '--sync-xbox360'
+        ))
+        self._run_install_task(
+            'Xbox 360 Homebrew catalog', command,
+            success_msg='Catálogo de homebrew Xbox 360 actualizado.',
+            fail_msg='No se pudo sincronizar el catálogo Xbox 360. Comprueba el enlace/repositorio.',
+        )
 
     def _on_sync_finished(self, code, status):
         ok = (int(code) == 0 and status == QtCore.QProcess.NormalExit)
@@ -17676,6 +17934,17 @@ class StoreWindow(QtWidgets.QMainWindow):
             self.reload('Buy this item before running install.')
             return
         cmd = str(item.get('install', '')).strip()
+        if cmd.startswith('xui360repo:'):
+            game_id = cmd.split(':', 1)[1].strip()
+            shell_cmd = ' '.join(shlex.quote(part) for part in (
+                sys.executable, str(Path(__file__).resolve()), '--install-xbox360', game_id
+            ))
+            self._run_install_task(
+                item.get('name', 'Xbox 360 Homebrew'), shell_cmd,
+                success_msg=f'Descarga y extracción completadas: {item.get("name", "juego")}',
+                fail_msg=f'Falló la descarga/instalación de {item.get("name", "juego")}',
+            )
+            return
         if not cmd:
             if external_paid:
                 self.reload('Paid external item: use Buy Official to purchase from the source store.')
@@ -17949,17 +18218,31 @@ class StoreWindow(QtWidgets.QMainWindow):
 
 
 def main():
+    if len(sys.argv) >= 2 and sys.argv[1] == '--sync-xbox360':
+        try:
+            _sync_xbox360_catalog()
+            return 0
+        except Exception as exc:
+            print(f'Error sincronizando catálogo Xbox 360: {exc}', file=sys.stderr)
+            return 1
+    if len(sys.argv) >= 3 and sys.argv[1] == '--install-xbox360':
+        try:
+            _install_xbox360_game(sys.argv[2])
+            return 0
+        except Exception as exc:
+            print(f'Error instalando juego Xbox 360: {exc}', file=sys.stderr)
+            return 1
     app = QtWidgets.QApplication(sys.argv)
     w = StoreWindow()
     try:
         w.showFullScreen()
     except Exception:
         w.show()
-    sys.exit(app.exec_())
+    return app.exec_()
 
 
 if __name__ == '__main__':
-    main()
+    sys.exit(main())
 PY
   chmod +x "$GAMES_DIR/store.py"
   cp -f "$GAMES_DIR/store.py" "$BIN_DIR/xui_store_modern.py" || true
@@ -18061,7 +18344,9 @@ mkdir -p "$XUI/data" "$XUI/cache/store_covers"
 python3 - <<'PY'
 import hashlib
 import json
+import os
 import re
+import shlex
 import time
 import urllib.request
 from pathlib import Path
@@ -18210,6 +18495,88 @@ def itch_collection_items(collection_url, id_prefix='itch_collection'):
                 'launch': str(BIN / 'xui_browser.sh') + f' --hub {url}',
             })
     return items
+
+def xbox360_repo_items(repo_urls=None, list_name='xui360repo.txt', limit=60):
+    candidates = list(repo_urls or [])
+    if not candidates:
+        candidates = [
+            'https://raw.githubusercontent.com/afitler79-alt/XUI_360GAMES_REP/main/xui360repo.txt',
+            'https://raw.githubusercontent.com/afitler79-alt/XUI_360GAMES_REP/master/xui360repo.txt',
+            'https://github.com/afitler79-alt/XUI_360GAMES_REP/raw/main/xui360repo.txt',
+            'https://github.com/afitler79-alt/XUI_360GAMES_REP/raw/master/xui360repo.txt',
+            'https://github.com/afitler79-alt/XUI_360GAMES_REP/blob/main/xui360repo.txt?raw=1',
+            'https://github.com/afitler79-alt/XUI_360GAMES_REP/blob/master/xui360repo.txt?raw=1',
+        ]
+
+    text = ''
+    for url in candidates:
+        try:
+            req = urllib.request.Request(str(url).strip(), headers=UA)
+            with urllib.request.urlopen(req, timeout=25) as r:
+                text = r.read().decode('utf-8', errors='ignore')
+            if text.strip():
+                break
+        except Exception:
+            continue
+    if not text.strip():
+        return []
+
+    out = []
+    seen = set()
+    lines = text.splitlines()
+    for raw in lines:
+        line = str(raw).strip()
+        if not line or line.startswith('#') or line.startswith('//'):
+            continue
+        if line.lower().startswith('http'):
+            candidate = line
+            name = ''
+        else:
+            if '|' in line:
+                left, right = [part.strip() for part in line.split('|', 1)]
+                if right and 'http' in right:
+                    name = left or ''
+                    candidate = right
+                else:
+                    continue
+            else:
+                match = re.search(r'https?://[^\s\)\]>\"]+', line)
+                if not match:
+                    continue
+                candidate = match.group(0)
+                name = line[:match.start()].strip().strip(':').strip('-').strip()
+        if not candidate:
+            continue
+        candidate = candidate.strip().rstrip('.,;')
+        if not candidate.lower().startswith(('http://', 'https://')):
+            continue
+        if candidate in seen:
+            continue
+        seen.add(candidate)
+        if len(out) >= limit:
+            break
+        parsed = urllib.parse.urlparse(candidate)
+        basename = Path(parsed.path).name or 'xbox360_game'
+        if not basename or basename in ('.', '..'):
+            basename = 'xbox360_game'
+        if not name:
+            name = os.path.splitext(basename)[0].replace('_', ' ').strip() or 'Xbox 360 Game'
+        rid = f"xbox360_repo_{safe_name(name)}_{safe_name(candidate)}"
+        out.append({
+            'id': rid,
+            'name': name,
+            'price': 0.0,
+            'pricing': 'free',
+            'category': 'Games',
+            'source': 'Xbox 360 Repo',
+            'desc': f'Download from the XUI 360 games repository and extract it automatically.',
+            'cover': 'https://raw.githubusercontent.com/afitler79-alt/XUI_360GAMES_REP/main/favicon.ico',
+            'cover_local': '',
+            'install': str(BIN / 'xui_download_xbox360_repo.sh') + f' --name {shlex.quote(name)} --url {shlex.quote(candidate)}',
+            'launch': str(BIN / 'xui_download_xbox360_repo.sh') + f' --name {shlex.quote(name)} --url {shlex.quote(candidate)} --launch',
+        })
+    return out
+
 
 def curated_web_sources():
     # Real cards from official pages. Paid cards always redirect to official checkout.
@@ -18710,6 +19077,7 @@ def curated_web_sources():
 items = []
 items.extend(flathub_items(limit=260))
 items.extend(curated_web_sources())
+items.extend(xbox360_repo_items(limit=60))
 items.extend(itch_collection_items(
     'https://itch.io/c/3790859/easy-fps-editor-games',
     id_prefix='itch_easyfps'
@@ -18739,6 +19107,160 @@ print(f'External sources synced: {len(clean)} items')
 PY
 BASH
   chmod +x "$BIN_DIR/xui_store_sync_sources.sh"
+
+  cat > "$BIN_DIR/xui_download_xbox360_repo.sh" <<'BASH'
+#!/usr/bin/env bash
+set -euo pipefail
+
+XUI_HOME="${HOME}/.xui"
+GAME_ROOT="${XUI_HOME}/GAMES/xbox360_repo"
+TARGET_NAME=""
+TARGET_URL=""
+MODE="install"
+
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --name)
+      TARGET_NAME="${2:-}"
+      shift 2
+      ;;
+    --url)
+      TARGET_URL="${2:-}"
+      shift 2
+      ;;
+    --download-dir)
+      GAME_ROOT="${2:-$GAME_ROOT}"
+      shift 2
+      ;;
+    --launch)
+      MODE="launch"
+      shift
+      ;;
+    -h|--help)
+      echo "Usage: $0 --name 'Game Name' --url 'https://example.com/game.zip' [--launch]"
+      exit 0
+      ;;
+    *)
+      echo "Unknown argument: $1" >&2
+      exit 1
+      ;;
+  esac
+done
+
+if [ -z "$TARGET_URL" ]; then
+  echo "Missing --url" >&2
+  exit 1
+fi
+
+if [ -z "$TARGET_NAME" ]; then
+  TARGET_NAME="$(basename "${TARGET_URL%%\?*}")"
+fi
+
+sanitize_name(){
+  printf '%s' "$1" | tr '[:upper:]' '[:lower:]' | sed -E 's/[^a-z0-9._-]+/-/g; s/-+/-/g; s/^-+|-+$//g' | cut -c1-80
+}
+
+SAFE_NAME="$(sanitize_name "${TARGET_NAME:-xbox360_repo_game}")"
+if [ -z "$SAFE_NAME" ]; then
+  SAFE_NAME="xbox360_repo_game"
+fi
+
+mkdir -p "$GAME_ROOT"
+ARCHIVE_PATH="$GAME_ROOT/${SAFE_NAME}.download"
+EXTRACT_DIR="$GAME_ROOT/${SAFE_NAME}_extracted"
+rm -rf "$EXTRACT_DIR"
+mkdir -p "$EXTRACT_DIR"
+
+fetch_archive(){
+  local url="$1" out="$2"
+  rm -f "$out" >/dev/null 2>&1 || true
+  if command -v curl >/dev/null 2>&1; then
+    curl -L --fail --retry 3 --retry-delay 2 -A 'Mozilla/5.0 XUI-360-Repo-Downloader' -o "$out" "$url"
+  elif command -v wget >/dev/null 2>&1; then
+    wget -O "$out" --user-agent='Mozilla/5.0 XUI-360-Repo-Downloader' "$url"
+  else
+    python3 - "$url" "$out" <<'PY'
+import sys, urllib.request
+url, out = sys.argv[1], sys.argv[2]
+req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0 XUI-360-Repo-Downloader'})
+with urllib.request.urlopen(req, timeout=60) as r:
+    data = r.read()
+with open(out, 'wb') as fh:
+    fh.write(data)
+PY
+  fi
+}
+
+find_executable(){
+  local root="$1"
+  find "$root" -type f \( -iname '*.exe' -o -iname '*.x86_64' -o -iname '*.x86' -o -iname '*.appimage' -o -iname '*.sh' \) 2>/dev/null | head -n 1 || true
+}
+
+if [ "$MODE" = "launch" ]; then
+  exe="$(find_executable "$EXTRACT_DIR" || true)"
+  if [ -n "$exe" ] && [ -f "$exe" ]; then
+    chmod +x "$exe" >/dev/null 2>&1 || true
+    echo "Launching: $exe"
+    exec "$exe" "$@"
+  fi
+  if [ -d "$EXTRACT_DIR" ] && [ -n "$(find "$EXTRACT_DIR" -maxdepth 2 -mindepth 1 -print -quit 2>/dev/null || true)" ]; then
+    echo "Downloaded game already present in: $EXTRACT_DIR"
+    if command -v xdg-open >/dev/null 2>&1; then
+      xdg-open "$EXTRACT_DIR" >/dev/null 2>&1 || true
+    fi
+    exit 0
+  fi
+  echo "No extracted game found for: $TARGET_NAME in $EXTRACT_DIR" >&2
+  exit 1
+fi
+
+fetch_archive "$TARGET_URL" "$ARCHIVE_PATH"
+
+if [ ! -s "$ARCHIVE_PATH" ]; then
+  echo "Download failed: $TARGET_URL" >&2
+  exit 1
+fi
+
+case "${TARGET_URL,,}" in
+  *.zip)
+    unzip -oq "$ARCHIVE_PATH" -d "$EXTRACT_DIR" || python3 - "$ARCHIVE_PATH" "$EXTRACT_DIR" <<'PY'
+import sys, zipfile
+src, dst = sys.argv[1], sys.argv[2]
+with zipfile.ZipFile(src, 'r') as zf:
+    zf.extractall(dst)
+PY
+    ;;
+  *.tar|*.tar.gz|*.tgz|*.tar.bz2|*.tbz|*.tar.xz|*.txz|*.gz|*.bz2|*.xz)
+    tar -xf "$ARCHIVE_PATH" -C "$EXTRACT_DIR"
+    ;;
+  *.7z|*.7zip)
+    if command -v 7z >/dev/null 2>&1; then
+      7z x -y "$ARCHIVE_PATH" -o"$EXTRACT_DIR" >/dev/null
+    elif command -v 7zr >/dev/null 2>&1; then
+      7zr x -y "$ARCHIVE_PATH" -o"$EXTRACT_DIR" >/dev/null
+    else
+      echo "7z is required for 7z archives but not installed." >&2
+      exit 1
+    fi
+    ;;
+  *)
+    echo "Downloaded archive to $ARCHIVE_PATH but extraction is not automatic for this file type."
+    echo "Please install the archive manually or use a .zip/.tar/.7z source link."
+    exit 0
+    ;;
+ esac
+
+exe="$(find_executable "$EXTRACT_DIR" || true)"
+if [ -n "$exe" ] && [ -f "$exe" ]; then
+  chmod +x "$exe" >/dev/null 2>&1 || true
+  echo "Downloaded and extracted: $TARGET_NAME"
+  echo "Executable: $exe"
+else
+  echo "Downloaded and extracted: $TARGET_NAME"
+  echo "Extracted into: $EXTRACT_DIR"
+fi
+BASH
+  chmod +x "$BIN_DIR/xui_download_xbox360_repo.sh"
 
   cat > "$GAMES_DIR/gem_match.py" <<'PY'
 #!/usr/bin/env python3
