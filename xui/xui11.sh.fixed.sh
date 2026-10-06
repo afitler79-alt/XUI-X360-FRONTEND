@@ -3129,7 +3129,7 @@ class SocialOverlay(QtWidgets.QDialog):
         self.engine = InlineSocialEngine(self.nickname, self.user_id)
         self.peer_items = {}
         self.peer_data = {}
-        self.friend_row_widgets = {}
+        self.friend_row_widgets = []
         self.global_players = {}
         self.friends = []
         self.friend_requests = []
@@ -3142,6 +3142,7 @@ class SocialOverlay(QtWidgets.QDialog):
         }
         self._community_mode = 'messages'
         self._focus_zone = 0
+        self._friend_action_index = 0
         self._active_conversation_key = ''
         self._pending_sends = set()
         self.setModal(True)
@@ -3213,6 +3214,7 @@ class SocialOverlay(QtWidgets.QDialog):
                 background:#56b83c;
                 border:none;
             }
+            QListWidget:focus { border:2px solid #3d9533; }
             QPlainTextEdit {
                 background:#f5f6f7;
                 border:1px solid #c1c7cc;
@@ -3235,8 +3237,11 @@ class SocialOverlay(QtWidgets.QDialog):
                 font-size:15px;
                 font-weight:700;
                 padding:7px 12px;
+                min-height:32px;
             }
             QPushButton:hover { background:#c0c7cd; }
+            QPushButton:focus { border:2px solid #3d9533; }
+            QPushButton:pressed { background:#aeb8bf; }
             QPushButton#social_primary_action { background:#58b83c; color:#ffffff; border:1px solid #3a8f2b; }
         ''')
         self._social_base_style = self.styleSheet()
@@ -3277,6 +3282,11 @@ class SocialOverlay(QtWidgets.QDialog):
             ('global', 'Global Chat'),
         ):
             b = QtWidgets.QPushButton(label)
+            b.setCheckable(True)
+            b.setFocusPolicy(QtCore.Qt.StrongFocus)
+            b.setMinimumHeight(40)
+            b.setAccessibleName(f'{label} community tab')
+            b.setToolTip(f'Show {label.lower()}')
             b.clicked.connect(lambda _=False, mode=key: self._set_community_mode(mode))
             self.community_tabs[key] = b
             tabs_row.addWidget(b)
@@ -3449,6 +3459,7 @@ class SocialOverlay(QtWidgets.QDialog):
         }
         for key, btn in self.community_tabs.items():
             active = (key == self._community_mode)
+            btn.setChecked(active)
             btn.setText(f'{labels.get(key, key)} ({counts.get(key, 0)})')
             if active:
                 btn.setStyleSheet(
@@ -3588,7 +3599,7 @@ class SocialOverlay(QtWidgets.QDialog):
         prev = self.peers.currentItem().text() if self.peers.currentItem() is not None else ''
         self.peers.clear()
         self.peer_items = {}
-        self.friend_row_widgets = {}
+        self.friend_row_widgets = []
         keep_row = -1
         for row in rows:
             it = QtWidgets.QListWidgetItem(self._community_row_text(row))
@@ -3619,7 +3630,7 @@ class SocialOverlay(QtWidgets.QDialog):
                 status_badge.setObjectName('friend_row_badge')
                 line.addWidget(status_badge)
                 self.peers.setItemWidget(it, card)
-                self.friend_row_widgets[it] = (card, avatar, name, status, status_badge)
+                self.friend_row_widgets.append((it, card, avatar, name, status, status_badge))
             if keep_row < 0 and prev and it.text() == prev:
                 keep_row = self.peers.count() - 1
         if self.peers.count() > 0:
@@ -3631,8 +3642,7 @@ class SocialOverlay(QtWidgets.QDialog):
 
     def _update_friend_row_selection(self):
         current = self.peers.currentItem()
-        for item, parts in self.friend_row_widgets.items():
-            card, avatar, name, status, badge = parts
+        for item, card, avatar, name, status, badge in self.friend_row_widgets:
             selected = item is current
             bg = '#58b83c' if selected else '#f1f3f5'
             fg = '#ffffff' if selected else '#252b31'
@@ -3672,7 +3682,8 @@ class SocialOverlay(QtWidgets.QDialog):
             self.peers.setFocus(QtCore.Qt.OtherFocusReason)
         elif self._community_mode == 'friends':
             if self._focus_zone == 1 and self.friend_action_buttons:
-                self.friend_action_buttons[0].setFocus(QtCore.Qt.OtherFocusReason)
+                self._friend_action_index = max(0, min(len(self.friend_action_buttons) - 1, self._friend_action_index))
+                self.friend_action_buttons[self._friend_action_index].setFocus(QtCore.Qt.OtherFocusReason)
         elif self._focus_zone == 1:
             self.actions.setFocus(QtCore.Qt.OtherFocusReason)
         elif self._focus_zone == 2:
@@ -3890,13 +3901,19 @@ class SocialOverlay(QtWidgets.QDialog):
             self._cycle_community_mode(1)
             return
         if k in (QtCore.Qt.Key_Left,):
-            if self._focus_zone == 0:
+            if self._community_mode == 'friends' and self._focus_zone == 1:
+                self._friend_action_index = (self._friend_action_index - 1) % len(self.friend_action_buttons)
+                self.friend_action_buttons[self._friend_action_index].setFocus(QtCore.Qt.OtherFocusReason)
+            elif self._focus_zone == 0:
                 self._cycle_community_mode(-1)
             else:
                 self._set_focus_zone(self._focus_zone - 1)
             return
         if k in (QtCore.Qt.Key_Right,):
-            if self._focus_zone == 0:
+            if self._community_mode == 'friends' and self._focus_zone == 1:
+                self._friend_action_index = (self._friend_action_index + 1) % len(self.friend_action_buttons)
+                self.friend_action_buttons[self._friend_action_index].setFocus(QtCore.Qt.OtherFocusReason)
+            elif self._focus_zone == 0:
                 self._cycle_community_mode(1)
             else:
                 self._set_focus_zone(self._focus_zone + 1)
@@ -3919,7 +3936,7 @@ class SocialOverlay(QtWidgets.QDialog):
             return
         if k in (QtCore.Qt.Key_X,):
             if self._community_mode == 'friends' and self._focus_zone == 1:
-                self.friend_action_buttons[0].click()
+                self.friend_action_buttons[self._friend_action_index].click()
             elif self._focus_zone == 0 and self._community_mode in ('friends', 'party', 'players'):
                 self._send_friend_request()
             else:
@@ -3929,7 +3946,10 @@ class SocialOverlay(QtWidgets.QDialog):
             if self._community_mode == 'friends' and self._focus_zone == 1:
                 focused = QtWidgets.QApplication.focusWidget()
                 if focused in self.friend_action_buttons:
+                    self._friend_action_index = self.friend_action_buttons.index(focused)
                     focused.click()
+                else:
+                    self.friend_action_buttons[self._friend_action_index].click()
                 return
             if self._focus_zone == 0:
                 if self._community_mode == 'messages':
