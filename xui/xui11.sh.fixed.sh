@@ -8695,6 +8695,8 @@ class AchievementToast(QtWidgets.QFrame):
         seq.addAnimation(grp_out)
 
         def done():
+            if self._anim is seq:
+                self._anim = None
             self.hide()
             self.finished.emit()
 
