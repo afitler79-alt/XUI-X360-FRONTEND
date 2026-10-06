@@ -3121,8 +3121,9 @@ def _fit_dialog_to_screen(dialog, parent=None, width_ratio=0.92, height_ratio=0.
 
 
 class SocialOverlay(QtWidgets.QDialog):
-    def __init__(self, parent=None):
+    def __init__(self, parent=None, notification_cb=None):
         super().__init__(parent)
+        self._notification_cb = notification_cb
         self.nickname = current_gamertag()
         self.social_profile = self._load_social_profile()
         self.user_id = str(self.social_profile.get('user_id') or uuid.uuid4().hex[:16])
@@ -3981,6 +3982,7 @@ class SocialOverlay(QtWidgets.QDialog):
         self._append_line(f"[{time.strftime('%H:%M:%S')}] [SYSTEM] {text}")
 
     def _append_chat(self, who, text, peer=None, message_id=''):
+        self._notify_incoming_message()
         if isinstance(peer, dict):
             self._save_conversation_message(peer, 'in', text, 'delivered', message_id)
             if self._conversation_key(peer) != self._active_conversation_key:
@@ -3989,6 +3991,13 @@ class SocialOverlay(QtWidgets.QDialog):
         else:
             self._append_line(f"[{time.strftime('%H:%M:%S')}] {who}: {text}")
         self._push_recent_message(who, text)
+
+    def _notify_incoming_message(self):
+        if callable(self._notification_cb):
+            try:
+                self._notification_cb()
+            except Exception:
+                pass
 
     def _conversation_key(self, peer=None, user_id='', host='', port=0):
         peer = peer if isinstance(peer, dict) else {}
@@ -5201,6 +5210,7 @@ class SocialOverlay(QtWidgets.QDialog):
                 port = int(evt[5] or 0) if len(evt) > 5 else 0
                 message_id = str(evt[6] or '') if len(evt) > 6 else ''
                 peer = {'name': sender, 'user_id': sender_uid, 'host': host, 'port': port, 'source': 'FRIEND'}
+                self._notify_incoming_message()
                 self._save_conversation_message(peer, 'in', text, 'delivered', message_id)
                 if self._conversation_key(peer) == self._active_conversation_key:
                     self.status.setText(f'Private message received from {sender}; LAN traffic is not encrypted.')
@@ -5208,6 +5218,7 @@ class SocialOverlay(QtWidgets.QDialog):
             elif kind == 'world_private_message':
                 _kind, sender, sender_user_id, text = evt
                 peer = {'name': sender, 'user_id': sender_user_id, 'source': 'GLOBAL'}
+                self._notify_incoming_message()
                 self._save_conversation_message(peer, 'in', text, 'relay', '')
                 self._push_recent_message(f'{sender} [PM]', text)
                 self._touch_global_player(sender_user_id, sender, 'pm')
@@ -5239,6 +5250,7 @@ class SocialOverlay(QtWidgets.QDialog):
             elif kind == 'world_chat':
                 _kind, sender, text = evt
                 peer = {'name': sender, 'source': 'WORLD'}
+                self._notify_incoming_message()
                 self._save_conversation_message(peer, 'in', text, 'relay')
                 self._push_recent_message(f'{sender} [WORLD]', text)
             elif kind == 'world_presence':
@@ -5292,6 +5304,7 @@ class SocialOverlay(QtWidgets.QDialog):
                 if blob:
                     item = self._save_voice_blob(sender, sender_user_id, mime, duration, blob, party_id='')
                     if item is not None:
+                        self._notify_incoming_message()
                         self._append_line(f"[{time.strftime('%H:%M:%S')}] {sender} [VOICE {float(duration):.0f}s]")
                         self._push_recent_message(f'{sender} [VOICE]', f'Voice message ({float(duration):.0f}s)')
                         if sender_user_id:
@@ -5308,6 +5321,7 @@ class SocialOverlay(QtWidgets.QDialog):
                 if blob:
                     item = self._save_voice_blob(sender, sender_user_id, mime, duration, blob, party_id=party_id)
                     if item is not None:
+                        self._notify_incoming_message()
                         tag = 'PARTY VOICE' if party_id else 'VOICE'
                         self._append_line(f"[{time.strftime('%H:%M:%S')}] {sender} [{tag} {float(duration):.0f}s]")
                         self._push_recent_message(f'{sender} [{tag}]', f'Voice message ({float(duration):.0f}s)')
@@ -9509,6 +9523,7 @@ class Dashboard(QtWidgets.QMainWindow):
             'back': 'back.mp3',
             'close': 'close.mp3',
             'achievement': 'archievements.mp3',
+            'notification': 'notification.mp3',
         }
         self.sfx_aliases = {
             'hover': ['hover.mp3', 'click.mp3'],
@@ -9517,6 +9532,7 @@ class Dashboard(QtWidgets.QMainWindow):
             'back': ['back.mp3', '14. Back.mp3'],
             'close': ['close.mp3', '14. Back.mp3'],
             'achievement': ['archievements.mp3', 'achievement.mp3', 'select.mp3'],
+            'notification': ['notification.mp3', 'message.mp3', 'select.mp3', 'click.mp3'],
         }
         self._build()
         self._setup_guide_shortcuts()
@@ -11196,10 +11212,15 @@ exit 1
         u = str(url or '').strip()
         if not u:
             return
+        if normal_mode:
+            try:
+                if QtGui.QDesktopServices.openUrl(QtCore.QUrl(u)):
+                    self._play_sfx('open')
+                    return
+            except Exception:
+                pass
         kiosk = XUI_HOME / 'bin' / 'xui_browser.sh'
         if kiosk.exists():
-            # Keep browser apps useful but always fullscreen by default.
-            # Use hub mode (fullscreen + controls) unless caller explicitly asks kiosk.
             mode = '--hub' if bool(normal_mode) else '--kiosk'
             self._run('/bin/sh', ['-c', f'"{kiosk}" {mode} "{u}"'])
             return
@@ -11207,7 +11228,7 @@ exit 1
 
     def _open_social_chat(self, initial_mode='messages'):
         self._play_sfx('open')
-        d = SocialOverlay(self)
+        d = SocialOverlay(self, notification_cb=lambda: self._play_sfx('notification'))
         try:
             d._set_community_mode(initial_mode)
         except Exception:
