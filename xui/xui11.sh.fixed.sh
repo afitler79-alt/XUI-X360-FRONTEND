@@ -7092,7 +7092,11 @@ class XboxGuideMenu(QtWidgets.QDialog):
         self._sections = self._build_sections()
         self._section_lists = []
         self.setWindowTitle('Xbox Guide')
-        self.setWindowFlags(QtCore.Qt.Dialog | QtCore.Qt.FramelessWindowHint)
+        self.setWindowFlags(
+            QtCore.Qt.Dialog
+            | QtCore.Qt.FramelessWindowHint
+            | QtCore.Qt.WindowStaysOnTopHint
+        )
         self.setAttribute(QtCore.Qt.WA_TranslucentBackground, True)
         self.setModal(True)
         self.resize(980, 520)
@@ -7514,6 +7518,8 @@ class XboxGuideMenu(QtWidgets.QDialog):
 
     def showEvent(self, e):
         super().showEvent(e)
+        self.raise_()
+        self.activateWindow()
         parent = self.parentWidget()
         _fit_dialog_to_screen(self, parent, width_ratio=0.70, height_ratio=0.62, min_width=560, min_height=340)
         self._refresh_meta()
