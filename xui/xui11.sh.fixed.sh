@@ -3124,6 +3124,7 @@ class SocialOverlay(QtWidgets.QDialog):
         self.engine = InlineSocialEngine(self.nickname, self.user_id)
         self.peer_items = {}
         self.peer_data = {}
+        self.friend_row_widgets = {}
         self.global_players = {}
         self.friends = []
         self.friend_requests = []
@@ -3173,62 +3174,65 @@ class SocialOverlay(QtWidgets.QDialog):
         self._action_items = {}
         self.setStyleSheet('''
             QFrame#social_panel {
-                background:#101923;
-                border:2px solid rgba(111,137,154,0.58);
+                background:#cbd0d5;
+                border:1px solid #70777e;
                 border-radius:0px;
             }
             QFrame#social_header {
-                background:qlineargradient(x1:0,y1:0,x2:1,y2:0, stop:0 #1a2028, stop:1 #0f141b);
+                background:#171b20;
                 border:none;
             }
             QFrame#social_col {
-                background:#16232d;
-                border:1px solid rgba(111,137,154,0.36);
+                background:#e6e9ec;
+                border:1px solid #aeb4ba;
             }
-            QLabel#social_title { color:#f4f8fb; font-size:40px; font-weight:900; }
-            QLabel#social_hint { color:#c0ccd6; font-size:16px; font-weight:700; }
-            QLabel#social_col_title { color:#f0f5f8; font-size:20px; font-weight:900; }
+            QLabel#social_title { color:#f4f7fa; font-size:26px; font-weight:800; }
+            QLabel#social_hint { color:#5a626b; font-size:14px; font-weight:650; }
+            QFrame#social_header QLabel#social_hint { color:#d5dbe0; }
+            QLabel#social_col_title { color:#303840; font-size:18px; font-weight:800; }
             QListWidget {
-                background:#0c151d;
-                color:#e5edf3;
-                border:1px solid rgba(159,183,200,0.25);
-                font-size:21px;
-                font-weight:700;
+                background:#f1f3f5;
+                color:#252b31;
+                border:1px solid #c1c7cc;
+                font-size:17px;
+                font-weight:600;
                 outline:none;
             }
             QListWidget::item {
-                padding:6px 10px;
-                border:1px solid transparent;
+                padding:8px 12px;
+                border:none;
+                border-bottom:1px solid #cbd0d5;
             }
             QListWidget::item:selected {
-                color:#f3fff2;
-                background:qlineargradient(x1:0,y1:0,x2:1,y2:0, stop:0 #4ea93f, stop:1 #2f8832);
-                border:1px solid rgba(255,255,255,0.35);
+                color:#ffffff;
+                background:#56b83c;
+                border:none;
             }
             QPlainTextEdit {
-                background:#0d1821;
-                border:1px solid rgba(159,183,200,0.30);
-                color:#edf4f8;
-                font-size:16px;
-                font-weight:700;
+                background:#f5f6f7;
+                border:1px solid #c1c7cc;
+                color:#242a30;
+                font-size:15px;
+                font-weight:500;
             }
             QLineEdit {
-                background:#0d1821;
-                border:1px solid #52697a;
-                color:#edf4f8;
-                font-size:20px;
-                font-weight:700;
-                padding:8px;
+                background:#ffffff;
+                border:1px solid #929aa2;
+                color:#22282e;
+                font-size:16px;
+                font-weight:600;
+                padding:7px;
             }
             QPushButton {
-                background:qlineargradient(x1:0,y1:0,x2:0,y2:1, stop:0 #58d53e, stop:1 #34af2e);
-                color:#f6fff3;
-                border:1px solid rgba(250,255,248,0.42);
-                font-size:18px;
+                background:#d5dade;
+                color:#252b31;
+                border:1px solid #9ea5ac;
+                font-size:15px;
                 font-weight:700;
-                padding:8px 12px;
+                padding:7px 12px;
             }
-            QPushButton:hover { background:qlineargradient(x1:0,y1:0,x2:0,y2:1, stop:0 #66df4b, stop:1 #3dba35); }
+            QPushButton:hover { background:#c0c7cd; }
+            QPushButton#social_primary_action { background:#58b83c; color:#ffffff; border:1px solid #3a8f2b; }
         ''')
         self._social_base_style = self.styleSheet()
         outer = QtWidgets.QVBoxLayout(self)
@@ -3265,6 +3269,7 @@ class SocialOverlay(QtWidgets.QDialog):
             ('party', 'Party'),
             ('messages', 'Messages'),
             ('players', 'Players'),
+            ('global', 'Global Chat'),
         ):
             b = QtWidgets.QPushButton(label)
             b.clicked.connect(lambda _=False, mode=key: self._set_community_mode(mode))
@@ -3277,6 +3282,7 @@ class SocialOverlay(QtWidgets.QDialog):
         body.setSpacing(10)
 
         left_wrap = QtWidgets.QFrame()
+        self.left_wrap = left_wrap
         left_wrap.setObjectName('social_col')
         left = QtWidgets.QVBoxLayout(left_wrap)
         left.setContentsMargins(8, 8, 8, 8)
@@ -3287,8 +3293,22 @@ class SocialOverlay(QtWidgets.QDialog):
         self.peers.setMinimumWidth(0)
         left.addWidget(self.left_lbl)
         left.addWidget(self.peers, 1)
+        self.friend_actions = QtWidgets.QWidget()
+        friend_actions_l = QtWidgets.QHBoxLayout(self.friend_actions)
+        friend_actions_l.setContentsMargins(0, 6, 0, 0)
+        friend_actions_l.setSpacing(8)
+        add_friend_btn = QtWidgets.QPushButton('Add Friend')
+        add_friend_btn.setObjectName('social_primary_action')
+        add_friend_btn.clicked.connect(self._send_friend_request)
+        friend_requests_btn = QtWidgets.QPushButton('Friend Requests')
+        friend_requests_btn.clicked.connect(self._open_friend_requests)
+        self.friend_action_buttons = [add_friend_btn, friend_requests_btn]
+        friend_actions_l.addWidget(add_friend_btn)
+        friend_actions_l.addWidget(friend_requests_btn)
+        left.addWidget(self.friend_actions, 0)
 
         center_wrap = QtWidgets.QFrame()
+        self.center_wrap = center_wrap
         center_wrap.setObjectName('social_col')
         center = QtWidgets.QVBoxLayout(center_wrap)
         center.setContentsMargins(8, 8, 8, 8)
@@ -3301,6 +3321,7 @@ class SocialOverlay(QtWidgets.QDialog):
         center.addWidget(self.actions, 1)
 
         right_wrap = QtWidgets.QFrame()
+        self.right_wrap = right_wrap
         right_wrap.setObjectName('social_col')
         right = QtWidgets.QVBoxLayout(right_wrap)
         right.setContentsMargins(8, 8, 8, 8)
@@ -3331,6 +3352,7 @@ class SocialOverlay(QtWidgets.QDialog):
         body.addWidget(left_wrap, 3)
         body.addWidget(center_wrap, 2)
         body.addWidget(right_wrap, 5)
+        self.community_body = body
         root.addLayout(body, 1)
 
         self._add_action_item('reply', 'Reply / Send Message')
@@ -3350,6 +3372,7 @@ class SocialOverlay(QtWidgets.QDialog):
         self.actions.itemActivated.connect(self._run_selected_action)
         self.actions.itemDoubleClicked.connect(self._run_selected_action)
         self.peers.currentItemChanged.connect(lambda *_: self._update_peer_meta())
+        self.peers.currentItemChanged.connect(lambda *_: self._update_friend_row_selection())
 
         bottom = QtWidgets.QLabel('A/ENTER = select | B/ESC = close | X = quick action | Y = change community tab | LB/RB = previous/next tab')
         bottom.setObjectName('social_hint')
@@ -3365,7 +3388,7 @@ class SocialOverlay(QtWidgets.QDialog):
         self._action_items[str(key)] = it
 
     def _community_order(self):
-        return ['friends', 'party', 'messages', 'players']
+        return ['friends', 'party', 'messages', 'players', 'global']
 
     def _recent_players(self):
         arr = safe_json_read(SOCIAL_MESSAGES_FILE, [])
@@ -3410,12 +3433,14 @@ class SocialOverlay(QtWidgets.QDialog):
             'party': party_n,
             'messages': messages_n,
             'players': players_n,
+            'global': len(self.global_players),
         }
         labels = {
             'friends': 'Friends',
             'party': 'Party',
             'messages': 'Messages',
             'players': 'Players',
+            'global': 'Global Chat',
         }
         for key, btn in self.community_tabs.items():
             active = (key == self._community_mode)
@@ -3436,17 +3461,38 @@ class SocialOverlay(QtWidgets.QDialog):
         if mode not in self._community_order():
             mode = 'messages'
         self._community_mode = mode
+        friends_view = mode == 'friends'
+        self.friend_actions.setVisible(friends_view)
+        self.center_wrap.setVisible(not friends_view)
+        self.right_wrap.setVisible(not friends_view)
+        self.community_body.setStretch(self.community_body.indexOf(self.left_wrap), 1 if friends_view else 3)
+        if not friends_view:
+            self.community_body.setStretch(self.community_body.indexOf(self.center_wrap), 2)
+            self.community_body.setStretch(self.community_body.indexOf(self.right_wrap), 5)
         title_map = {
-            'friends': 'community / friends',
-            'party': 'community / party',
-            'messages': 'community / messages',
-            'players': 'community / players',
+            'friends': 'Community  /  Friends',
+            'party': 'Community  /  Party',
+            'messages': 'Community  /  Messages',
+            'players': 'Community  /  Players',
+            'global': 'Community  /  Global Chat',
         }
         if hasattr(self, 'title_lbl'):
             self.title_lbl.setText(title_map.get(mode, 'community / messages'))
-        if mode == 'messages':
+        if mode in ('messages', 'global'):
+            if mode == 'global' and not self.engine.world_enabled:
+                self.engine.set_world_enabled(True)
+                self._refresh_world_peer()
+                self._save_world_settings()
             self.left_lbl.setText('Messages / Peers')
             self._rebuild_message_peers()
+            if mode == 'global':
+                self.left_lbl.setText('Global Room')
+                for row in range(self.peers.count()):
+                    item = self.peers.item(row)
+                    peer = self.peer_data.get(item.data(QtCore.Qt.UserRole)) if item else None
+                    if isinstance(peer, dict) and str(peer.get('source') or '').upper() == 'WORLD':
+                        self.peers.setCurrentRow(row)
+                        break
         elif mode == 'friends':
             self.left_lbl.setText('Friends')
             self._rebuild_community_rows(self._community_friends_rows())
@@ -3537,11 +3583,38 @@ class SocialOverlay(QtWidgets.QDialog):
         prev = self.peers.currentItem().text() if self.peers.currentItem() is not None else ''
         self.peers.clear()
         self.peer_items = {}
+        self.friend_row_widgets = {}
         keep_row = -1
         for row in rows:
             it = QtWidgets.QListWidgetItem(self._community_row_text(row))
             it.setData(QtCore.Qt.UserRole, dict(row))
             self.peers.addItem(it)
+            if str(row.get('source') or '').upper() == 'FRIEND':
+                it.setSizeHint(QtCore.QSize(max(280, self.peers.viewport().width() - 4), 62))
+                card = QtWidgets.QFrame()
+                card.setObjectName('friend_row')
+                line = QtWidgets.QHBoxLayout(card)
+                line.setContentsMargins(10, 5, 14, 5)
+                line.setSpacing(12)
+                avatar = QtWidgets.QLabel(str(row.get('name') or 'F')[:1].upper())
+                avatar.setAlignment(QtCore.Qt.AlignCenter)
+                avatar.setFixedSize(42, 42)
+                avatar.setStyleSheet('background:#aeb9c1; color:#ffffff; border-radius:21px; font-size:18px; font-weight:800;')
+                identity = QtWidgets.QVBoxLayout()
+                identity.setSpacing(1)
+                name = QtWidgets.QLabel(str(row.get('name') or 'Friend'))
+                name.setObjectName('friend_row_name')
+                status = QtWidgets.QLabel(str(row.get('last') or ('Online' if row.get('online') else 'Offline')))
+                status.setObjectName('friend_row_status')
+                identity.addWidget(name)
+                identity.addWidget(status)
+                line.addWidget(avatar)
+                line.addLayout(identity, 1)
+                status_badge = QtWidgets.QLabel('● Online' if row.get('online') else '○ Offline')
+                status_badge.setObjectName('friend_row_badge')
+                line.addWidget(status_badge)
+                self.peers.setItemWidget(it, card)
+                self.friend_row_widgets[it] = (card, avatar, name, status, status_badge)
             if keep_row < 0 and prev and it.text() == prev:
                 keep_row = self.peers.count() - 1
         if self.peers.count() > 0:
@@ -3549,6 +3622,24 @@ class SocialOverlay(QtWidgets.QDialog):
                 self.peers.setCurrentRow(keep_row)
             else:
                 self.peers.setCurrentRow(0)
+        self._update_friend_row_selection()
+
+    def _update_friend_row_selection(self):
+        current = self.peers.currentItem()
+        for item, parts in self.friend_row_widgets.items():
+            card, avatar, name, status, badge = parts
+            selected = item is current
+            bg = '#58b83c' if selected else '#f1f3f5'
+            fg = '#ffffff' if selected else '#252b31'
+            secondary = '#ecf5e9' if selected else '#66717a'
+            card.setStyleSheet(f'QFrame#friend_row {{ background:{bg}; border-bottom:1px solid #cbd0d5; }}')
+            avatar.setStyleSheet(
+                f'background:{"#3e912d" if selected else "#aeb9c1"}; color:#ffffff; '
+                'border-radius:21px; font-size:18px; font-weight:800;'
+            )
+            name.setStyleSheet(f'color:{fg}; font-size:17px; font-weight:750;')
+            status.setStyleSheet(f'color:{secondary}; font-size:12px; font-weight:600;')
+            badge.setStyleSheet(f'color:{fg}; font-size:13px; font-weight:700;')
 
     def _rebuild_message_peers(self):
         self.peers.clear()
@@ -3570,9 +3661,13 @@ class SocialOverlay(QtWidgets.QDialog):
             self.peers.setCurrentRow(0)
 
     def _set_focus_zone(self, zone):
-        self._focus_zone = max(0, min(3, int(zone)))
+        max_zone = 1 if self._community_mode == 'friends' else 3
+        self._focus_zone = max(0, min(max_zone, int(zone)))
         if self._focus_zone == 0:
             self.peers.setFocus(QtCore.Qt.OtherFocusReason)
+        elif self._community_mode == 'friends':
+            if self._focus_zone == 1 and self.friend_action_buttons:
+                self.friend_action_buttons[0].setFocus(QtCore.Qt.OtherFocusReason)
         elif self._focus_zone == 1:
             self.actions.setFocus(QtCore.Qt.OtherFocusReason)
         elif self._focus_zone == 2:
@@ -3814,15 +3909,23 @@ class SocialOverlay(QtWidgets.QDialog):
                 self._move_in_list(self.actions, 1)
             return
         if k in (QtCore.Qt.Key_Tab,):
-            self._set_focus_zone((self._focus_zone + 1) % 4)
+            zone_count = 2 if self._community_mode == 'friends' else 4
+            self._set_focus_zone((self._focus_zone + 1) % zone_count)
             return
         if k in (QtCore.Qt.Key_X,):
-            if self._focus_zone == 0 and self._community_mode in ('friends', 'party', 'players'):
+            if self._community_mode == 'friends' and self._focus_zone == 1:
+                self.friend_action_buttons[0].click()
+            elif self._focus_zone == 0 and self._community_mode in ('friends', 'party', 'players'):
                 self._send_friend_request()
             else:
                 self._send_current()
             return
         if k in (QtCore.Qt.Key_Return, QtCore.Qt.Key_Enter):
+            if self._community_mode == 'friends' and self._focus_zone == 1:
+                focused = QtWidgets.QApplication.focusWidget()
+                if focused in self.friend_action_buttons:
+                    focused.click()
+                return
             if self._focus_zone == 0:
                 if self._community_mode == 'messages':
                     self._open_chat_keyboard()
@@ -6974,22 +7077,22 @@ class XboxGuideMenu(QtWidgets.QDialog):
         self.resize(980, 520)
         self.setStyleSheet('''
             QDialog {
-                background:rgba(8, 14, 22, 0.58);
+                background:rgba(2, 5, 9, 0.76);
             }
             QFrame#xguide_panel {
-                background:qlineargradient(x1:0,y1:0,x2:1,y2:1, stop:0 #3a4654, stop:1 #2a3340);
-                border:1px solid rgba(226,238,248,0.30);
+                background:qlineargradient(x1:0,y1:0,x2:0,y2:1, stop:0 #20272e, stop:0.10 #343c44, stop:1 #252c33);
+                border:2px solid rgba(191,202,212,0.76);
                 border-radius:0px;
             }
             QLabel#xguide_title {
                 color:#f3f7fb;
-                font-size:30px;
+                font-size:23px;
                 font-weight:800;
                 font-family:"Segoe UI","Noto Sans",sans-serif;
             }
             QLabel#xguide_meta {
                 color:rgba(233,243,251,0.95);
-                font-size:17px;
+                font-size:14px;
                 font-weight:700;
                 font-family:"Segoe UI","Noto Sans",sans-serif;
             }
@@ -6999,32 +7102,32 @@ class XboxGuideMenu(QtWidgets.QDialog):
             }
             QLabel#xguide_section_title {
                 color:#293541;
-                font-size:16px;
+                font-size:13px;
                 font-weight:800;
                 padding:4px 12px;
                 font-family:"Segoe UI","Noto Sans",sans-serif;
             }
             QListWidget#xguide_list {
-                background:#c9ced6;
-                color:#1a2a40;
+                background:#e4e7ea;
+                color:#222930;
                 border:none;
-                font-size:20px;
+                font-size:16px;
                 outline:none;
                 font-family:"Segoe UI","Noto Sans",sans-serif;
             }
             QListWidget#xguide_list::item {
-                min-height:38px;
-                padding:4px 16px;
-                border-bottom:1px solid rgba(38,48,62,0.14);
+                min-height:31px;
+                padding:3px 12px;
+                border-bottom:1px solid rgba(38,48,62,0.16);
             }
             QListWidget#xguide_list::item:selected {
                 color:#eefeed;
-                background:qlineargradient(x1:0,y1:0,x2:1,y2:0, stop:0 #57b73d, stop:1 #3d9531);
-                border:1px solid rgba(255,255,255,0.24);
+                background:#58b83c;
+                border:1px solid rgba(255,255,255,0.40);
             }
             QLabel#xguide_hint {
                 color:#edf3f8;
-                font-size:20px;
+                font-size:13px;
                 font-weight:800;
                 font-family:"Segoe UI","Noto Sans",sans-serif;
             }
@@ -7054,14 +7157,12 @@ class XboxGuideMenu(QtWidgets.QDialog):
         body = QtWidgets.QHBoxLayout()
         body.setSpacing(0)
 
-        self.blade_primary = GuideSideBlade(clockwise=False)
-        self.blade_secondary = GuideSideBlade(clockwise=False)
-        self.blade_right = GuideSideBlade(clockwise=True)
-        self.blade_primary.activated.connect(self._switch_section_from_blade)
-        self.blade_secondary.activated.connect(self._switch_section_from_blade)
-        self.blade_right.activated.connect(self._switch_section_from_blade)
-        body.addWidget(self.blade_primary, 0)
-        body.addWidget(self.blade_secondary, 0)
+        self.blade_tabs = []
+        for idx, (section_name, _items) in enumerate(self._sections):
+            blade = GuideSideBlade(clockwise=(idx == len(self._sections) - 1))
+            blade.activated.connect(self._switch_section_from_blade)
+            self.blade_tabs.append(blade)
+            body.addWidget(blade, 0)
 
         page_shell = QtWidgets.QFrame()
         page_shell.setObjectName('xguide_page_host')
@@ -7091,7 +7192,6 @@ class XboxGuideMenu(QtWidgets.QDialog):
             self._section_lists.append(lw)
             self.page_stack.addWidget(lw)
         body.addWidget(page_shell, 1)
-        body.addWidget(self.blade_right, 0)
         root.addLayout(body, 1)
 
         if self.mode == 'app':
@@ -7110,16 +7210,19 @@ class XboxGuideMenu(QtWidgets.QDialog):
         self._switch_section(0, animate=False)
 
     def _build_sections(self):
+        media_items = ['Video Marketplace', 'YouTube', 'Netflix', 'Twitch', 'Music Marketplace', 'System Music']
         if self.mode == 'app':
             return [
-                ('Games', ['Leave Game', 'Friends', 'Party', 'Messages', 'Beacons & Activity', 'Chat', 'Manage Storage']),
-                (self.gamertag, ['Reciente', 'Mensajes recientes', 'Social global', 'Mis juegos', 'Descargas activas']),
-                ('Settings', ['Xbox Home', 'Canjear codigo', 'Configuracion', 'Sign Out']),
+                ('Games & Apps', ['Xbox Home', 'Leave Game', 'Manage Storage']),
+                (self.gamertag, ['Friends', 'Party', 'Messages', 'Chat global', 'Beacons & Activity']),
+                ('Media', media_items),
+                ('Settings', ['System Settings', 'Canjear codigo', 'Sign Out']),
             ]
         return [
-            ('Guide', ['Reciente', 'Notifications', 'Mensajes recientes', 'Social global', 'Beacons', 'Mis juegos', 'Descargas activas', 'Canjear codigo']),
-            (self.gamertag, ['Friends', 'Party', 'Messages', 'Chat', 'Beacons & Activity']),
-            ('Dash', ['Inicio de Xbox', 'Quick Control Center', 'System Monitor', 'Network Test', 'Manage Favorites', 'Configuracion', 'Cerrar app actual', 'Cerrar sesion']),
+            ('Games & Apps', ['Inicio de Xbox', 'Mis juegos', 'Reciente', 'Descargas activas', 'Cerrar app actual']),
+            (self.gamertag, ['Friends', 'Party', 'Messages', 'Chat global', 'Beacons & Activity', 'Notifications']),
+            ('Media', media_items),
+            ('Settings', ['Quick Control Center', 'System Monitor', 'Network Test', 'Manage Favorites', 'Configuracion', 'Cerrar sesion']),
         ]
 
     def _current_list(self):
@@ -7165,13 +7268,10 @@ class XboxGuideMenu(QtWidgets.QDialog):
         self._switch_section((int(self._section_idx) + int(delta)) % total, animate=True)
 
     def _refresh_side_blades(self):
-        n = max(1, len(self._sections))
-        cur = int(self._section_idx) % n
-        nxt = (cur + 1) % n
-        prv = (cur - 1) % n
-        self.blade_primary.set_payload(cur, self._sections[cur][0], active=True)
-        self.blade_secondary.set_payload(nxt, self._sections[nxt][0], active=False)
-        self.blade_right.set_payload(prv, self._sections[prv][0], active=False)
+        cur = int(self._section_idx)
+        for idx, blade in enumerate(self.blade_tabs):
+            if idx < len(self._sections):
+                blade.set_payload(idx, self._sections[idx][0], active=(idx == cur))
 
     def _switch_section(self, row, animate=True):
         try:
@@ -7207,7 +7307,7 @@ class XboxGuideMenu(QtWidgets.QDialog):
 
     def _animate_blades(self, direction):
         direction = 1 if int(direction) >= 0 else -1
-        blades = [self.blade_primary, self.blade_secondary, self.blade_right]
+        blades = list(self.blade_tabs)
         grp = QtCore.QParallelAnimationGroup(self)
         self._blade_anim = grp
         for blade in blades:
@@ -7371,7 +7471,7 @@ class XboxGuideMenu(QtWidgets.QDialog):
     def showEvent(self, e):
         super().showEvent(e)
         parent = self.parentWidget()
-        _fit_dialog_to_screen(self, parent, width_ratio=0.88, height_ratio=0.82, min_width=700, min_height=420)
+        _fit_dialog_to_screen(self, parent, width_ratio=0.76, height_ratio=0.70, min_width=620, min_height=380)
         self._refresh_meta()
         self._refresh_side_blades()
         self._sfx('open')
@@ -10282,6 +10382,13 @@ DASH="$HOME/.xui/dashboard/pyqt_dashboard_improved.py"
 OLD_PID="${1:-}"
 RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
 DBUS_ADDR="${DBUS_SESSION_BUS_ADDRESS:-unix:path=${RUNTIME_DIR}/bus}"
+SESSION_ENV=()
+for name in DISPLAY WAYLAND_DISPLAY XAUTHORITY XDG_SESSION_TYPE XDG_CURRENT_DESKTOP DESKTOP_SESSION QT_QPA_PLATFORM; do
+    if [[ -n "${!name:-}" ]]; then
+        SESSION_ENV+=("$name=${!name}")
+    fi
+done
+SESSION_ENV+=("XDG_RUNTIME_DIR=$RUNTIME_DIR" "DBUS_SESSION_BUS_ADDRESS=$DBUS_ADDR")
 
 dashboard_ui_running(){
   if ! command -v pgrep >/dev/null 2>&1; then
@@ -10304,25 +10411,16 @@ wait_old_dashboard_exit(){
     fi
     sleep 0.10
   done
-}
-
-restart_via_systemd(){
-  if ! command -v systemctl >/dev/null 2>&1; then
     return 1
-  fi
-  XDG_RUNTIME_DIR="$RUNTIME_DIR" DBUS_SESSION_BUS_ADDRESS="$DBUS_ADDR" \
-    systemctl --user daemon-reload >/dev/null 2>&1 || true
-  XDG_RUNTIME_DIR="$RUNTIME_DIR" DBUS_SESSION_BUS_ADDRESS="$DBUS_ADDR" \
-    systemctl --user restart xui-dashboard.service >/dev/null 2>&1
 }
 
 start_via_wrapper(){
   if [ -x "$WRAP" ]; then
-    nohup env XDG_RUNTIME_DIR="$RUNTIME_DIR" DBUS_SESSION_BUS_ADDRESS="$DBUS_ADDR" "$WRAP" >/dev/null 2>&1 &
+    nohup env "${SESSION_ENV[@]}" "$WRAP" >/dev/null 2>&1 &
     return 0
   fi
   if [ -x "$START_SH" ]; then
-    nohup env XDG_RUNTIME_DIR="$RUNTIME_DIR" DBUS_SESSION_BUS_ADDRESS="$DBUS_ADDR" "$START_SH" >/dev/null 2>&1 &
+    nohup env "${SESSION_ENV[@]}" "$START_SH" >/dev/null 2>&1 &
     return 0
   fi
   return 1
@@ -10330,50 +10428,69 @@ start_via_wrapper(){
 
 start_direct_dashboard(){
   if [ -x "$PYRUN" ] && [ -f "$DASH" ]; then
-    nohup env XDG_RUNTIME_DIR="$RUNTIME_DIR" DBUS_SESSION_BUS_ADDRESS="$DBUS_ADDR" "$PYRUN" "$DASH" >/dev/null 2>&1 &
+    nohup env "${SESSION_ENV[@]}" "$PYRUN" "$DASH" >/dev/null 2>&1 &
     return 0
   fi
   if command -v python3 >/dev/null 2>&1 && [ -f "$DASH" ]; then
-    nohup env XDG_RUNTIME_DIR="$RUNTIME_DIR" DBUS_SESSION_BUS_ADDRESS="$DBUS_ADDR" python3 "$DASH" >/dev/null 2>&1 &
+    nohup env "${SESSION_ENV[@]}" python3 "$DASH" >/dev/null 2>&1 &
     return 0
   fi
   return 1
 }
 
-wait_old_dashboard_exit "$OLD_PID"
+activate_dashboard_window(){
+    if command -v wmctrl >/dev/null 2>&1; then
+    wmctrl -a 'XUI - Xbox 360 Style' >/dev/null 2>&1 && return 0
+    wmctrl -a 'XUI' >/dev/null 2>&1 && return 0
+    elif command -v xdotool >/dev/null 2>&1 && [[ -n "${DISPLAY:-}" ]]; then
+        local wid
+        wid="$(xdotool search --onlyvisible --name 'XUI' 2>/dev/null | head -n 1 || true)"
+        if [[ -z "$wid" ]]; then
+            wid="$(xdotool search --onlyvisible --class 'pyqt_dashboard_improved' 2>/dev/null | head -n 1 || true)"
+        fi
+        if [[ -n "$wid" ]]; then
+            xdotool windowactivate --sync "$wid" >/dev/null 2>&1 || true
+            xdotool windowraise "$wid" >/dev/null 2>&1 || true
+            return 0
+        fi
+    fi
+    return 1
+}
+
+wait_for_dashboard_window(){
+    for _ in $(seq 1 60); do
+        if dashboard_ui_running; then
+            if activate_dashboard_window; then
+                return 0
+            fi
+        fi
+        sleep 0.20
+    done
+    # Wayland compositors may not expose activation through X11 tools; Qt's own
+    # showFullScreen/raise_/activateWindow handles that session natively.
+    dashboard_ui_running
+}
+
+if ! wait_old_dashboard_exit "$OLD_PID"; then
+    if [[ "$OLD_PID" =~ ^[0-9]+$ ]] && [ "$OLD_PID" -gt 1 ]; then
+        kill -TERM "$OLD_PID" >/dev/null 2>&1 || true
+        for _ in $(seq 1 30); do
+            kill -0 "$OLD_PID" >/dev/null 2>&1 || break
+            sleep 0.10
+        done
+    fi
+fi
 sleep 0.20
 
-if dashboard_ui_running; then
-  exit 0
+if start_via_wrapper; then
+    wait_for_dashboard_window && exit 0
 fi
 
-restart_via_systemd || true
-for _ in $(seq 1 45); do
-  if dashboard_ui_running; then
-    exit 0
-  fi
-  sleep 0.15
-done
+if start_direct_dashboard; then
+    wait_for_dashboard_window && exit 0
+fi
 
-start_via_wrapper || true
-for _ in $(seq 1 45); do
-  if dashboard_ui_running; then
-    exit 0
-  fi
-  sleep 0.15
-done
-
-restart_via_systemd || true
-start_via_wrapper || true
-for _ in $(seq 1 30); do
-  if dashboard_ui_running; then
-    exit 0
-  fi
-  sleep 0.15
-done
-
-start_direct_dashboard || true
-exit 0
+exit 1
 '''
         try:
             helper.parent.mkdir(parents=True, exist_ok=True)
@@ -10383,15 +10500,7 @@ exit 0
             pass
         helper_q = shlex.quote(str(helper))
         current_pid_q = shlex.quote(str(os.getpid()))
-        cmd = (
-            f'if [ -x {helper_q} ]; then '
-            'if command -v systemd-run >/dev/null 2>&1; then '
-            f'systemd-run --user --quiet --collect --unit "xui-postupdate-restart-$(date +%s)" {helper_q} {current_pid_q} >/dev/null 2>&1 || nohup {helper_q} {current_pid_q} >/dev/null 2>&1 & '
-            'else '
-            f'nohup {helper_q} {current_pid_q} >/dev/null 2>&1 & '
-            'fi; '
-            'fi'
-        )
+        cmd = f'nohup {helper_q} {current_pid_q} >/dev/null 2>&1 &'
         QtCore.QProcess.startDetached('/bin/sh', ['-lc', cmd])
         QtCore.QTimer.singleShot(520, self._request_application_exit)
 
@@ -10793,8 +10902,15 @@ exit 0
         lines = [ln.strip() for ln in self._install_task_output.splitlines() if ln.strip()]
         tail = '\n'.join(lines[-10:]).strip()
         fail_txt = str(self._install_task_fail_msg or f'{self._install_task_label} install failed.')
+        if 'Xbox 360 Homebrew catalog' in self._install_task_label and 'GitHub devolvió 404' in tail:
+            fail_txt = (
+                'GitHub no permite leer el repositorio/TXT. El repo parece privado; usa un token fine-grained '
+                'con Contents: Read y acceso a XUI_360GAMES_REP. El token se guarda al pulsar '
+                'Sync 360 Homebrew.\n\n' + tail
+            )
         if tail:
-            fail_txt = fail_txt + '\n\n' + tail
+            if tail not in fail_txt:
+                fail_txt = fail_txt + '\n\n' + tail
         self._msg('Install Failed', fail_txt)
 
     def _run_install_task(self, title, shell_cmd, success_msg='', fail_msg='', launch_cmd=''):
@@ -11208,8 +11324,8 @@ exit 0
         if name == 'Messages':
             self.handle_action('Messages')
             return
-        if name == 'Chat':
-            self.handle_action('Messages')
+        if name in ('Chat', 'Chat global', 'Social global'):
+            self._open_social_chat('global')
             return
         if name == 'Manage Storage':
             self.handle_action('Storage')
@@ -14676,6 +14792,7 @@ import sys
 import threading
 import time
 import urllib.parse
+import urllib.error
 import urllib.request
 import uuid
 from pathlib import Path
@@ -15955,6 +16072,7 @@ COVER_CACHE = Path.home() / '.xui' / 'cache' / 'store_covers'
 EXTERNAL_STORE_FILE = DATA_HOME / 'store_external.json'
 XBOX360_CATALOG_FILE = DATA_HOME / 'xbox360_homebrew.json'
 XBOX360_REPO_CONFIG = DATA_HOME / 'xbox360_repo_url.txt'
+XBOX360_GITHUB_TOKEN_FILE = DATA_HOME / 'xbox360_github_token'
 XBOX360_REPO_URL = 'https://raw.githubusercontent.com/afitler79-alt/XUI_360GAMES_REP/main/xui360repo.txt'
 EXTERNAL_STALE_SECONDS = 6 * 60 * 60
 DAILY_ACTIVE_COUNT = 360
@@ -15997,6 +16115,11 @@ def _github_headers(url):
         or os.environ.get('GH_TOKEN')
         or os.environ.get('GITHUB_TOKEN')
     )
+    if not token:
+        try:
+            token = XBOX360_GITHUB_TOKEN_FILE.read_text(encoding='utf-8').strip()
+        except Exception:
+            token = ''
     if not token and shutil.which('gh'):
         try:
             result = subprocess.run(
@@ -16163,8 +16286,21 @@ def _sync_xbox360_catalog():
     if request_url != url:
         headers['Accept'] = 'application/vnd.github.raw+json'
     request = urllib.request.Request(request_url, headers=headers)
-    with urllib.request.urlopen(request, timeout=45) as response:
-        payload = response.read(8 * 1024 * 1024 + 1)
+    try:
+        with urllib.request.urlopen(request, timeout=45) as response:
+            payload = response.read(8 * 1024 * 1024 + 1)
+    except urllib.error.HTTPError as exc:
+        if exc.code == 404:
+            raise ValueError(
+                'GitHub devolvió 404. El repositorio o el TXT es privado: introduce un token GitHub '
+                'con permiso de solo lectura al contenido del repo, o comprueba propietario/rama/ruta.'
+            ) from None
+        if exc.code in (401, 403):
+            raise ValueError(
+                f'GitHub rechazó el acceso (HTTP {exc.code}). Revisa que el token sea válido y tenga '
+                'permiso Contents: read para XUI_360GAMES_REP.'
+            ) from None
+        raise ValueError(f'GitHub no pudo entregar el catálogo (HTTP {exc.code}).') from None
     if len(payload) > 8 * 1024 * 1024:
         raise ValueError('El catálogo supera el límite de 8 MiB.')
     items = _catalog_entries(payload.decode('utf-8-sig', errors='replace'))
@@ -17369,6 +17505,7 @@ class StoreWindow(QtWidgets.QMainWindow):
         refresh_btn = QtWidgets.QPushButton('Refresh')
         sync_btn = QtWidgets.QPushButton('Sync Sources')
         self.sync_360_btn = QtWidgets.QPushButton('Sync 360 Homebrew')
+        github_token_btn = QtWidgets.QPushButton('GitHub Access')
         close_btn = QtWidgets.QPushButton('Close')
         self.buy_btn.clicked.connect(self.buy_selected)
         self.install_btn.clicked.connect(self.install_selected)
@@ -17377,6 +17514,7 @@ class StoreWindow(QtWidgets.QMainWindow):
         refresh_btn.clicked.connect(self.reload)
         sync_btn.clicked.connect(self.sync_sources)
         self.sync_360_btn.clicked.connect(self.sync_xbox360_catalog)
+        github_token_btn.clicked.connect(self.configure_xbox360_github_token)
         close_btn.clicked.connect(self.close)
         actions.addWidget(self.buy_btn)
         actions.addWidget(self.install_btn)
@@ -17385,6 +17523,7 @@ class StoreWindow(QtWidgets.QMainWindow):
         actions.addWidget(refresh_btn)
         actions.addWidget(sync_btn)
         actions.addWidget(self.sync_360_btn)
+        actions.addWidget(github_token_btn)
         actions.addStretch(1)
         actions.addWidget(close_btn)
 
@@ -17573,6 +17712,27 @@ class StoreWindow(QtWidgets.QMainWindow):
             pass
 
     def sync_xbox360_catalog(self):
+        if not _github_headers(XBOX360_REPO_URL).get('Authorization'):
+            token, accepted = QtWidgets.QInputDialog.getText(
+                self,
+                'Acceso al catálogo privado de GitHub',
+                'El repositorio XUI_360GAMES_REP es privado. Pega un token fine-grained con Contents: Read.\n'
+                'Se guardará localmente en ~/.xui/data con permisos solo para tu usuario. Déjalo vacío '
+                'para intentar sincronizar sin token.',
+                QtWidgets.QLineEdit.Password,
+            )
+            if not accepted:
+                self.info_lbl.setText('Sincronización cancelada.')
+                return
+            token = str(token or '').strip()
+            if token:
+                try:
+                    XBOX360_GITHUB_TOKEN_FILE.parent.mkdir(parents=True, exist_ok=True)
+                    XBOX360_GITHUB_TOKEN_FILE.write_text(token + '\n', encoding='utf-8')
+                    XBOX360_GITHUB_TOKEN_FILE.chmod(0o600)
+                except Exception as exc:
+                    self._menu_notice('GitHub token', f'No se pudo guardar el token con permisos privados: {exc}')
+                    return
         command = ' '.join(shlex.quote(part) for part in (
             sys.executable, str(Path(__file__).resolve()), '--sync-xbox360'
         ))
@@ -17581,6 +17741,29 @@ class StoreWindow(QtWidgets.QMainWindow):
             success_msg='Catálogo de homebrew Xbox 360 actualizado.',
             fail_msg='No se pudo sincronizar el catálogo Xbox 360. Comprueba el enlace/repositorio.',
         )
+
+    def configure_xbox360_github_token(self):
+        token, accepted = QtWidgets.QInputDialog.getText(
+            self,
+            'GitHub access token',
+            'Fine-grained token for XUI_360GAMES_REP with Contents: Read.\n'
+            'The token is stored locally with owner-only permissions. Leave blank to remove the saved token.',
+            QtWidgets.QLineEdit.Password,
+        )
+        if not accepted:
+            return
+        token = str(token or '').strip()
+        try:
+            if token:
+                XBOX360_GITHUB_TOKEN_FILE.parent.mkdir(parents=True, exist_ok=True)
+                XBOX360_GITHUB_TOKEN_FILE.write_text(token + '\n', encoding='utf-8')
+                XBOX360_GITHUB_TOKEN_FILE.chmod(0o600)
+                self.info_lbl.setText('GitHub token stored locally. Press Sync 360 Homebrew.')
+            else:
+                XBOX360_GITHUB_TOKEN_FILE.unlink(missing_ok=True)
+                self.info_lbl.setText('Saved GitHub token removed.')
+        except Exception as exc:
+            self._menu_notice('GitHub token', f'Could not update the local token: {exc}')
 
     def _on_sync_finished(self, code, status):
         ok = (int(code) == 0 and status == QtCore.QProcess.NormalExit)
