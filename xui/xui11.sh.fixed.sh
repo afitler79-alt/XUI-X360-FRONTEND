@@ -9356,6 +9356,7 @@ class AvatarStudioDialog(QtWidgets.QDialog):
     def _build(self):
         self.setStyleSheet('''
             QDialog { background:#121a1d; color:#eef5f3; }
+            QLabel { color:#e6efec; }
             QLabel#heading { color:#f4f8f6; font-size:25px; font-weight:800; }
             QLabel#subheading { color:#9cadad; font-size:13px; }
             QLabel#balance { color:#d9ed84; font-size:15px; font-weight:750; }
@@ -9412,9 +9413,39 @@ class AvatarStudioDialog(QtWidgets.QDialog):
     def _preview_html(self):
         return '''<!doctype html><html><head><meta charset="utf-8"><style>
             html,body,#view{margin:0;width:100%;height:100%;overflow:hidden;background:#10191e;color:#d6e4e1;font:14px sans-serif}
-            #view{position:relative} #fallback{display:none;width:100%;height:100%}
+                        #view{position:relative} #fallback{position:absolute;inset:0;display:block;width:100%;height:100%}
             #status{position:absolute;left:12px;bottom:10px;opacity:.7;z-index:2}
         </style></head><body><div id="view"><canvas id="fallback"></canvas></div><div id="status">Drag to rotate</div>
+                <script>
+                window.__xuiAvatarState={skin:'#bd815f',hair_style:'Short',hair_color:'#29313d',outfit:'#38b866',accessory:'None',background:'#12303a'};
+                const fallbackCanvas=document.getElementById('fallback'),fallbackCtx=fallbackCanvas.getContext('2d');
+                function drawFallback(c){
+                    window.__xuiAvatarState=c;
+                    const r=document.getElementById('view').getBoundingClientRect(),d=Math.min(devicePixelRatio||1,2);
+                    fallbackCanvas.width=Math.max(1,Math.floor(r.width*d));fallbackCanvas.height=Math.max(1,Math.floor(r.height*d));
+                    fallbackCtx.setTransform(d,0,0,d,0,0);
+                    const w=r.width,h=r.height,x=w/2,s=Math.min(w/340,h/410);
+                    const bg=fallbackCtx.createLinearGradient(0,0,w,h);bg.addColorStop(0,c.background||'#12303a');bg.addColorStop(1,'#10191e');
+                    fallbackCtx.fillStyle=bg;fallbackCtx.fillRect(0,0,w,h);
+                    fallbackCtx.fillStyle='rgba(0,0,0,.32)';fallbackCtx.beginPath();fallbackCtx.ellipse(x,h*.82,82*s,15*s,0,0,Math.PI*2);fallbackCtx.fill();
+                    function oval(px,py,rx,ry,color){fallbackCtx.fillStyle=color;fallbackCtx.beginPath();fallbackCtx.ellipse(x+px*s,py*s,rx*s,ry*s,0,0,Math.PI*2);fallbackCtx.fill();}
+                    fallbackCtx.fillStyle=c.outfit||'#38b866';fallbackCtx.beginPath();fallbackCtx.moveTo(x-58*s,178*s);fallbackCtx.quadraticCurveTo(x,157*s,x+58*s,178*s);fallbackCtx.lineTo(x+78*s,324*s);fallbackCtx.quadraticCurveTo(x,348*s,x-78*s,324*s);fallbackCtx.closePath();fallbackCtx.fill();
+                    oval(-34,326,22,39,'#202b30');oval(34,326,22,39,'#202b30');oval(-38,362,30,11,'#d5e1df');oval(38,362,30,11,'#d5e1df');
+                    oval(-77,222,16,59,c.skin||'#bd815f');oval(77,222,16,59,c.skin||'#bd815f');
+                    oval(0,118,49,59,c.skin||'#bd815f');
+                    oval(0,80,51,29,c.hair_color||'#29313d');
+                    if(c.hair_style==='Long'){oval(-43,137,14,56,c.hair_color||'#29313d');oval(43,137,14,56,c.hair_color||'#29313d');}
+                    if(c.hair_style==='Spiky'){for(let i=-2;i<=2;i++){fallbackCtx.fillStyle=c.hair_color||'#29313d';fallbackCtx.beginPath();fallbackCtx.moveTo(x+i*17*s,73*s);fallbackCtx.lineTo(x+(i*17-8)*s,39*s);fallbackCtx.lineTo(x+(i*17+11)*s,67*s);fallbackCtx.fill();}}
+                    if(c.hair_style==='Curls'){for(let i=-2;i<=2;i++)oval(i*18,67,13,13,c.hair_color||'#29313d');}
+                    oval(-17,119,4,5,'#172126');oval(17,119,4,5,'#172126');
+                    fallbackCtx.strokeStyle='#70463e';fallbackCtx.lineWidth=Math.max(2,2*s);fallbackCtx.beginPath();fallbackCtx.arc(x,133*s,12*s,.15*Math.PI,.85*Math.PI);fallbackCtx.stroke();
+                    if(c.accessory==='Visor'){fallbackCtx.fillStyle='#47dadd';fallbackCtx.fillRect(x-48*s,105*s,96*s,16*s);}
+                    if(c.accessory==='Halo'){fallbackCtx.strokeStyle='#f0d66c';fallbackCtx.lineWidth=5*s;fallbackCtx.beginPath();fallbackCtx.ellipse(x,34*s,42*s,10*s,0,0,Math.PI*2);fallbackCtx.stroke();}
+                    if(c.accessory==='Headphones'){fallbackCtx.strokeStyle='#c4d3d4';fallbackCtx.lineWidth=7*s;fallbackCtx.beginPath();fallbackCtx.arc(x,112*s,57*s,Math.PI,0);fallbackCtx.stroke();oval(-57,111,8,17,'#72d9d0');oval(57,111,8,17,'#72d9d0');}
+                }
+                window.setXuiAvatar=drawFallback;drawFallback(window.__xuiAvatarState);
+                new ResizeObserver(()=>drawFallback(window.__xuiAvatarState)).observe(document.getElementById('view'));
+                </script>
         <script type="module">
         const view=document.getElementById('view');
         try {
@@ -9423,6 +9454,7 @@ class AvatarStudioDialog(QtWidgets.QDialog):
           const camera=new THREE.PerspectiveCamera(34,1,.1,100); camera.position.set(0,1.55,6.6);
           const renderer=new THREE.WebGLRenderer({antialias:true,alpha:false}); renderer.setPixelRatio(Math.min(devicePixelRatio,2));
           renderer.setClearColor(0x12303a,1); renderer.outputColorSpace=THREE.SRGBColorSpace; view.appendChild(renderer.domElement);
+          document.getElementById('fallback').style.display='none';
           scene.add(new THREE.HemisphereLight(0xd9ffff,0x18242b,2.2));
           const key=new THREE.DirectionalLight(0xffffff,3.1); key.position.set(-3,5,5); scene.add(key);
           const rim=new THREE.PointLight(0x4de4d7,16,12); rim.position.set(3,2,1); scene.add(rim);
@@ -9434,6 +9466,7 @@ class AvatarStudioDialog(QtWidgets.QDialog):
           function ball(parent,color,pos,scale){const m=new THREE.Mesh(sphere,mat(color));m.position.set(...pos);m.scale.set(...scale);parent.add(m);return m;}
           function cylinder(parent,color,a,b,r1,r2){const start=new THREE.Vector3(...a),end=new THREE.Vector3(...b),delta=end.clone().sub(start);const mesh=new THREE.Mesh(new THREE.CylinderGeometry(r2,r1,delta.length(),20),mat(color));mesh.position.copy(start.add(end).multiplyScalar(.5));mesh.quaternion.setFromUnitVectors(new THREE.Vector3(0,1,0),delta.normalize());parent.add(mesh);return mesh;}
           function setAvatar(c){
+                        window.__xuiAvatarState=c;
             while(avatar.children.length) avatar.remove(avatar.children[0]);
             const skin=mat(c.skin), outfit=c.outfit;
             ball(avatar,c.skin,[0,2.05,0],[.49,.59,.43]);
@@ -9457,16 +9490,9 @@ class AvatarStudioDialog(QtWidgets.QDialog):
           let down=false,lastX=0;renderer.domElement.addEventListener('pointerdown',e=>{down=true;lastX=e.clientX;renderer.domElement.setPointerCapture(e.pointerId)});
           renderer.domElement.addEventListener('pointerup',()=>down=false);renderer.domElement.addEventListener('pointermove',e=>{if(down){avatar.rotation.y+=(e.clientX-lastX)*.012;lastX=e.clientX}});
           function resize(){const r=view.getBoundingClientRect();renderer.setSize(r.width,r.height,false);camera.aspect=r.width/Math.max(1,r.height);camera.updateProjectionMatrix();}
-          new ResizeObserver(resize).observe(view);resize();setAvatar({skin:'#bd815f',hair_style:'Short',hair_color:'#29313d',outfit:'#38b866',accessory:'None',background:'#12303a'});
+          new ResizeObserver(resize).observe(view);resize();setAvatar(window.__xuiAvatarState);
           function frame(){requestAnimationFrame(frame);if(!down)avatar.rotation.y+=.003;renderer.render(scene,camera);}frame();
-                } catch(e) {
-                    const canvas=document.getElementById('fallback'),ctx=canvas.getContext('2d');canvas.style.display='block';
-                    const draw=c=>{const r=view.getBoundingClientRect(),d=devicePixelRatio||1;canvas.width=r.width*d;canvas.height=r.height*d;ctx.setTransform(d,0,0,d,0,0);ctx.fillStyle=c.background||'#12303a';ctx.fillRect(0,0,r.width,r.height);const x=r.width/2,s=Math.min(r.width/330,r.height/390);ctx.fillStyle=c.outfit||'#38b866';ctx.beginPath();ctx.roundRect(x-54*s,180*s,108*s,145*s,28*s);ctx.fill();ctx.fillStyle=c.skin||'#bd815f';ctx.beginPath();ctx.ellipse(x,111*s,43*s,51*s,0,0,Math.PI*2);ctx.fill();ctx.fillStyle=c.hair_color||'#29313d';ctx.beginPath();ctx.ellipse(x,78*s,45*s,25*s,0,Math.PI,Math.PI*2);ctx.fill();ctx.fillStyle='#172126';ctx.beginPath();ctx.arc(x-14*s,112*s,3*s,0,Math.PI*2);ctx.arc(x+14*s,112*s,3*s,0,Math.PI*2);ctx.fill();};
-                    window.setXuiAvatar=draw;draw({skin:'#bd815f',hair_color:'#29313d',outfit:'#38b866',background:'#12303a'});
-                    new ResizeObserver(()=>draw(window.__xuiAvatar||{})).observe(view);window.__xuiAvatar={};
-                    const apply=window.setXuiAvatar;window.setXuiAvatar=c=>{window.__xuiAvatar=c;apply(c);};
-                    document.getElementById('status').textContent='3D unavailable; preview fallback active.';
-                }
+        } catch(e) { document.getElementById('status').textContent='3D unavailable; preview fallback active.'; }
         </script></body></html>'''
 
     def _build_creator_tab(self):
@@ -10342,16 +10368,7 @@ class Dashboard(QtWidgets.QMainWindow):
         self.page_stack.setCurrentIndex(to_idx)
         self._normalize_page_visibility(to_idx)
         self._tab_anim_group = QtCore.QParallelAnimationGroup(self)
-        effect = QtWidgets.QGraphicsOpacityEffect(to_w)
-        effect.setOpacity(0.90 if snapshot is not None else 0.76)
-        to_w.setGraphicsEffect(effect)
         duration = 235 if self._low_power_ui else 300
-        fade_in = QtCore.QPropertyAnimation(effect, b'opacity', self._tab_anim_group)
-        fade_in.setDuration(duration)
-        fade_in.setStartValue(0.90 if snapshot is not None else 0.76)
-        fade_in.setEndValue(1.0)
-        fade_in.setEasingCurve(QtCore.QEasingCurve.OutCubic)
-        self._tab_anim_group.addAnimation(fade_in)
 
         if snapshot is not None:
             overlay = QtWidgets.QLabel(self.page_stack)
@@ -10985,6 +11002,11 @@ START_SH="$HOME/.xui/bin/xui_start.sh"
 PYRUN="$HOME/.xui/bin/xui_python.sh"
 DASH="$HOME/.xui/dashboard/pyqt_dashboard_improved.py"
 OLD_PID="${1:-}"
+RESTART_LOG="$HOME/.xui/logs/postupdate_restart.log"
+mkdir -p "$(dirname "$RESTART_LOG")"
+touch "$RESTART_LOG"
+exec >>"$RESTART_LOG" 2>&1
+echo "[$(date -Is)] post-update restart requested (old pid: ${OLD_PID:-unknown})"
 RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
 DBUS_ADDR="${DBUS_SESSION_BUS_ADDRESS:-unix:path=${RUNTIME_DIR}/bus}"
 SESSION_ENV=()
@@ -10993,14 +11015,7 @@ for name in DISPLAY WAYLAND_DISPLAY XAUTHORITY XDG_SESSION_TYPE XDG_CURRENT_DESK
         SESSION_ENV+=("$name=${!name}")
     fi
 done
-SESSION_ENV+=("XDG_RUNTIME_DIR=$RUNTIME_DIR" "DBUS_SESSION_BUS_ADDRESS=$DBUS_ADDR")
-
-dashboard_ui_running(){
-  if ! command -v pgrep >/dev/null 2>&1; then
-    return 1
-  fi
-  pgrep -u "$(id -u)" -f "pyqt_dashboard_improved.py|pyqt_dashboard.py" >/dev/null 2>&1
-}
+SESSION_ENV+=("XDG_RUNTIME_DIR=$RUNTIME_DIR" "DBUS_SESSION_BUS_ADDRESS=$DBUS_ADDR" "XUI_POSTUPDATE_RESTART=1")
 
 wait_old_dashboard_exit(){
   local pid="$1"
@@ -11021,11 +11036,15 @@ wait_old_dashboard_exit(){
 
 start_via_wrapper(){
   if [ -x "$WRAP" ]; then
-    nohup env "${SESSION_ENV[@]}" "$WRAP" >/dev/null 2>&1 &
+        nohup env "${SESSION_ENV[@]}" "$WRAP" &
+        LAUNCH_PID=$!
+        echo "[$(date -Is)] started wrapper pid $LAUNCH_PID: $WRAP"
     return 0
   fi
   if [ -x "$START_SH" ]; then
-    nohup env "${SESSION_ENV[@]}" "$START_SH" >/dev/null 2>&1 &
+        nohup env "${SESSION_ENV[@]}" "$START_SH" &
+        LAUNCH_PID=$!
+        echo "[$(date -Is)] started launcher pid $LAUNCH_PID: $START_SH"
     return 0
   fi
   return 1
@@ -11033,26 +11052,40 @@ start_via_wrapper(){
 
 start_direct_dashboard(){
   if [ -x "$PYRUN" ] && [ -f "$DASH" ]; then
-    nohup env "${SESSION_ENV[@]}" "$PYRUN" "$DASH" >/dev/null 2>&1 &
+        nohup env "${SESSION_ENV[@]}" "$PYRUN" "$DASH" &
+        LAUNCH_PID=$!
+        echo "[$(date -Is)] started dashboard runner pid $LAUNCH_PID"
     return 0
   fi
   if command -v python3 >/dev/null 2>&1 && [ -f "$DASH" ]; then
-    nohup env "${SESSION_ENV[@]}" python3 "$DASH" >/dev/null 2>&1 &
+        nohup env "${SESSION_ENV[@]}" python3 "$DASH" &
+        LAUNCH_PID=$!
+        echo "[$(date -Is)] started python dashboard pid $LAUNCH_PID"
     return 0
   fi
   return 1
 }
 
+new_dashboard_running(){
+    local cmdline
+    [[ "${LAUNCH_PID:-}" =~ ^[0-9]+$ ]] || return 1
+    kill -0 "$LAUNCH_PID" >/dev/null 2>&1 || return 1
+    [ -r "/proc/$LAUNCH_PID/cmdline" ] || return 1
+    cmdline="$(tr '\0' ' ' < "/proc/$LAUNCH_PID/cmdline" 2>/dev/null || true)"
+    [[ "$cmdline" == *pyqt_dashboard_improved.py* || "$cmdline" == *pyqt_dashboard.py* ]]
+}
+
 activate_dashboard_window(){
     if command -v wmctrl >/dev/null 2>&1; then
-    wmctrl -a 'XUI - Xbox 360 Style' >/dev/null 2>&1 && return 0
-    wmctrl -a 'XUI' >/dev/null 2>&1 && return 0
-    elif command -v xdotool >/dev/null 2>&1 && [[ -n "${DISPLAY:-}" ]]; then
+        wmctrl -a 'XUI - Xbox 360 Style' >/dev/null 2>&1 && return 0
+        wmctrl -a 'XUI' >/dev/null 2>&1 && return 0
+    fi
+    if command -v xdotool >/dev/null 2>&1 && [[ -n "${DISPLAY:-}" ]]; then
         local wid
         wid="$(xdotool search --onlyvisible --name 'XUI' 2>/dev/null | head -n 1 || true)"
         if [[ -z "$wid" ]]; then
             wid="$(xdotool search --onlyvisible --class 'pyqt_dashboard_improved' 2>/dev/null | head -n 1 || true)"
-        fi
+    fi
         if [[ -n "$wid" ]]; then
             xdotool windowactivate --sync "$wid" >/dev/null 2>&1 || true
             xdotool windowraise "$wid" >/dev/null 2>&1 || true
@@ -11064,25 +11097,35 @@ activate_dashboard_window(){
 
 wait_for_dashboard_window(){
     for _ in $(seq 1 60); do
-        if dashboard_ui_running; then
+                if new_dashboard_running; then
             if activate_dashboard_window; then
+                                echo "[$(date -Is)] activated new dashboard pid $LAUNCH_PID"
                 return 0
             fi
         fi
         sleep 0.20
     done
-    # Wayland compositors may not expose activation through X11 tools; Qt's own
-    # showFullScreen/raise_/activateWindow handles that session natively.
-    dashboard_ui_running
+        if new_dashboard_running; then
+            # Wayland may not support external activation; Qt's fullscreen show remains authoritative.
+            echo "[$(date -Is)] new dashboard pid $LAUNCH_PID is running; no external activation tool succeeded"
+            return 0
+        fi
+        echo "[$(date -Is)] dashboard launch failed; pid ${LAUNCH_PID:-unknown} exited before startup"
+        return 1
 }
 
 if ! wait_old_dashboard_exit "$OLD_PID"; then
     if [[ "$OLD_PID" =~ ^[0-9]+$ ]] && [ "$OLD_PID" -gt 1 ]; then
+        echo "[$(date -Is)] old dashboard did not exit in time; sending TERM"
         kill -TERM "$OLD_PID" >/dev/null 2>&1 || true
         for _ in $(seq 1 30); do
             kill -0 "$OLD_PID" >/dev/null 2>&1 || break
             sleep 0.10
         done
+        if kill -0 "$OLD_PID" >/dev/null 2>&1; then
+          echo "[$(date -Is)] old dashboard still exists after TERM; sending KILL"
+          kill -KILL "$OLD_PID" >/dev/null 2>&1 || true
+        fi
     fi
 fi
 sleep 0.20
@@ -13449,6 +13492,13 @@ def main():
         w.showFullScreen()
     except Exception:
         w.show()
+    if os.environ.get('XUI_POSTUPDATE_RESTART') == '1':
+        def activate_restarted_dashboard():
+            if not w.isVisible():
+                w.showFullScreen()
+            w.raise_()
+            w.activateWindow()
+        QtCore.QTimer.singleShot(350, activate_restarted_dashboard)
     sys.exit(app.exec_())
 
 
