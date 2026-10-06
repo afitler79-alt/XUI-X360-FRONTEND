@@ -2047,6 +2047,7 @@ RECENT_FILE = DATA_HOME / 'recent.json'
 NOTIFICATIONS_FILE = DATA_HOME / 'notifications.json'
 FRIENDS_FILE = DATA_HOME / 'friends.json'
 PROFILE_FILE = DATA_HOME / 'profile.json'
+AVATAR_STORE_FILE = DATA_HOME / 'avatar_store.json'
 PEERS_FILE = DATA_HOME / 'social_peers.json'
 WORLD_CHAT_FILE = DATA_HOME / 'world_chat.json'
 SOCIAL_MESSAGES_FILE = DATA_HOME / 'social_messages_recent.json'
@@ -7225,6 +7226,18 @@ class XboxGuideMenu(QtWidgets.QDialog):
         self.avatar_badge.setObjectName('xguide_avatar')
         self.avatar_badge.setAlignment(QtCore.Qt.AlignCenter)
         self.avatar_badge.setFixedSize(30, 30)
+        profile = safe_json_read(PROFILE_FILE, {})
+        avatar = profile.get('avatar_customization', {}) if isinstance(profile, dict) else {}
+        if isinstance(avatar, dict):
+            outfit = str(avatar.get('outfit') or '').strip()
+            if re.fullmatch(r'#[0-9a-fA-F]{6}', outfit):
+                self.avatar_badge.setStyleSheet(
+                    f'background:{outfit};color:#ffffff;border:2px solid #d5e2df;'
+                    'border-radius:15px;font-size:14px;font-weight:900;'
+                )
+            traits = ', '.join(str(avatar.get(key) or '') for key in ('hair_style', 'accessory') if avatar.get(key))
+            if traits:
+                self.avatar_badge.setToolTip(f'Avatar: {traits}')
         self.meta = QtWidgets.QLabel('')
         self.meta.setObjectName('xguide_meta')
         top.addWidget(title)
@@ -9215,6 +9228,385 @@ class NotificationCenterDialog(QtWidgets.QDialog):
             self.reload()
             return
         super().keyPressEvent(event)
+
+
+class AvatarPreviewFallback(QtWidgets.QWidget):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.avatar = {}
+        self.setMinimumSize(300, 360)
+
+    def set_avatar(self, avatar):
+        self.avatar = dict(avatar or {})
+        self.update()
+
+    def paintEvent(self, _event):
+        painter = QtGui.QPainter(self)
+        painter.setRenderHint(QtGui.QPainter.Antialiasing, True)
+        bounds = self.rect()
+        background = QtGui.QColor(self.avatar.get('background', '#12303a'))
+        painter.fillRect(bounds, QtGui.QColor('#10191e'))
+        painter.setBrush(QtGui.QRadialGradient(bounds.center(), max(bounds.width(), bounds.height()) * 0.7))
+        gradient = QtGui.QRadialGradient(bounds.center(), max(bounds.width(), bounds.height()) * 0.7)
+        gradient.setColorAt(0, background.lighter(145))
+        gradient.setColorAt(1, background.darker(220))
+        painter.setBrush(gradient)
+        painter.setPen(QtCore.Qt.NoPen)
+        painter.drawRect(bounds)
+        cx = bounds.center().x()
+        scale = min(bounds.width() / 360.0, bounds.height() / 420.0)
+        def ellipse(x, y, w, h, color):
+            painter.setBrush(QtGui.QColor(color))
+            painter.drawEllipse(QtCore.QRectF(cx + x * scale, y * scale, w * scale, h * scale))
+        def rounded(x, y, w, h, radius, color):
+            painter.setBrush(QtGui.QColor(color))
+            painter.drawRoundedRect(QtCore.QRectF(cx + x * scale, y * scale, w * scale, h * scale), radius * scale, radius * scale)
+        painter.setPen(QtGui.QPen(QtGui.QColor(255, 255, 255, 30), 1))
+        painter.setBrush(QtCore.Qt.NoBrush)
+        painter.drawEllipse(QtCore.QPointF(cx, 210 * scale), 136 * scale, 170 * scale)
+        ellipse(-93, 330, 82, 31, '#18242a')
+        ellipse(11, 330, 82, 31, '#18242a')
+        rounded(-78, 208, 55, 133, 25, self.avatar.get('outfit', '#38b866'))
+        rounded(23, 208, 55, 133, 25, self.avatar.get('outfit', '#38b866'))
+        rounded(-66, 179, 132, 167, 35, self.avatar.get('outfit', '#38b866'))
+        ellipse(-111, 208, 48, 128, self.avatar.get('skin', '#bd815f'))
+        ellipse(63, 208, 48, 128, self.avatar.get('skin', '#bd815f'))
+        ellipse(-53, 46, 106, 124, self.avatar.get('skin', '#bd815f'))
+        ellipse(-57, 35, 114, 53, self.avatar.get('hair_color', '#29313d'))
+        if self.avatar.get('hair_style') == 'Long':
+            rounded(-59, 60, 26, 112, 12, self.avatar.get('hair_color', '#29313d'))
+            rounded(33, 60, 26, 112, 12, self.avatar.get('hair_color', '#29313d'))
+        ellipse(-29, 93, 8, 10, '#182127')
+        ellipse(21, 93, 8, 10, '#182127')
+        painter.setPen(QtGui.QPen(QtGui.QColor('#563b35'), max(2, int(3 * scale))))
+        painter.drawArc(QtCore.QRectF(cx - 17 * scale, 105 * scale, 34 * scale, 24 * scale), 205 * 16, 130 * 16)
+        accessory = self.avatar.get('accessory')
+        if accessory == 'Visor':
+            rounded(-55, 84, 110, 23, 8, '#3dd7db')
+        elif accessory == 'Halo':
+            painter.setBrush(QtCore.Qt.NoBrush)
+            painter.setPen(QtGui.QPen(QtGui.QColor('#f4d76e'), max(3, int(5 * scale))))
+            painter.drawEllipse(QtCore.QRectF(cx - 48 * scale, 8 * scale, 96 * scale, 25 * scale))
+        elif accessory == 'Headphones':
+            painter.setBrush(QtCore.Qt.NoBrush)
+            painter.setPen(QtGui.QPen(QtGui.QColor('#ccd8dc'), max(4, int(7 * scale))))
+            painter.drawArc(QtCore.QRectF(cx - 66 * scale, 31 * scale, 132 * scale, 116 * scale), 0, 180 * 16)
+            ellipse(-67, 78, 16, 38, '#879ba1')
+            ellipse(51, 78, 16, 38, '#879ba1')
+        painter.end()
+
+
+class AvatarStudioDialog(QtWidgets.QDialog):
+    OPTIONS = {
+        'skin': [('Warm', '#bd815f'), ('Light', '#efc8a2'), ('Deep', '#754b3d')],
+        'hair_style': [('Short', 'Short'), ('Spiky', 'Spiky'), ('Long', 'Long'), ('Curls', 'Curls')],
+        'hair_color': [('Midnight', '#29313d'), ('Silver', '#b9c5ca'), ('Auburn', '#a84f30'), ('Teal', '#38c7bd')],
+        'outfit': [('Jade', '#38b866'), ('Cobalt', '#367dc3'), ('Crimson', '#c64d54')],
+        'accessory': [('None', 'None'), ('Visor', 'Visor'), ('Headphones', 'Headphones'), ('Halo', 'Halo')],
+        'background': [('Reactor', '#12303a'), ('Neon City', '#283354'), ('Forest', '#19473d')],
+    }
+    FIELD_LABELS = {
+        'skin': 'Skin tone', 'hair_style': 'Hair style', 'hair_color': 'Hair color',
+        'outfit': 'Outfit', 'accessory': 'Accessory', 'background': 'Scene',
+    }
+    OFFERS = [
+        {'id': 'hair_gold', 'name': 'Solar gold', 'field': 'hair_color', 'value': '#e3b952', 'label': 'Solar Gold hair', 'price': 90},
+        {'id': 'hair_violet', 'name': 'Ion violet', 'field': 'hair_color', 'value': '#a77be8', 'label': 'Ion Violet hair', 'price': 90},
+        {'id': 'outfit_armor', 'name': 'Carbon armor', 'field': 'outfit', 'value': '#43b9bd', 'label': 'Carbon armor suit', 'price': 140},
+        {'id': 'outfit_chrome', 'name': 'Chrome runner', 'field': 'outfit', 'value': '#aebbc4', 'label': 'Chrome runner suit', 'price': 120},
+        {'id': 'accessory_crown', 'name': 'Light crown', 'field': 'accessory', 'value': 'Halo', 'label': 'Light crown', 'price': 110},
+        {'id': 'scene_arcade', 'name': 'Arcade night', 'field': 'background', 'value': '#552e58', 'label': 'Arcade night scene', 'price': 75},
+    ]
+    DEFAULT_AVATAR = {
+        'skin': '#bd815f', 'hair_style': 'Short', 'hair_color': '#29313d',
+        'outfit': '#38b866', 'accessory': 'None', 'background': '#12303a',
+    }
+
+    def __init__(self, parent=None, initial_tab='creator'):
+        super().__init__(parent)
+        self.setWindowTitle('Avatar Studio')
+        self.setWindowFlags(QtCore.Qt.Dialog | QtCore.Qt.FramelessWindowHint)
+        self.setModal(True)
+        self.resize(1080, 680)
+        self.profile = safe_json_read(PROFILE_FILE, {})
+        if not isinstance(self.profile, dict):
+            self.profile = {}
+        self.store = safe_json_read(AVATAR_STORE_FILE, {})
+        if not isinstance(self.store, dict):
+            self.store = {}
+        try:
+            self.store['credits'] = max(0, int(self.store.get('credits', 300)))
+        except (TypeError, ValueError, OverflowError):
+            self.store['credits'] = 300
+        if not isinstance(self.store.get('owned'), list):
+            self.store['owned'] = []
+        self.avatar = dict(self.DEFAULT_AVATAR)
+        saved_avatar = self.profile.get('avatar_customization')
+        if not isinstance(saved_avatar, dict):
+            saved_avatar = self.store.get('avatar')
+        if isinstance(saved_avatar, dict):
+            self.avatar.update(saved_avatar)
+        self.controls = {}
+        self.previews = []
+        self._build()
+        self._refresh_store()
+        self._update_preview()
+        self.tabs.setCurrentIndex(1 if initial_tab == 'store' else 0)
+
+    def _build(self):
+        self.setStyleSheet('''
+            QDialog { background:#121a1d; color:#eef5f3; }
+            QLabel#heading { color:#f4f8f6; font-size:25px; font-weight:800; }
+            QLabel#subheading { color:#9cadad; font-size:13px; }
+            QLabel#balance { color:#d9ed84; font-size:15px; font-weight:750; }
+            QTabWidget::pane { border:0; }
+            QTabBar::tab { background:#1d292c; color:#aebdba; padding:11px 22px; font-weight:700; }
+            QTabBar::tab:selected { color:#ffffff; background:#2e804c; }
+            QComboBox, QListWidget { background:#202d30; color:#eff6f3; border:1px solid #405154; padding:8px; }
+            QPushButton { background:#2c804a; color:#fff; border:0; padding:10px 14px; font-weight:750; }
+            QPushButton:hover { background:#3c9c5d; }
+            QPushButton#secondary { background:#354246; }
+            QPushButton#secondary:hover { background:#47575b; }
+        ''')
+        root = QtWidgets.QVBoxLayout(self)
+        root.setContentsMargins(22, 18, 22, 18)
+        header = QtWidgets.QHBoxLayout()
+        title = QtWidgets.QLabel('AVATAR STUDIO')
+        title.setObjectName('heading')
+        self.balance_label = QtWidgets.QLabel('')
+        self.balance_label.setObjectName('balance')
+        header.addWidget(title)
+        header.addStretch(1)
+        header.addWidget(self.balance_label)
+        root.addLayout(header)
+        self.tabs = QtWidgets.QTabWidget()
+        root.addWidget(self.tabs, 1)
+        self._build_creator_tab()
+        self._build_store_tab()
+        footer = QtWidgets.QHBoxLayout()
+        footer.addWidget(QtWidgets.QLabel(f"Profile: {current_gamertag()}"))
+        footer.addStretch(1)
+        close = QtWidgets.QPushButton('Close')
+        close.setObjectName('secondary')
+        close.clicked.connect(self.reject)
+        footer.addWidget(close)
+        root.addLayout(footer)
+
+    def _build_preview(self, parent_layout):
+        self.preview_host = QtWidgets.QFrame()
+        self.preview_host.setMinimumWidth(350)
+        self.preview_host.setStyleSheet('QFrame { background:#0d1518; border:1px solid #314145; }')
+        preview_layout = QtWidgets.QVBoxLayout(self.preview_host)
+        preview_layout.setContentsMargins(0, 0, 0, 0)
+        if QtWebEngineWidgets is not None:
+            self.preview = QtWebEngineWidgets.QWebEngineView()
+            self.preview.setMinimumSize(360, 420)
+            self.preview.setHtml(self._preview_html(), QtCore.QUrl('https://xui-avatar.local/'))
+            self.preview.loadFinished.connect(lambda _ok, view=self.preview: self._update_preview_view(view))
+        else:
+            self.preview = AvatarPreviewFallback()
+        self.previews.append(self.preview)
+        preview_layout.addWidget(self.preview)
+        parent_layout.addWidget(self.preview_host, 3)
+
+    def _preview_html(self):
+        return '''<!doctype html><html><head><meta charset="utf-8"><style>
+            html,body,#view{margin:0;width:100%;height:100%;overflow:hidden;background:#10191e;color:#d6e4e1;font:14px sans-serif}
+            #view{position:relative} #fallback{display:none;width:100%;height:100%}
+            #status{position:absolute;left:12px;bottom:10px;opacity:.7;z-index:2}
+        </style></head><body><div id="view"><canvas id="fallback"></canvas></div><div id="status">Drag to rotate</div>
+        <script type="module">
+        const view=document.getElementById('view');
+        try {
+          const THREE=await import('https://cdn.jsdelivr.net/npm/three@0.166.1/build/three.module.js');
+          const scene=new THREE.Scene();
+          const camera=new THREE.PerspectiveCamera(34,1,.1,100); camera.position.set(0,1.55,6.6);
+          const renderer=new THREE.WebGLRenderer({antialias:true,alpha:false}); renderer.setPixelRatio(Math.min(devicePixelRatio,2));
+          renderer.setClearColor(0x12303a,1); renderer.outputColorSpace=THREE.SRGBColorSpace; view.appendChild(renderer.domElement);
+          scene.add(new THREE.HemisphereLight(0xd9ffff,0x18242b,2.2));
+          const key=new THREE.DirectionalLight(0xffffff,3.1); key.position.set(-3,5,5); scene.add(key);
+          const rim=new THREE.PointLight(0x4de4d7,16,12); rim.position.set(3,2,1); scene.add(rim);
+          const floor=new THREE.Mesh(new THREE.CircleGeometry(2.6,64),new THREE.MeshBasicMaterial({color:0x18272b}));
+          floor.rotation.x=-Math.PI/2; floor.position.y=-.13; scene.add(floor);
+          const avatar=new THREE.Group(); scene.add(avatar);
+          const mat=(color,roughness=.64)=>new THREE.MeshStandardMaterial({color,roughness,metalness:.08});
+          const sphere=new THREE.SphereGeometry(1,32,24);
+          function ball(parent,color,pos,scale){const m=new THREE.Mesh(sphere,mat(color));m.position.set(...pos);m.scale.set(...scale);parent.add(m);return m;}
+          function cylinder(parent,color,a,b,r1,r2){const start=new THREE.Vector3(...a),end=new THREE.Vector3(...b),delta=end.clone().sub(start);const mesh=new THREE.Mesh(new THREE.CylinderGeometry(r2,r1,delta.length(),20),mat(color));mesh.position.copy(start.add(end).multiplyScalar(.5));mesh.quaternion.setFromUnitVectors(new THREE.Vector3(0,1,0),delta.normalize());parent.add(mesh);return mesh;}
+          function setAvatar(c){
+            while(avatar.children.length) avatar.remove(avatar.children[0]);
+            const skin=mat(c.skin), outfit=c.outfit;
+            ball(avatar,c.skin,[0,2.05,0],[.49,.59,.43]);
+            ball(avatar,c.hair_color,[0,2.48,-.015],[.51,.29,.45]);
+            if(c.hair_style==='Long'){ball(avatar,c.hair_color,[-.42,2.02,-.02],[.16,.52,.27]);ball(avatar,c.hair_color,[.42,2.02,-.02],[.16,.52,.27]);}
+            if(c.hair_style==='Spiky'){for(let i=-2;i<=2;i++){const spike=new THREE.Mesh(new THREE.ConeGeometry(.13,.38,12),mat(c.hair_color));spike.position.set(i*.17,2.78,0);avatar.add(spike);}}
+            if(c.hair_style==='Curls'){for(let i=-2;i<=2;i++)ball(avatar,c.hair_color,[i*.18,2.62,.02],[.19,.18,.2]);}
+            ball(avatar,'#172126',[-.17,2.12,.39],[.045,.055,.035]);ball(avatar,'#172126',[.17,2.12,.39],[.045,.055,.035]);
+            ball(avatar,'#e5aa88',[0,1.95,.43],[.055,.09,.05]);
+            const smile=new THREE.Mesh(new THREE.TorusGeometry(.12,.018,8,20,Math.PI),mat('#542f2c'));smile.position.set(0,1.87,.405);smile.rotation.z=Math.PI;avatar.add(smile);
+            cylinder(avatar,c.skin,[-.72,1.55,0],[-.88,.76,.12],.14,.105);cylinder(avatar,c.skin,[.72,1.55,0],[.88,.76,.12],.14,.105);
+            const torso=new THREE.Mesh(new THREE.CapsuleGeometry(.58,.78,6,18),mat(outfit));torso.position.y=1.1;avatar.add(torso);
+            cylinder(avatar,'#202b30',[-.25,.54,0],[-.29,.08,0],.19,.15);cylinder(avatar,'#202b30',[.25,.54,0],[.29,.08,0],.19,.15);
+            ball(avatar,'#d5e1df',[-.3,.02,.08],[.23,.1,.36]);ball(avatar,'#d5e1df',[.3,.02,.08],[.23,.1,.36]);
+            if(c.accessory==='Visor'){const v=new THREE.Mesh(new THREE.BoxGeometry(.92,.19,.17),mat('#47dadd',.22));v.position.set(0,2.14,.39);avatar.add(v);}
+            if(c.accessory==='Halo'){const h=new THREE.Mesh(new THREE.TorusGeometry(.53,.045,12,48),mat('#f0d66c',.25));h.position.set(0,2.94,0);avatar.add(h);}
+            if(c.accessory==='Headphones'){const h=new THREE.Mesh(new THREE.TorusGeometry(.58,.055,12,40,Math.PI),mat('#c4d3d4',.3));h.position.set(0,2.16,0);h.rotation.z=Math.PI;avatar.add(h);ball(avatar,'#72d9d0',[-.56,2.02,0],[.13,.2,.13]);ball(avatar,'#72d9d0',[.56,2.02,0],[.13,.2,.13]);}
+            renderer.setClearColor(c.background,1);
+          }
+          window.setXuiAvatar=setAvatar;
+          let down=false,lastX=0;renderer.domElement.addEventListener('pointerdown',e=>{down=true;lastX=e.clientX;renderer.domElement.setPointerCapture(e.pointerId)});
+          renderer.domElement.addEventListener('pointerup',()=>down=false);renderer.domElement.addEventListener('pointermove',e=>{if(down){avatar.rotation.y+=(e.clientX-lastX)*.012;lastX=e.clientX}});
+          function resize(){const r=view.getBoundingClientRect();renderer.setSize(r.width,r.height,false);camera.aspect=r.width/Math.max(1,r.height);camera.updateProjectionMatrix();}
+          new ResizeObserver(resize).observe(view);resize();setAvatar({skin:'#bd815f',hair_style:'Short',hair_color:'#29313d',outfit:'#38b866',accessory:'None',background:'#12303a'});
+          function frame(){requestAnimationFrame(frame);if(!down)avatar.rotation.y+=.003;renderer.render(scene,camera);}frame();
+                } catch(e) {
+                    const canvas=document.getElementById('fallback'),ctx=canvas.getContext('2d');canvas.style.display='block';
+                    const draw=c=>{const r=view.getBoundingClientRect(),d=devicePixelRatio||1;canvas.width=r.width*d;canvas.height=r.height*d;ctx.setTransform(d,0,0,d,0,0);ctx.fillStyle=c.background||'#12303a';ctx.fillRect(0,0,r.width,r.height);const x=r.width/2,s=Math.min(r.width/330,r.height/390);ctx.fillStyle=c.outfit||'#38b866';ctx.beginPath();ctx.roundRect(x-54*s,180*s,108*s,145*s,28*s);ctx.fill();ctx.fillStyle=c.skin||'#bd815f';ctx.beginPath();ctx.ellipse(x,111*s,43*s,51*s,0,0,Math.PI*2);ctx.fill();ctx.fillStyle=c.hair_color||'#29313d';ctx.beginPath();ctx.ellipse(x,78*s,45*s,25*s,0,Math.PI,Math.PI*2);ctx.fill();ctx.fillStyle='#172126';ctx.beginPath();ctx.arc(x-14*s,112*s,3*s,0,Math.PI*2);ctx.arc(x+14*s,112*s,3*s,0,Math.PI*2);ctx.fill();};
+                    window.setXuiAvatar=draw;draw({skin:'#bd815f',hair_color:'#29313d',outfit:'#38b866',background:'#12303a'});
+                    new ResizeObserver(()=>draw(window.__xuiAvatar||{})).observe(view);window.__xuiAvatar={};
+                    const apply=window.setXuiAvatar;window.setXuiAvatar=c=>{window.__xuiAvatar=c;apply(c);};
+                    document.getElementById('status').textContent='3D unavailable; preview fallback active.';
+                }
+        </script></body></html>'''
+
+    def _build_creator_tab(self):
+        page = QtWidgets.QWidget()
+        row = QtWidgets.QHBoxLayout(page)
+        row.setContentsMargins(0, 12, 0, 8)
+        self._build_preview(row)
+        controls_panel = QtWidgets.QWidget()
+        form = QtWidgets.QFormLayout(controls_panel)
+        form.setVerticalSpacing(13)
+        for field, options in self.OPTIONS.items():
+            combo = QtWidgets.QComboBox()
+            combo.setMinimumWidth(190)
+            available = list(options)
+            for offer in self.OFFERS:
+                if offer['field'] == field and offer['id'] in self._owned():
+                    available.append((offer['name'], offer['value']))
+            current_value = self.avatar.get(field)
+            if current_value is not None and not any(value == current_value for _label, value in available):
+                available.append(('Custom', current_value))
+            for label, value in available:
+                combo.addItem(label, value)
+            self.controls[field] = combo
+            combo.setCurrentIndex(max(0, combo.findData(current_value)))
+            combo.currentIndexChanged.connect(self._update_preview)
+            form.addRow(self.FIELD_LABELS[field], combo)
+        form.addRow(QtWidgets.QLabel('Drag the avatar to rotate the 3D view.'), QtWidgets.QLabel(''))
+        form.addItem(QtWidgets.QSpacerItem(10, 20, QtWidgets.QSizePolicy.Minimum, QtWidgets.QSizePolicy.Expanding))
+        apply_button = QtWidgets.QPushButton('Apply to Profile')
+        apply_button.clicked.connect(self._apply_to_profile)
+        form.addRow(apply_button)
+        row.addWidget(controls_panel, 2)
+        self.tabs.addTab(page, 'Creator')
+
+    def _build_store_tab(self):
+        page = QtWidgets.QWidget()
+        row = QtWidgets.QHBoxLayout(page)
+        row.setContentsMargins(0, 12, 0, 8)
+        self._build_preview(row)
+        panel = QtWidgets.QWidget()
+        layout = QtWidgets.QVBoxLayout(panel)
+        heading = QtWidgets.QLabel('COSMETICS')
+        heading.setStyleSheet('font-size:18px;font-weight:800;color:#f1f7f5;')
+        layout.addWidget(heading)
+        self.store_list = QtWidgets.QListWidget()
+        self.store_list.currentRowChanged.connect(self._show_offer)
+        layout.addWidget(self.store_list, 1)
+        self.offer_detail = QtWidgets.QLabel('Select a cosmetic to inspect it.')
+        self.offer_detail.setWordWrap(True)
+        layout.addWidget(self.offer_detail)
+        self.offer_button = QtWidgets.QPushButton('Select an item')
+        self.offer_button.clicked.connect(self._buy_or_equip_offer)
+        layout.addWidget(self.offer_button)
+        row.addWidget(panel, 2)
+        self.tabs.addTab(page, 'Store')
+
+    def _owned(self):
+        owned = self.store.get('owned', [])
+        return set(str(item) for item in owned) if isinstance(owned, list) else set()
+
+    def _refresh_store(self):
+        self.balance_label.setText(f"{int(self.store.get('credits', 0))} CR")
+        self.store_list.clear()
+        owned = self._owned()
+        for offer in self.OFFERS:
+            state = 'OWNED' if offer['id'] in owned else f"{offer['price']} CR"
+            item = QtWidgets.QListWidgetItem(f"{offer['name']}    {state}")
+            item.setData(QtCore.Qt.UserRole, offer['id'])
+            self.store_list.addItem(item)
+        if self.store_list.count():
+            self.store_list.setCurrentRow(0)
+
+    def _show_offer(self, row):
+        if row < 0 or row >= len(self.OFFERS):
+            return
+        offer = self.OFFERS[row]
+        owned = offer['id'] in self._owned()
+        current = self.avatar.get(offer['field']) == offer['value']
+        self.offer_detail.setText(f"{offer['label']}\n\n{offer['price']} credits · Stored locally on this profile.")
+        self.offer_button.setText('Equipped' if current else ('Equip' if owned else f"Purchase · {offer['price']} CR"))
+        self.offer_button.setEnabled(not current)
+
+    def _buy_or_equip_offer(self):
+        row = self.store_list.currentRow()
+        if row < 0 or row >= len(self.OFFERS):
+            return
+        offer = self.OFFERS[row]
+        owned = self._owned()
+        if offer['id'] not in owned:
+            credits = int(self.store.get('credits', 0))
+            if credits < offer['price']:
+                self.offer_detail.setText(f"Not enough credits. You need {offer['price'] - credits} more CR.")
+                return
+            self.store['credits'] = credits - offer['price']
+            owned.add(offer['id'])
+            self.store['owned'] = sorted(owned)
+        self.avatar[offer['field']] = offer['value']
+        self._set_control_value(offer['field'], offer['value'])
+        self.store['avatar'] = dict(self.avatar)
+        safe_json_write(AVATAR_STORE_FILE, self.store)
+        self._refresh_store()
+        self._update_preview()
+
+    def _set_control_value(self, field, value):
+        combo = self.controls.get(field)
+        if combo is None:
+            return
+        if combo.findData(value) < 0:
+            combo.addItem(str(value), value)
+        combo.setCurrentIndex(combo.findData(value))
+
+    def _current_avatar(self):
+        return {field: combo.currentData() for field, combo in self.controls.items()}
+
+    def _update_preview(self, *_):
+        if not self.controls:
+            return
+        self.avatar = self._current_avatar()
+        for preview in self.previews:
+            self._update_preview_view(preview)
+
+    def _update_preview_view(self, preview):
+        if not self.controls:
+            return
+        avatar = self._current_avatar()
+        if isinstance(preview, AvatarPreviewFallback):
+            preview.set_avatar(avatar)
+            return
+        payload = json.dumps(avatar, ensure_ascii=True)
+        preview.page().runJavaScript(f'window.setXuiAvatar && window.setXuiAvatar({payload});')
+
+    def _apply_to_profile(self):
+        self.avatar = self._current_avatar()
+        self.profile['avatar'] = 'XUI Avatar'
+        self.profile['avatar_customization'] = dict(self.avatar)
+        self.profile['updated_at'] = int(time.time())
+        self.store['avatar'] = dict(self.avatar)
+        safe_json_write(PROFILE_FILE, self.profile)
+        safe_json_write(AVATAR_STORE_FILE, self.store)
+        QtWidgets.QMessageBox.information(self, 'Avatar saved', 'Your avatar is now applied to this local profile.')
 
 
 class Dashboard(QtWidgets.QMainWindow):
@@ -12309,7 +12701,10 @@ exit 1
                 'Use only game dumps you are legally entitled to use. Official guide: '
                 'https://github.com/xenia-canary/xenia-canary/wiki/Quickstart#how-to-rip-games',
             )
-        elif action in ('Store', 'Avatar Store'):
+        elif action == 'Avatar Store':
+            dialog = AvatarStudioDialog(self, initial_tab='store')
+            dialog.exec_()
+        elif action == 'Store':
             store_launcher = XUI_HOME / 'bin' / 'xui_store.sh'
             if store_launcher.is_file():
                 self._run('/bin/sh', [str(store_launcher)])
@@ -12527,7 +12922,8 @@ exit 1
         elif action in ('Browser Hub',):
             self._menu('Browser Hub', ['Web Browser', 'Bing Search', 'YouTube', 'Twitch', 'Netflix'])
         elif action == 'Avatar Editor':
-            self._menu('Avatar Editor', ['Avatar Store', 'Gamer Card', 'Sign In'])
+            dialog = AvatarStudioDialog(self, initial_tab='creator')
+            dialog.exec_()
         elif action == 'Controller Center':
             self._menu('Controller Center', ['Gamepad Test', 'Controller Probe', 'Controller Mappings', 'Controller Profile', 'Controller L4T Fix'])
         elif action == 'Web Control':
