@@ -29272,10 +29272,13 @@ main(){
     exit 0
   fi
     if [ "${XUI_ONLY_REFRESH_UPDATER:-0}" = "1" ]; then
-        info "Refreshing Mandatory Update checker only"
+        info "Refreshing Mandatory Update checker and dashboard progress UI"
         ensure_dirs
         write_auto_update
+        write_dashboard_py
         info "Updater refreshed at: $HOME/.xui/bin/xui_update_check.sh"
+        info "Dashboard progress UI refreshed at: $HOME/.xui/dashboard/pyqt_dashboard_improved.py"
+        info "Close and relaunch XUI before retrying Mandatory Update."
         exit 0
     fi
   if [ "${XUI_ONLY_REFRESH_STORE:-0}" = "1" ]; then
