@@ -5379,33 +5379,34 @@ class TopTabs(QtWidgets.QWidget):
         self._idle_px = None
         self._scale = 1.0
         self._compact = False
-        h = QtWidgets.QHBoxLayout(self)
+        h = QtWidgets.QVBoxLayout(self)
         self._layout = h
-        h.setContentsMargins(8, 3, 8, 3)
-        h.setSpacing(8)
-        h.addStretch(1)
+        h.setContentsMargins(0, 0, 0, 0)
+        h.setSpacing(4)
         for i, n in enumerate(self.names):
-            lbl = TabLabel(n)
+            label_text = 'TV & MOVIES' if n == 'tv & movies' else str(n).upper()
+            lbl = TabLabel(label_text)
             lbl.setObjectName('dashboard_tab')
-            lbl.setAlignment(QtCore.Qt.AlignCenter)
-            lbl.setMinimumHeight(38)
+            lbl.setAlignment(QtCore.Qt.AlignLeft | QtCore.Qt.AlignVCenter)
+            lbl.setMinimumHeight(40)
+            lbl.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Fixed)
             lbl.setFocusPolicy(QtCore.Qt.StrongFocus)
             lbl.setCursor(QtGui.QCursor(QtCore.Qt.PointingHandCursor))
             lbl.setToolTip(f'Open {n.title()}')
             lbl.clicked.connect(lambda i=i: self.changed.emit(i))
             self.labels.append(lbl)
             h.addWidget(lbl)
-        h.addStretch(1)
         self.apply_scale(1.0, False)
         self.set_current(0)
 
     def apply_scale(self, scale=1.0, compact=False):
         self._scale = max(0.62, float(scale))
         self._compact = bool(compact)
-        spacing = int(16 * self._scale * (0.90 if self._compact else 1.0))
-        self._layout.setSpacing(max(8, spacing))
-        self._layout.setContentsMargins(max(4, int(8 * self._scale)), 3, max(4, int(8 * self._scale)), 3)
-        tab_height = max(30, int(38 * self._scale))
+        spacing = int(4 * self._scale)
+        self._layout.setSpacing(max(2, spacing))
+        self.setFixedWidth(max(108, int(148 * self._scale)))
+        self._layout.setContentsMargins(0, 0, 0, 0)
+        tab_height = max(34, int(46 * self._scale))
         for label in self.labels:
             label.setMinimumHeight(tab_height)
         self.set_current(self.current)
@@ -5424,16 +5425,19 @@ class TopTabs(QtWidgets.QWidget):
             for i, lbl in enumerate(self.labels):
                 if i == self.current:
                     lbl.setStyleSheet(
-                        f'color:#ffffff; font-size:{active_px}px; font-weight:800; '
+                        f'QLabel#dashboard_tab {{ color:#ffffff; font-size:{max(11, active_px - 9)}px; font-weight:800; '
                         'font-family:"Segoe UI","Noto Sans",sans-serif; '
-                        'background:qlineargradient(x1:0,y1:0,x2:0,y2:1, stop:0 rgba(93,179,58,0.42), stop:1 rgba(34,93,33,0.10)); '
-                        'border-bottom:3px solid #91e443; padding:2px 10px;'
+                        'background:qlineargradient(x1:0,y1:0,x2:1,y2:0, stop:0 #1779c6, stop:1 #0e4f91); '
+                        'border-left:4px solid #a8e34b; border-bottom:1px solid rgba(215,238,255,0.30); padding:5px 10px; } '
+                        'QLabel#dashboard_tab:hover { background:#2588ce; }'
                     )
                 else:
                     lbl.setStyleSheet(
-                        f'color:rgba(225,233,226,0.72); font-size:{idle_px}px; font-weight:600; '
+                        f'QLabel#dashboard_tab {{ color:rgba(225,237,246,0.76); font-size:{max(10, idle_px - 8)}px; font-weight:650; '
                         'font-family:"Segoe UI","Noto Sans",sans-serif; '
-                        'background:rgba(9,16,12,0.20); border-bottom:3px solid transparent; padding:2px 10px;'
+                        'background:rgba(12,31,48,0.78); border-left:4px solid transparent; '
+                        'border-bottom:1px solid rgba(201,223,239,0.13); padding:5px 10px; } '
+                        'QLabel#dashboard_tab:hover { background:#2588ce; }'
                     )
             return
 
@@ -5442,16 +5446,19 @@ class TopTabs(QtWidgets.QWidget):
 
         if 0 <= old_idx < len(self.labels):
             self.labels[old_idx].setStyleSheet(
-                f'color:rgba(225,233,226,0.72); font-size:{idle_px}px; font-weight:600; '
+                f'QLabel#dashboard_tab {{ color:rgba(225,237,246,0.76); font-size:{max(10, idle_px - 8)}px; font-weight:650; '
                 'font-family:"Segoe UI","Noto Sans",sans-serif; '
-                'background:rgba(9,16,12,0.20); border-bottom:3px solid transparent; padding:2px 10px;'
+                'background:rgba(12,31,48,0.78); border-left:4px solid transparent; '
+                'border-bottom:1px solid rgba(201,223,239,0.13); padding:5px 10px; } '
+                'QLabel#dashboard_tab:hover { background:#2588ce; }'
             )
         if 0 <= self.current < len(self.labels):
             self.labels[self.current].setStyleSheet(
-                f'color:#ffffff; font-size:{active_px}px; font-weight:800; '
+                f'QLabel#dashboard_tab {{ color:#ffffff; font-size:{max(11, active_px - 9)}px; font-weight:800; '
                 'font-family:"Segoe UI","Noto Sans",sans-serif; '
-                'background:qlineargradient(x1:0,y1:0,x2:0,y2:1, stop:0 rgba(93,179,58,0.42), stop:1 rgba(34,93,33,0.10)); '
-                'border-bottom:3px solid #91e443; padding:2px 10px;'
+                'background:qlineargradient(x1:0,y1:0,x2:1,y2:0, stop:0 #1779c6, stop:1 #0e4f91); '
+                'border-left:4px solid #a8e34b; border-bottom:1px solid rgba(215,238,255,0.30); padding:5px 10px; } '
+                'QLabel#dashboard_tab:hover { background:#2588ce; }'
             )
 
 
@@ -5518,11 +5525,12 @@ class GreenTile(QtWidgets.QFrame):
         top.setContentsMargins(0, 0, 0, 0)
         self.icon = QtWidgets.QLabel()
         self.icon.setObjectName('tile_icon')
-        self.icon.setFixedSize(30, 30)
+        self.icon.setFixedSize(52, 52)
         self.icon.setAlignment(QtCore.Qt.AlignCenter)
         icon = tile_icon(action, text)
-        self.icon.setPixmap(icon.pixmap(18, 18))
-        top.addWidget(self.icon, 0, alignment=QtCore.Qt.AlignLeft | QtCore.Qt.AlignTop)
+        self.icon.setPixmap(icon.pixmap(34, 34))
+        top.addStretch(1)
+        top.addWidget(self.icon, 0, alignment=QtCore.Qt.AlignTop)
         top.addStretch(1)
         v.addLayout(top)
         v.addStretch(1)
@@ -5541,8 +5549,8 @@ class GreenTile(QtWidgets.QFrame):
         h = max(72, int(self.base_size[1] * s * compact_factor))
         pad_x = max(6, int((9 if self.dense else 12) * s * compact_factor))
         pad_y = max(4, int((5 if self.dense else 8) * s * compact_factor))
-        icon_sz = max(16, int(30 * s * compact_factor * self.icon_scale))
-        pix_sz = max(12, int(18 * s * compact_factor * self.icon_scale))
+        icon_sz = max(22, int(52 * s * compact_factor * self.icon_scale))
+        pix_sz = max(16, int(34 * s * compact_factor * self.icon_scale))
         font_px = max(10, int(17 * s * compact_factor * self.text_scale))
         scale_key = (w, h, pad_x, pad_y, icon_sz, pix_sz, font_px)
         if scale_key == self._scale_key:
@@ -5679,11 +5687,13 @@ class HeroPanel(QtWidgets.QFrame):
         width = '2px' if on else '1px'
         self.setStyleSheet(f'''
             QFrame#hero_panel {{
-                background:qlineargradient(x1:0,y1:0,x2:1,y2:1, stop:0 #61b934, stop:0.20 #277d32, stop:0.58 #164624, stop:1 #101a16);
+                background:qlineargradient(x1:0,y1:0,x2:1,y2:1, stop:0 #43505a, stop:0.20 #26333d, stop:0.58 #18232b, stop:1 #10171d);
                 border:{width} solid {border};
                 border-radius:0px;
             }}
             QLabel#hero_logo {{ color:rgba(255,255,255,0.96); }}
+            QLabel#hero_top {{ color:#c9e7a5; }}
+            QLabel#hero_sub {{ color:rgba(238,244,248,0.88); }}
         ''')
 
     def mousePressEvent(self, e):
@@ -9562,14 +9572,39 @@ class Dashboard(QtWidgets.QMainWindow):
         root = QtWidgets.QWidget()
         root.setObjectName('dashboard_root')
         self.setCentralWidget(root)
-        outer = QtWidgets.QVBoxLayout(root)
+        outer = QtWidgets.QHBoxLayout(root)
         outer.setContentsMargins(0, 0, 0, 0)
+        outer.setSpacing(0)
+
+        blade_rail = QtWidgets.QFrame()
+        blade_rail.setObjectName('dashboard_blade_rail')
+        blade_layout = QtWidgets.QVBoxLayout(blade_rail)
+        blade_layout.setContentsMargins(10, 18, 10, 16)
+        blade_layout.setSpacing(12)
+        rail_logo = QtWidgets.QLabel('XUI')
+        rail_logo.setObjectName('dashboard_rail_logo')
+        rail_logo.setAlignment(QtCore.Qt.AlignCenter)
+        rail_logo.setMinimumHeight(54)
+        rail_tagline = QtWidgets.QLabel('XBOX 360')
+        rail_tagline.setObjectName('dashboard_rail_tagline')
+        rail_tagline.setAlignment(QtCore.Qt.AlignCenter)
+        blade_layout.addWidget(rail_logo)
+        blade_layout.addWidget(rail_tagline)
+        self.top_tabs = TopTabs(self.tabs)
+        self.top_tabs.changed.connect(self._on_tab_changed)
+        blade_layout.addWidget(self.top_tabs, 0, QtCore.Qt.AlignHCenter)
+        blade_layout.addStretch(1)
+        rail_guide = QtWidgets.QLabel('GUIDE  /  F1')
+        rail_guide.setObjectName('dashboard_rail_guide')
+        rail_guide.setAlignment(QtCore.Qt.AlignCenter)
+        blade_layout.addWidget(rail_guide)
+        outer.addWidget(blade_rail, 0)
 
         stage = QtWidgets.QFrame()
         stage.setObjectName('stage')
         stage_l = QtWidgets.QVBoxLayout(stage)
         self._stage_layout = stage_l
-        stage_l.setContentsMargins(94, 20, 94, 16)
+        stage_l.setContentsMargins(34, 18, 44, 18)
         stage_l.setSpacing(8)
 
         brand_bar = QtWidgets.QFrame()
@@ -9609,10 +9644,6 @@ class Dashboard(QtWidgets.QMainWindow):
         self._dashboard_clock_timer.timeout.connect(self._refresh_dashboard_clock)
         self._dashboard_clock_timer.start()
 
-        self.top_tabs = TopTabs(self.tabs)
-        self.top_tabs.changed.connect(self._on_tab_changed)
-        stage_l.addWidget(self.top_tabs)
-
         self.page_stack = QtWidgets.QStackedWidget()
         sl = self.page_stack.layout()
         if isinstance(sl, QtWidgets.QStackedLayout):
@@ -9641,28 +9672,48 @@ class Dashboard(QtWidgets.QMainWindow):
         footer.addWidget(self.controls_hint, 0)
         stage_l.addLayout(footer)
 
-        outer.addWidget(stage)
+        outer.addWidget(stage, 1)
 
         self._games_inline = GamesInlineOverlay(stage)
         self._games_inline.actionTriggered.connect(self.handle_action)
         self._games_inline.closed.connect(lambda: self._play_sfx('back'))
         self._games_inline.hide()
 
-        main_bg = '#101713' if self._low_power_ui else (
-            'qradialgradient(cx:0.50, cy:0.38, radius:0.90, fx:0.50, fy:0.38, '
-            'stop:0 #29452d, stop:0.40 #17251b, stop:1 #070a08)'
+        main_bg = '#101820' if self._low_power_ui else (
+            'qradialgradient(cx:0.78, cy:0.35, radius:0.95, fx:0.78, fy:0.35, '
+            'stop:0 #30383c, stop:0.34 #20282d, stop:0.72 #11191f, stop:1 #080c11)'
         )
-        stage_bg = 'rgba(8,14,10,0.44)' if self._low_power_ui else 'rgba(7,13,9,0.34)'
-        stage_border = 'rgba(149,210,111,0.26)' if self._low_power_ui else 'rgba(177,229,142,0.28)'
+        wallpaper = next(
+            (ASSETS / name for name in ('dashboard_wallpaper.png', 'dashboard_wallpaper.jpg', 'dashboard_wallpaper.jpeg')
+             if (ASSETS / name).is_file()),
+            None,
+        )
+        root_background = (
+            f'border-image:url("{wallpaper.as_posix()}") 0 0 0 0 stretch stretch'
+            if wallpaper is not None else f'background:{main_bg}'
+        )
+        stage_bg = 'rgba(8,14,19,0.34)' if self._low_power_ui else 'rgba(7,13,18,0.26)'
+        stage_border = 'rgba(171,201,218,0.15)'
         self.setStyleSheet(
             f'''
             QMainWindow {{
                 background:{main_bg};
             }}
+            QWidget#dashboard_root {{ {root_background}; }}
             QFrame#stage {{
                 background:{stage_bg};
                 border:1px solid {stage_border};
                 border-radius:0px;
+            }}
+            QFrame#dashboard_blade_rail {{
+                background:qlineargradient(x1:0,y1:0,x2:0,y2:1, stop:0 #063d73, stop:0.42 #075a9e, stop:1 #092c50);
+                border-right:1px solid rgba(181,219,246,0.42);
+            }}
+            QLabel#dashboard_rail_logo {{ color:#ffffff; font-size:28px; font-weight:900; }}
+            QLabel#dashboard_rail_tagline {{ color:rgba(222,240,252,0.72); font-size:10px; font-weight:800; }}
+            QLabel#dashboard_rail_guide {{
+                color:#e9f5ff; font-size:10px; font-weight:750;
+                background:rgba(3,22,40,0.55); border:1px solid rgba(206,233,250,0.30); padding:8px 3px;
             }}
             QFrame#dashboard_brand_bar {{
                 background:rgba(4,9,6,0.38);
@@ -9736,10 +9787,13 @@ class Dashboard(QtWidgets.QMainWindow):
         self._ui_scale = scale
         self._compact_ui = compact
         compact_factor = 0.80 if compact else 1.0
+        rail = self.centralWidget().layout().itemAt(0).widget() if self.centralWidget() and self.centralWidget().layout() else None
+        if rail is not None:
+            rail.setFixedWidth(max(126, int((176 if not compact else 150) * scale)))
         if self._stage_layout is not None:
-            side = max(16, int(min(self.width(), 1600) * 0.035 * (0.88 if compact else 1.0)))
-            top = max(10, int(34 * scale * compact_factor))
-            bottom = max(8, int(26 * scale * compact_factor))
+            side = max(16, int(min(self.width(), 1600) * 0.025 * (0.88 if compact else 1.0)))
+            top = max(10, int(18 * scale * compact_factor))
+            bottom = max(8, int(18 * scale * compact_factor))
             spacing = max(6, int(10 * scale * compact_factor))
             self._stage_layout.setContentsMargins(side, top, side, bottom)
             self._stage_layout.setSpacing(spacing)

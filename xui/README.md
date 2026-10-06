@@ -63,6 +63,7 @@ Notes
 Dashboard features
 ------------------
 
+- The dashboard uses a vertical Xbox-style blade rail; an optional full-screen wallpaper can be supplied as `~/.xui/assets/dashboard_wallpaper.png`, `.jpg`, or `.jpeg`.
 - Open the Xbox Guide with `F1`, `Home`, `Ctrl+G`, `Alt+G`, or `Meta+G`; supported controllers can use their Guide/Center button.
 - The Settings page and Guide include a Quick Control Center with system status and shortcuts to screenshots, storage, controller tools, logs, update checks, and cache cleanup.
 - System Monitor reports CPU thread count, memory, home-disk capacity, and system uptime. Network Test checks DNS/IP connectivity over HTTPS.
