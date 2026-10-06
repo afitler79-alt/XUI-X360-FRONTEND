@@ -9234,19 +9234,47 @@ class AvatarPreviewFallback(QtWidgets.QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.avatar = {}
+        self._rotation = 0.0
+        self._drag_x = None
+        self.setFocusPolicy(QtCore.Qt.StrongFocus)
+        self.setCursor(QtGui.QCursor(QtCore.Qt.OpenHandCursor))
         self.setMinimumSize(300, 360)
 
     def set_avatar(self, avatar):
         self.avatar = dict(avatar or {})
         self.update()
 
+    def mousePressEvent(self, event):
+        if event.button() == QtCore.Qt.LeftButton:
+            self._drag_x = event.pos().x()
+            self.setCursor(QtGui.QCursor(QtCore.Qt.ClosedHandCursor))
+            event.accept()
+            return
+        super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event):
+        if self._drag_x is not None:
+            delta = event.pos().x() - self._drag_x
+            self._drag_x = event.pos().x()
+            self._rotation = (self._rotation + delta * 0.9) % 360.0
+            self.update()
+            event.accept()
+            return
+        super().mouseMoveEvent(event)
+
+    def mouseReleaseEvent(self, event):
+        if event.button() == QtCore.Qt.LeftButton:
+            self._drag_x = None
+            self.setCursor(QtGui.QCursor(QtCore.Qt.OpenHandCursor))
+            event.accept()
+            return
+        super().mouseReleaseEvent(event)
+
     def paintEvent(self, _event):
         painter = QtGui.QPainter(self)
         painter.setRenderHint(QtGui.QPainter.Antialiasing, True)
         bounds = self.rect()
         background = QtGui.QColor(self.avatar.get('background', '#12303a'))
-        painter.fillRect(bounds, QtGui.QColor('#10191e'))
-        painter.setBrush(QtGui.QRadialGradient(bounds.center(), max(bounds.width(), bounds.height()) * 0.7))
         gradient = QtGui.QRadialGradient(bounds.center(), max(bounds.width(), bounds.height()) * 0.7)
         gradient.setColorAt(0, background.lighter(145))
         gradient.setColorAt(1, background.darker(220))
@@ -9254,45 +9282,106 @@ class AvatarPreviewFallback(QtWidgets.QWidget):
         painter.setPen(QtCore.Qt.NoPen)
         painter.drawRect(bounds)
         cx = bounds.center().x()
-        scale = min(bounds.width() / 360.0, bounds.height() / 420.0)
+        scale = min(bounds.width() / 390.0, bounds.height() / 490.0)
+
+        for ring in (148, 174):
+            painter.setBrush(QtCore.Qt.NoBrush)
+            painter.setPen(QtGui.QPen(QtGui.QColor(69, 226, 206, 24 if ring == 148 else 14), max(1, int(scale))))
+            painter.drawEllipse(QtCore.QPointF(cx, bounds.height() * 0.47), ring * scale, ring * scale * 1.16)
+        horizon = QtGui.QLinearGradient(0, bounds.height() * 0.72, 0, bounds.height())
+        horizon.setColorAt(0, QtGui.QColor(27, 201, 170, 0))
+        horizon.setColorAt(1, QtGui.QColor(27, 201, 170, 58))
+        painter.fillRect(QtCore.QRectF(0, bounds.height() * 0.72, bounds.width(), bounds.height() * 0.28), horizon)
+
+        painter.save()
+        painter.translate(cx, bounds.height() * 0.49)
+        painter.scale(max(0.36, abs(math.cos(math.radians(self._rotation)))), 1.0)
+        painter.translate(-cx, -bounds.height() * 0.49)
+
+        def shaded(color, rect):
+            base = QtGui.QColor(color)
+            fill = QtGui.QLinearGradient(rect.topLeft(), rect.topRight())
+            fill.setColorAt(0, base.darker(145))
+            fill.setColorAt(0.48, base.lighter(122))
+            fill.setColorAt(1, base.darker(125))
+            return fill
+
         def ellipse(x, y, w, h, color):
-            painter.setBrush(QtGui.QColor(color))
-            painter.drawEllipse(QtCore.QRectF(cx + x * scale, y * scale, w * scale, h * scale))
+            rect = QtCore.QRectF(cx + x * scale, y * scale, w * scale, h * scale)
+            painter.setBrush(shaded(color, rect))
+            painter.setPen(QtGui.QPen(QtGui.QColor(255, 255, 255, 24), max(1, int(scale))))
+            painter.drawEllipse(rect)
         def rounded(x, y, w, h, radius, color):
-            painter.setBrush(QtGui.QColor(color))
-            painter.drawRoundedRect(QtCore.QRectF(cx + x * scale, y * scale, w * scale, h * scale), radius * scale, radius * scale)
-        painter.setPen(QtGui.QPen(QtGui.QColor(255, 255, 255, 30), 1))
-        painter.setBrush(QtCore.Qt.NoBrush)
-        painter.drawEllipse(QtCore.QPointF(cx, 210 * scale), 136 * scale, 170 * scale)
-        ellipse(-93, 330, 82, 31, '#18242a')
-        ellipse(11, 330, 82, 31, '#18242a')
-        rounded(-78, 208, 55, 133, 25, self.avatar.get('outfit', '#38b866'))
-        rounded(23, 208, 55, 133, 25, self.avatar.get('outfit', '#38b866'))
-        rounded(-66, 179, 132, 167, 35, self.avatar.get('outfit', '#38b866'))
-        ellipse(-111, 208, 48, 128, self.avatar.get('skin', '#bd815f'))
-        ellipse(63, 208, 48, 128, self.avatar.get('skin', '#bd815f'))
-        ellipse(-53, 46, 106, 124, self.avatar.get('skin', '#bd815f'))
-        ellipse(-57, 35, 114, 53, self.avatar.get('hair_color', '#29313d'))
-        if self.avatar.get('hair_style') == 'Long':
-            rounded(-59, 60, 26, 112, 12, self.avatar.get('hair_color', '#29313d'))
-            rounded(33, 60, 26, 112, 12, self.avatar.get('hair_color', '#29313d'))
-        ellipse(-29, 93, 8, 10, '#182127')
-        ellipse(21, 93, 8, 10, '#182127')
+            rect = QtCore.QRectF(cx + x * scale, y * scale, w * scale, h * scale)
+            painter.setBrush(shaded(color, rect))
+            painter.setPen(QtGui.QPen(QtGui.QColor(10, 20, 23, 90), max(1, int(scale))))
+            painter.drawRoundedRect(rect, radius * scale, radius * scale)
+
+        skin = self.avatar.get('skin', '#bd815f')
+        hair = self.avatar.get('hair_color', '#29313d')
+        outfit = self.avatar.get('outfit', '#38b866')
+        shadow = QtGui.QRadialGradient(cx, 372 * scale, 100 * scale)
+        shadow.setColorAt(0, QtGui.QColor(0, 0, 0, 105))
+        shadow.setColorAt(1, QtGui.QColor(0, 0, 0, 0))
+        painter.setBrush(shadow)
+        painter.setPen(QtCore.Qt.NoPen)
+        painter.drawEllipse(QtCore.QRectF(cx - 105 * scale, 342 * scale, 210 * scale, 60 * scale))
+
+        ellipse(-53, 326, 45, 66, '#172126')
+        ellipse(8, 326, 45, 66, '#172126')
+        ellipse(-65, 371, 66, 25, '#d4dddc')
+        ellipse(0, 371, 66, 25, '#d4dddc')
+        rounded(-78, 191, 55, 143, 25, outfit)
+        rounded(23, 191, 55, 143, 25, outfit)
+        rounded(-72, 173, 144, 174, 40, outfit)
+        rounded(-16, 146, 32, 55, 13, skin)
+        ellipse(-114, 198, 49, 121, skin)
+        ellipse(65, 198, 49, 121, skin)
+        ellipse(-58, 51, 116, 132, skin)
+        ellipse(-64, 38, 128, 65, hair)
+        hairstyle = self.avatar.get('hair_style')
+        if hairstyle == 'Long':
+            rounded(-65, 67, 29, 119, 13, hair)
+            rounded(36, 67, 29, 119, 13, hair)
+        elif hairstyle == 'Spiky':
+            for spike in range(-2, 3):
+                rounded(spike * 19 - 9, 13 + abs(spike) * 5, 19, 47, 9, hair)
+        elif hairstyle == 'Curls':
+            for curl in range(-2, 3):
+                ellipse(curl * 22 - 12, 24 + abs(curl) * 4, 26, 30, hair)
+        ellipse(-59, 104, 23, 39, skin)
+        ellipse(36, 104, 23, 39, skin)
+        ellipse(-31, 103, 10, 12, '#172126')
+        ellipse(21, 103, 10, 12, '#172126')
+        rounded(-38, 91, 21, 4, 2, hair)
+        rounded(17, 91, 21, 4, 2, hair)
+        ellipse(-5, 112, 10, 23, '#a96c53')
         painter.setPen(QtGui.QPen(QtGui.QColor('#563b35'), max(2, int(3 * scale))))
-        painter.drawArc(QtCore.QRectF(cx - 17 * scale, 105 * scale, 34 * scale, 24 * scale), 205 * 16, 130 * 16)
+        painter.setBrush(QtCore.Qt.NoBrush)
+        painter.drawArc(QtCore.QRectF(cx - 18 * scale, 126 * scale, 36 * scale, 23 * scale), 205 * 16, 130 * 16)
+        rounded(-72, 184, 144, 12, 6, QtGui.QColor(outfit).lighter(150).name())
+        rounded(-14, 208, 28, 83, 10, QtGui.QColor(outfit).darker(125).name())
         accessory = self.avatar.get('accessory')
         if accessory == 'Visor':
-            rounded(-55, 84, 110, 23, 8, '#3dd7db')
+            rounded(-60, 95, 120, 24, 9, '#3dd7db')
+            rounded(-49, 99, 33, 4, 2, '#ecffff')
         elif accessory == 'Halo':
             painter.setBrush(QtCore.Qt.NoBrush)
             painter.setPen(QtGui.QPen(QtGui.QColor('#f4d76e'), max(3, int(5 * scale))))
-            painter.drawEllipse(QtCore.QRectF(cx - 48 * scale, 8 * scale, 96 * scale, 25 * scale))
+            painter.drawEllipse(QtCore.QRectF(cx - 48 * scale, 13 * scale, 96 * scale, 25 * scale))
         elif accessory == 'Headphones':
             painter.setBrush(QtCore.Qt.NoBrush)
             painter.setPen(QtGui.QPen(QtGui.QColor('#ccd8dc'), max(4, int(7 * scale))))
-            painter.drawArc(QtCore.QRectF(cx - 66 * scale, 31 * scale, 132 * scale, 116 * scale), 0, 180 * 16)
-            ellipse(-67, 78, 16, 38, '#879ba1')
-            ellipse(51, 78, 16, 38, '#879ba1')
+            painter.drawArc(QtCore.QRectF(cx - 70 * scale, 35 * scale, 140 * scale, 133 * scale), 0, 180 * 16)
+            ellipse(-71, 91, 22, 48, '#879ba1')
+            ellipse(49, 91, 22, 48, '#879ba1')
+        painter.restore()
+        painter.setPen(QtGui.QColor(222, 238, 235, 165))
+        painter.setFont(QtGui.QFont('Segoe UI', max(9, int(11 * scale)), QtGui.QFont.DemiBold))
+        painter.drawText(bounds.adjusted(14, 12, -14, -14), QtCore.Qt.AlignLeft | QtCore.Qt.AlignTop, 'XUI AVATAR PREVIEW')
+        painter.setPen(QtGui.QColor(205, 224, 221, 190))
+        painter.setFont(QtGui.QFont('Segoe UI', max(9, int(10 * scale))))
+        painter.drawText(bounds.adjusted(14, 14, -14, -12), QtCore.Qt.AlignLeft | QtCore.Qt.AlignBottom, 'DRAG TO ROTATE')
         painter.end()
 
 
@@ -9325,9 +9414,12 @@ class AvatarStudioDialog(QtWidgets.QDialog):
     def __init__(self, parent=None, initial_tab='creator'):
         super().__init__(parent)
         self.setWindowTitle('Avatar Studio')
-        self.setWindowFlags(QtCore.Qt.Dialog | QtCore.Qt.FramelessWindowHint)
+        self.setWindowFlags(QtCore.Qt.Dialog | QtCore.Qt.FramelessWindowHint | QtCore.Qt.WindowStaysOnTopHint)
         self.setModal(True)
-        self.resize(1080, 680)
+        self.setWindowState(self.windowState() | QtCore.Qt.WindowFullScreen)
+        screen = QtWidgets.QApplication.primaryScreen()
+        if screen is not None:
+            self.setGeometry(screen.geometry())
         self.profile = safe_json_read(PROFILE_FILE, {})
         if not isinstance(self.profile, dict):
             self.profile = {}
@@ -9364,6 +9456,8 @@ class AvatarStudioDialog(QtWidgets.QDialog):
             QTabBar::tab { background:#1d292c; color:#aebdba; padding:11px 22px; font-weight:700; }
             QTabBar::tab:selected { color:#ffffff; background:#2e804c; }
             QComboBox, QListWidget { background:#202d30; color:#eff6f3; border:1px solid #405154; padding:8px; }
+            QComboBox { min-height:36px; font-size:16px; }
+            QListWidget { font-size:17px; }
             QPushButton { background:#2c804a; color:#fff; border:0; padding:10px 14px; font-weight:750; }
             QPushButton:hover { background:#3c9c5d; }
             QPushButton#secondary { background:#354246; }
@@ -9385,9 +9479,16 @@ class AvatarStudioDialog(QtWidgets.QDialog):
         self._build_creator_tab()
         self._build_store_tab()
         footer = QtWidgets.QHBoxLayout()
-        footer.addWidget(QtWidgets.QLabel(f"Profile: {current_gamertag()}"))
+        profile_label = QtWidgets.QLabel(f"PROFILE  /  {current_gamertag()}")
+        profile_label.setStyleSheet('color:#9eaeab;font-size:13px;font-weight:700;')
+        footer.addWidget(profile_label)
+        self.status_label = QtWidgets.QLabel('A  APPLY AVATAR     LB/RB  SWITCH TAB     B  CLOSE')
+        self.status_label.setStyleSheet('color:#aebdb9;font-size:13px;font-weight:700;')
+        footer.addWidget(self.status_label)
         footer.addStretch(1)
-        close = QtWidgets.QPushButton('Close')
+        close = QtWidgets.QPushButton('B  CLOSE')
+        close.setMinimumHeight(44)
+        close.setMinimumWidth(112)
         close.setObjectName('secondary')
         close.clicked.connect(self.reject)
         footer.addWidget(close)
@@ -9395,17 +9496,11 @@ class AvatarStudioDialog(QtWidgets.QDialog):
 
     def _build_preview(self, parent_layout):
         self.preview_host = QtWidgets.QFrame()
-        self.preview_host.setMinimumWidth(350)
+        self.preview_host.setMinimumWidth(420)
         self.preview_host.setStyleSheet('QFrame { background:#0d1518; border:1px solid #314145; }')
         preview_layout = QtWidgets.QVBoxLayout(self.preview_host)
         preview_layout.setContentsMargins(0, 0, 0, 0)
-        if QtWebEngineWidgets is not None:
-            self.preview = QtWebEngineWidgets.QWebEngineView()
-            self.preview.setMinimumSize(360, 420)
-            self.preview.setHtml(self._preview_html(), QtCore.QUrl('https://xui-avatar.local/'))
-            self.preview.loadFinished.connect(lambda _ok, view=self.preview: self._update_preview_view(view))
-        else:
-            self.preview = AvatarPreviewFallback()
+        self.preview = AvatarPreviewFallback()
         self.previews.append(self.preview)
         preview_layout.addWidget(self.preview)
         parent_layout.addWidget(self.preview_host, 3)
@@ -9518,10 +9613,16 @@ class AvatarStudioDialog(QtWidgets.QDialog):
             self.controls[field] = combo
             combo.setCurrentIndex(max(0, combo.findData(current_value)))
             combo.currentIndexChanged.connect(self._update_preview)
-            form.addRow(self.FIELD_LABELS[field], combo)
-        form.addRow(QtWidgets.QLabel('Drag the avatar to rotate the 3D view.'), QtWidgets.QLabel(''))
+            field_label = QtWidgets.QLabel(self.FIELD_LABELS[field].upper())
+            field_label.setStyleSheet('color:#dce7e4;font-size:14px;font-weight:750;')
+            form.addRow(field_label, combo)
+        rotate_hint = QtWidgets.QLabel('DRAG TO ROTATE  ·  PREVIEW UPDATES LIVE')
+        rotate_hint.setStyleSheet('color:#93aaa5;font-size:12px;font-weight:700;')
+        form.addRow(rotate_hint, QtWidgets.QLabel(''))
         form.addItem(QtWidgets.QSpacerItem(10, 20, QtWidgets.QSizePolicy.Minimum, QtWidgets.QSizePolicy.Expanding))
         apply_button = QtWidgets.QPushButton('Apply to Profile')
+        apply_button.setMinimumHeight(54)
+        apply_button.setStyleSheet('font-size:17px;font-weight:800;')
         apply_button.clicked.connect(self._apply_to_profile)
         form.addRow(apply_button)
         row.addWidget(controls_panel, 2)
@@ -9535,7 +9636,7 @@ class AvatarStudioDialog(QtWidgets.QDialog):
         panel = QtWidgets.QWidget()
         layout = QtWidgets.QVBoxLayout(panel)
         heading = QtWidgets.QLabel('COSMETICS')
-        heading.setStyleSheet('font-size:18px;font-weight:800;color:#f1f7f5;')
+        heading.setStyleSheet('font-size:22px;font-weight:800;color:#f1f7f5;')
         layout.addWidget(heading)
         self.store_list = QtWidgets.QListWidget()
         self.store_list.currentRowChanged.connect(self._show_offer)
@@ -9544,6 +9645,7 @@ class AvatarStudioDialog(QtWidgets.QDialog):
         self.offer_detail.setWordWrap(True)
         layout.addWidget(self.offer_detail)
         self.offer_button = QtWidgets.QPushButton('Select an item')
+        self.offer_button.setMinimumHeight(54)
         self.offer_button.clicked.connect(self._buy_or_equip_offer)
         layout.addWidget(self.offer_button)
         row.addWidget(panel, 2)
@@ -9632,7 +9734,21 @@ class AvatarStudioDialog(QtWidgets.QDialog):
         self.store['avatar'] = dict(self.avatar)
         safe_json_write(PROFILE_FILE, self.profile)
         safe_json_write(AVATAR_STORE_FILE, self.store)
-        QtWidgets.QMessageBox.information(self, 'Avatar saved', 'Your avatar is now applied to this local profile.')
+        self.status_label.setText('AVATAR APPLIED TO PROFILE')
+
+    def keyPressEvent(self, event):
+        if event.key() in (QtCore.Qt.Key_Escape, QtCore.Qt.Key_Back, QtCore.Qt.Key_B):
+            self.reject()
+            return
+        if event.key() in (QtCore.Qt.Key_PageUp, QtCore.Qt.Key_PageDown):
+            self.tabs.setCurrentIndex(1 - self.tabs.currentIndex())
+            return
+        if event.key() == QtCore.Qt.Key_Return and self.tabs.currentIndex() == 0:
+            focused = QtWidgets.QApplication.focusWidget()
+            if focused is self.controls.get('skin'):
+                self._apply_to_profile()
+                return
+        super().keyPressEvent(event)
 
 
 class Dashboard(QtWidgets.QMainWindow):
@@ -11647,13 +11763,16 @@ exit 1
         u = str(url or '').strip()
         if not u:
             return
-        if normal_mode:
-            try:
-                if QtGui.QDesktopServices.openUrl(QtCore.QUrl(u)):
-                    self._play_sfx('open')
-                    return
-            except Exception:
-                pass
+        qurl = QtCore.QUrl(u)
+        if qurl.scheme().lower() in ('http', 'https'):
+            self._open_url(u)
+            return
+        try:
+            if QtGui.QDesktopServices.openUrl(qurl):
+                self._play_sfx('open')
+                return
+        except Exception:
+            pass
         kiosk = XUI_HOME / 'bin' / 'xui_browser.sh'
         if kiosk.exists():
             mode = '--hub' if bool(normal_mode) else '--kiosk'
