@@ -5381,12 +5381,17 @@ class TopTabs(QtWidgets.QWidget):
         self._compact = False
         h = QtWidgets.QHBoxLayout(self)
         self._layout = h
-        h.setContentsMargins(0, 0, 0, 0)
-        h.setSpacing(16)
+        h.setContentsMargins(8, 3, 8, 3)
+        h.setSpacing(8)
         h.addStretch(1)
         for i, n in enumerate(self.names):
             lbl = TabLabel(n)
+            lbl.setObjectName('dashboard_tab')
+            lbl.setAlignment(QtCore.Qt.AlignCenter)
+            lbl.setMinimumHeight(38)
+            lbl.setFocusPolicy(QtCore.Qt.StrongFocus)
             lbl.setCursor(QtGui.QCursor(QtCore.Qt.PointingHandCursor))
+            lbl.setToolTip(f'Open {n.title()}')
             lbl.clicked.connect(lambda i=i: self.changed.emit(i))
             self.labels.append(lbl)
             h.addWidget(lbl)
@@ -5399,6 +5404,10 @@ class TopTabs(QtWidgets.QWidget):
         self._compact = bool(compact)
         spacing = int(16 * self._scale * (0.90 if self._compact else 1.0))
         self._layout.setSpacing(max(8, spacing))
+        self._layout.setContentsMargins(max(4, int(8 * self._scale)), 3, max(4, int(8 * self._scale)), 3)
+        tab_height = max(30, int(38 * self._scale))
+        for label in self.labels:
+            label.setMinimumHeight(tab_height)
         self.set_current(self.current)
 
     def set_current(self, idx):
@@ -5415,13 +5424,16 @@ class TopTabs(QtWidgets.QWidget):
             for i, lbl in enumerate(self.labels):
                 if i == self.current:
                     lbl.setStyleSheet(
-                        f'color:#f4f6f8; font-size:{active_px}px; font-weight:700; '
-                        'font-family:"Segoe UI","Noto Sans",sans-serif;'
+                        f'color:#ffffff; font-size:{active_px}px; font-weight:800; '
+                        'font-family:"Segoe UI","Noto Sans",sans-serif; '
+                        'background:qlineargradient(x1:0,y1:0,x2:0,y2:1, stop:0 rgba(93,179,58,0.42), stop:1 rgba(34,93,33,0.10)); '
+                        'border-bottom:3px solid #91e443; padding:2px 10px;'
                     )
                 else:
                     lbl.setStyleSheet(
-                        f'color:rgba(210,217,224,0.82); font-size:{idle_px}px; font-weight:600; '
-                        'font-family:"Segoe UI","Noto Sans",sans-serif;'
+                        f'color:rgba(225,233,226,0.72); font-size:{idle_px}px; font-weight:600; '
+                        'font-family:"Segoe UI","Noto Sans",sans-serif; '
+                        'background:rgba(9,16,12,0.20); border-bottom:3px solid transparent; padding:2px 10px;'
                     )
             return
 
@@ -5430,13 +5442,16 @@ class TopTabs(QtWidgets.QWidget):
 
         if 0 <= old_idx < len(self.labels):
             self.labels[old_idx].setStyleSheet(
-                f'color:rgba(210,217,224,0.82); font-size:{idle_px}px; font-weight:600; '
-                'font-family:"Segoe UI","Noto Sans",sans-serif;'
+                f'color:rgba(225,233,226,0.72); font-size:{idle_px}px; font-weight:600; '
+                'font-family:"Segoe UI","Noto Sans",sans-serif; '
+                'background:rgba(9,16,12,0.20); border-bottom:3px solid transparent; padding:2px 10px;'
             )
         if 0 <= self.current < len(self.labels):
             self.labels[self.current].setStyleSheet(
-                f'color:#f4f6f8; font-size:{active_px}px; font-weight:700; '
-                'font-family:"Segoe UI","Noto Sans",sans-serif;'
+                f'color:#ffffff; font-size:{active_px}px; font-weight:800; '
+                'font-family:"Segoe UI","Noto Sans",sans-serif; '
+                'background:qlineargradient(x1:0,y1:0,x2:0,y2:1, stop:0 rgba(93,179,58,0.42), stop:1 rgba(34,93,33,0.10)); '
+                'border-bottom:3px solid #91e443; padding:2px 10px;'
             )
 
 
@@ -5493,6 +5508,8 @@ class GreenTile(QtWidgets.QFrame):
         self._last_label_px = None
         self.setObjectName('green_tile')
         self.setFocusPolicy(QtCore.Qt.StrongFocus)
+        self.setCursor(QtGui.QCursor(QtCore.Qt.PointingHandCursor))
+        self.setAccessibleName(f'{text}: {action}')
         v = QtWidgets.QVBoxLayout(self)
         self._layout = v
         v.setContentsMargins(10, 8, 10, 8)
@@ -5560,21 +5577,22 @@ class GreenTile(QtWidgets.QFrame):
         if self._selected is on:
             return
         self._selected = on
-        border = 'rgba(249,255,249,0.98)' if on else 'rgba(244,252,246,0.32)'
+        border = 'rgba(245,255,237,0.98)' if on else 'rgba(173,205,174,0.24)'
         width = '2px' if on else '1px'
-        bg_a = '#40ce55' if on else '#39c650'
-        bg_b = '#2ea63f' if on else '#2a9a3a'
+        bg_a = '#75d63a' if on else '#26332d'
+        bg_b = '#258b35' if on else '#151d1a'
         self.setStyleSheet(f'''
             QFrame#green_tile {{
                 background:qlineargradient(x1:0,y1:0,x2:0,y2:1, stop:0 {bg_a}, stop:1 {bg_b});
                 border:{width} solid {border};
                 border-radius:0px;
             }}
+            QFrame#green_tile:hover {{ border:2px solid #a6ed5c; }}
             QLabel#tile_icon {{
-                background:transparent;
+                background:rgba(128,211,75,0.14);
                 border:none;
             }}
-            QLabel{{color:#f4fff3;}}
+            QLabel{{color:{'#ffffff' if on else '#e5eee7'};}}
         ''')
 
     def mousePressEvent(self, e):
@@ -5603,6 +5621,7 @@ class HeroPanel(QtWidgets.QFrame):
         self.logo_label = QtWidgets.QLabel(str(self.title).upper())
         self.logo_label.setObjectName('hero_logo')
         self.logo_label.setAlignment(QtCore.Qt.AlignCenter)
+        self.logo_label.setObjectName('hero_logo')
         v.addWidget(self.logo_label, 1)
         v.addStretch(1)
         self.sub_label = QtWidgets.QLabel(self.subtitle)
@@ -5656,14 +5675,15 @@ class HeroPanel(QtWidgets.QFrame):
         if self._selected is on:
             return
         self._selected = on
-        border = 'rgba(244,250,255,0.9)' if on else 'rgba(240,246,252,0.28)'
+        border = 'rgba(247,255,238,0.98)' if on else 'rgba(195,232,177,0.38)'
         width = '2px' if on else '1px'
         self.setStyleSheet(f'''
             QFrame#hero_panel {{
-                background:qlineargradient(x1:0,y1:0,x2:1,y2:1, stop:0 #1b1f25, stop:1 #101318);
+                background:qlineargradient(x1:0,y1:0,x2:1,y2:1, stop:0 #61b934, stop:0.20 #277d32, stop:0.58 #164624, stop:1 #101a16);
                 border:{width} solid {border};
                 border-radius:0px;
             }}
+            QLabel#hero_logo {{ color:rgba(255,255,255,0.96); }}
         ''')
 
     def mousePressEvent(self, e):
@@ -5814,9 +5834,11 @@ class GamesShowcasePanel(QtWidgets.QFrame):
                 'text-align:left; padding:4px 7px;'
                 f'font-size:{blade_fs}px; font-weight:700;'
                 'font-family:"Segoe UI","Noto Sans",sans-serif;'
-                'color:#f6fff6; background:qlineargradient(x1:0,y1:0,x2:0,y2:1, stop:0 #3ecf55, stop:1 #2ca43f);'
-                'border:1px solid rgba(248,255,248,0.34); border-radius:0px; }'
-                'QPushButton#games_blade_btn:hover { background:#45d75d; }'
+                'color:#e7f1e7; background:qlineargradient(x1:0,y1:0,x2:0,y2:1, stop:0 #344139, stop:1 #202923);'
+                'border:1px solid rgba(196,224,190,0.22); border-radius:0px; }'
+                'QPushButton#games_blade_btn:hover, QPushButton#games_blade_btn:focus {'
+                'color:#ffffff; background:qlineargradient(x1:0,y1:0,x2:1,y2:0, stop:0 #72d23d, stop:1 #287e34);'
+                'border:1px solid rgba(247,255,238,0.82); }'
             )
 
         for b in self._cover_buttons:
@@ -5845,7 +5867,7 @@ class GamesShowcasePanel(QtWidgets.QFrame):
         self.setStyleSheet(
             f'''
             QFrame#games_showcase_panel {{
-                background:qlineargradient(x1:0,y1:0,x2:1,y2:1, stop:0 #20242a, stop:1 #15181d);
+                background:qlineargradient(x1:0,y1:0,x2:1,y2:1, stop:0 #26332b, stop:0.48 #18211b, stop:1 #101512);
                 border:{width} solid {border};
                 border-radius:0px;
             }}
@@ -9538,6 +9560,7 @@ class Dashboard(QtWidgets.QMainWindow):
 
     def _build(self):
         root = QtWidgets.QWidget()
+        root.setObjectName('dashboard_root')
         self.setCentralWidget(root)
         outer = QtWidgets.QVBoxLayout(root)
         outer.setContentsMargins(0, 0, 0, 0)
@@ -9546,8 +9569,45 @@ class Dashboard(QtWidgets.QMainWindow):
         stage.setObjectName('stage')
         stage_l = QtWidgets.QVBoxLayout(stage)
         self._stage_layout = stage_l
-        stage_l.setContentsMargins(94, 34, 94, 26)
-        stage_l.setSpacing(10)
+        stage_l.setContentsMargins(94, 20, 94, 16)
+        stage_l.setSpacing(8)
+
+        brand_bar = QtWidgets.QFrame()
+        brand_bar.setObjectName('dashboard_brand_bar')
+        brand_l = QtWidgets.QHBoxLayout(brand_bar)
+        brand_l.setContentsMargins(2, 0, 2, 0)
+        brand_l.setSpacing(10)
+        brand_mark = QtWidgets.QLabel('X')
+        brand_mark.setObjectName('dashboard_brand_mark')
+        brand_mark.setAlignment(QtCore.Qt.AlignCenter)
+        brand_mark.setFixedSize(34, 34)
+        brand_l.addWidget(brand_mark, 0, QtCore.Qt.AlignVCenter)
+        brand_copy = QtWidgets.QVBoxLayout()
+        brand_copy.setContentsMargins(0, 0, 0, 0)
+        brand_copy.setSpacing(0)
+        brand_name = QtWidgets.QLabel('XUI')
+        brand_name.setObjectName('dashboard_brand_name')
+        brand_subtitle = QtWidgets.QLabel('XBOX 360 CONSOLE')
+        brand_subtitle.setObjectName('dashboard_brand_subtitle')
+        brand_copy.addWidget(brand_name)
+        brand_copy.addWidget(brand_subtitle)
+        brand_l.addLayout(brand_copy)
+        brand_l.addStretch(1)
+        self.profile_name = QtWidgets.QLabel(current_gamertag())
+        self.profile_name.setObjectName('dashboard_profile_name')
+        self.profile_name.setAlignment(QtCore.Qt.AlignRight | QtCore.Qt.AlignVCenter)
+        self.profile_name.setToolTip('Current local profile')
+        brand_l.addWidget(self.profile_name, 0, QtCore.Qt.AlignVCenter)
+        self.dashboard_clock = QtWidgets.QLabel('')
+        self.dashboard_clock.setObjectName('dashboard_clock')
+        self.dashboard_clock.setAlignment(QtCore.Qt.AlignRight | QtCore.Qt.AlignVCenter)
+        brand_l.addWidget(self.dashboard_clock, 0, QtCore.Qt.AlignVCenter)
+        stage_l.addWidget(brand_bar, 0)
+        self._refresh_dashboard_clock()
+        self._dashboard_clock_timer = QtCore.QTimer(self)
+        self._dashboard_clock_timer.setInterval(30000)
+        self._dashboard_clock_timer.timeout.connect(self._refresh_dashboard_clock)
+        self._dashboard_clock_timer.start()
 
         self.top_tabs = TopTabs(self.tabs)
         self.top_tabs.changed.connect(self._on_tab_changed)
@@ -9567,9 +9627,19 @@ class Dashboard(QtWidgets.QMainWindow):
         self._normalize_page_visibility(0)
         stage_l.addWidget(self.page_stack, 1)
 
+        footer = QtWidgets.QHBoxLayout()
+        footer.setContentsMargins(0, 5, 0, 0)
+        footer.setSpacing(12)
         self.desc = QtWidgets.QLabel('Connect your Xbox 360 to the Internet to explore games, entertainment, and more')
-        self.desc.setStyleSheet('font-size:18px; color:rgba(236,240,244,0.82); font-family:"Segoe UI","Noto Sans",sans-serif;')
-        stage_l.addWidget(self.desc)
+        self.desc.setObjectName('dashboard_page_hint')
+        self.desc.setMinimumWidth(0)
+        self.desc.setStyleSheet('font-size:15px; color:rgba(226,236,228,0.82); font-family:"Segoe UI","Noto Sans",sans-serif;')
+        footer.addWidget(self.desc, 1)
+        self.controls_hint = QtWidgets.QLabel('A  OPEN     B  BACK     LB / RB  CHANGE BLADE     GUIDE  XBOX GUIDE')
+        self.controls_hint.setObjectName('dashboard_controls_hint')
+        self.controls_hint.setAlignment(QtCore.Qt.AlignRight | QtCore.Qt.AlignVCenter)
+        footer.addWidget(self.controls_hint, 0)
+        stage_l.addLayout(footer)
 
         outer.addWidget(stage)
 
@@ -9578,13 +9648,12 @@ class Dashboard(QtWidgets.QMainWindow):
         self._games_inline.closed.connect(lambda: self._play_sfx('back'))
         self._games_inline.hide()
 
-        main_bg = (
-            '#8f959c'
-            if self._low_power_ui
-            else 'qlineargradient(x1:0.0,y1:0.0,x2:0.0,y2:1.0, stop:0 #4f555d, stop:0.44 #858b92, stop:1 #d7dbe0)'
+        main_bg = '#101713' if self._low_power_ui else (
+            'qradialgradient(cx:0.50, cy:0.38, radius:0.90, fx:0.50, fy:0.38, '
+            'stop:0 #29452d, stop:0.40 #17251b, stop:1 #070a08)'
         )
-        stage_bg = 'rgba(255,255,255,0.03)' if self._low_power_ui else 'rgba(255,255,255,0.06)'
-        stage_border = 'rgba(255,255,255,0.08)' if self._low_power_ui else 'rgba(255,255,255,0.10)'
+        stage_bg = 'rgba(8,14,10,0.44)' if self._low_power_ui else 'rgba(7,13,9,0.34)'
+        stage_border = 'rgba(149,210,111,0.26)' if self._low_power_ui else 'rgba(177,229,142,0.28)'
         self.setStyleSheet(
             f'''
             QMainWindow {{
@@ -9595,10 +9664,34 @@ class Dashboard(QtWidgets.QMainWindow):
                 border:1px solid {stage_border};
                 border-radius:0px;
             }}
+            QFrame#dashboard_brand_bar {{
+                background:rgba(4,9,6,0.38);
+                border-bottom:1px solid rgba(166,222,127,0.30);
+            }}
+            QLabel#dashboard_brand_mark {{
+                color:#ffffff;
+                background:qlineargradient(x1:0,y1:0,x2:1,y2:1, stop:0 #8de144, stop:1 #268934);
+                border:1px solid rgba(238,255,226,0.82);
+                border-radius:17px;
+                font-size:22px;
+                font-weight:900;
+            }}
+            QLabel#dashboard_brand_name {{ color:#f4fff0; font-size:19px; font-weight:900; }}
+            QLabel#dashboard_brand_subtitle {{ color:rgba(198,220,193,0.76); font-size:9px; font-weight:700; }}
+            QLabel#dashboard_profile_name {{ color:#f4fff0; font-size:15px; font-weight:750; padding:0 12px; }}
+            QLabel#dashboard_clock {{ color:#c3d1c3; font-size:13px; font-weight:600; padding-left:10px; }}
+            QWidget#dashboard_root QLabel#dashboard_controls_hint {{
+                color:#c5d4c4; font-size:11px; font-weight:700;
+                background:rgba(7,12,8,0.62); border:1px solid rgba(166,222,127,0.22); padding:7px 10px;
+            }}
             '''
         )
         self.setCursor(QtGui.QCursor(QtCore.Qt.BlankCursor))
         root.setCursor(QtGui.QCursor(QtCore.Qt.BlankCursor))
+
+    def _refresh_dashboard_clock(self):
+        if hasattr(self, 'dashboard_clock'):
+            self.dashboard_clock.setText(time.strftime('%a  %d %b   %H:%M').upper())
 
     def _compute_ui_metrics(self):
         w = max(800, self.width())
@@ -9657,6 +9750,16 @@ class Dashboard(QtWidgets.QMainWindow):
             self.desc.setStyleSheet(
                 f'font-size:{desc_px}px; color:rgba(236,240,244,0.82); '
                 'font-family:"Segoe UI","Noto Sans",sans-serif;'
+            )
+        if hasattr(self, 'controls_hint') and self.controls_hint is not None:
+            self.controls_hint.setText(
+                'A OPEN  B BACK  LB/RB BLADES  GUIDE'
+                if compact else 'A OPEN     B BACK     LB / RB  CHANGE BLADE     GUIDE  XBOX GUIDE'
+            )
+            controls_px = max(8, int(11 * scale * (0.90 if compact else 1.0)))
+            self.controls_hint.setStyleSheet(
+                f'font-size:{controls_px}px; color:#c5d4c4; font-weight:700; '
+                'background:rgba(7,12,8,0.62); border:1px solid rgba(166,222,127,0.22); padding:7px 10px;'
             )
         for p in self.pages:
             p.apply_scale(scale, compact)
