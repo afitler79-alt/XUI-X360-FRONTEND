@@ -150,25 +150,13 @@ confirm(){
 
 install_dependencies(){
     if [ "${AUTO_INSTALL_TOOLS:-0}" != "1" ]; then
-        info "AUTO_INSTALL_TOOLS=0; skipping dependency installation"
+        info "AUTO_INSTALL_TOOLS=0; skipping package installation (Python app launcher is ready)"
         return 0
     fi
     if ! check_cmd python3; then
         warn "python3 not found; cannot continue dependency setup"
         return 0
     fi
-
-    mkdir -p "$BIN_DIR"
-    # Always create python launcher wrapper first
-    cat > "$BIN_DIR/xui_python.sh" <<'BASH'
-#!/usr/bin/env bash
-set -euo pipefail
-if [ -x "$HOME/.xui/.venv/bin/python" ]; then
-  exec "$HOME/.xui/.venv/bin/python" "$@"
-fi
-exec python3 "$@"
-BASH
-    chmod +x "$BIN_DIR/xui_python.sh" || true
 
     info "Installing system dependencies (best effort)"
     if command -v apt >/dev/null 2>&1; then
@@ -374,6 +362,19 @@ parse_args(){
 
 ensure_dirs(){
   mkdir -p "$ASSETS_DIR" "$BIN_DIR" "$DASH_DIR" "$DATA_DIR" "$SYSTEMD_USER_DIR" "$AUTOSTART_DIR" || true
+    cat > "$BIN_DIR/xui_python.sh" <<'BASH'
+#!/usr/bin/env bash
+set -euo pipefail
+if [ -x "$HOME/.xui/.venv/bin/python" ]; then
+    exec "$HOME/.xui/.venv/bin/python" "$@"
+fi
+if command -v python3 >/dev/null 2>&1; then
+    exec python3 "$@"
+fi
+echo "XUI: python3 is required to launch this app." >&2
+exit 127
+BASH
+    chmod +x "$BIN_DIR/xui_python.sh" || true
 }
 
 write_windows_bundle(){
@@ -3083,6 +3084,37 @@ class InlineSocialEngine:
                     backoff = min(8.0, backoff * 1.5)
 
 
+def _fit_dialog_to_screen(dialog, parent=None, width_ratio=0.92, height_ratio=0.88, min_width=640, min_height=420):
+    screen = None
+    try:
+        screen = parent.screen() if parent is not None else None
+    except Exception:
+        screen = None
+    if screen is None:
+        screen = QtWidgets.QApplication.primaryScreen()
+    if screen is None:
+        return
+    bounds = screen.availableGeometry()
+    max_width = max(1, bounds.width() - 32)
+    max_height = max(1, bounds.height() - 48)
+    min_width = min(max_width, max(1, int(min_width)))
+    min_height = min(max_height, max(1, int(min_height)))
+    width = min(max_width, max(min_width, int(bounds.width() * width_ratio)))
+    height = min(max_height, max(min_height, int(bounds.height() * height_ratio)))
+    try:
+        layout = dialog.layout()
+        if layout is not None:
+            layout.setSizeConstraint(QtWidgets.QLayout.SetNoConstraint)
+        dialog.setMinimumSize(min_width, min_height)
+        dialog.resize(width, height)
+        dialog.move(
+            bounds.x() + (bounds.width() - width) // 2,
+            bounds.y() + (bounds.height() - height) // 2,
+        )
+    except Exception:
+        pass
+
+
 class SocialOverlay(QtWidgets.QDialog):
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -3198,6 +3230,7 @@ class SocialOverlay(QtWidgets.QDialog):
             }
             QPushButton:hover { background:qlineargradient(x1:0,y1:0,x2:0,y2:1, stop:0 #66df4b, stop:1 #3dba35); }
         ''')
+        self._social_base_style = self.styleSheet()
         outer = QtWidgets.QVBoxLayout(self)
         outer.setContentsMargins(0, 0, 0, 0)
         panel = QtWidgets.QFrame()
@@ -3251,7 +3284,7 @@ class SocialOverlay(QtWidgets.QDialog):
         self.left_lbl = QtWidgets.QLabel('Messages / Peers')
         self.left_lbl.setObjectName('social_col_title')
         self.peers = QtWidgets.QListWidget()
-        self.peers.setMinimumWidth(340)
+        self.peers.setMinimumWidth(0)
         left.addWidget(self.left_lbl)
         left.addWidget(self.peers, 1)
 
@@ -3263,7 +3296,7 @@ class SocialOverlay(QtWidgets.QDialog):
         center_lbl = QtWidgets.QLabel('Actions')
         center_lbl.setObjectName('social_col_title')
         self.actions = QtWidgets.QListWidget()
-        self.actions.setMinimumWidth(290)
+        self.actions.setMinimumWidth(0)
         center.addWidget(center_lbl)
         center.addWidget(self.actions, 1)
 
@@ -3718,17 +3751,29 @@ class SocialOverlay(QtWidgets.QDialog):
     def showEvent(self, e):
         super().showEvent(e)
         parent = self.parentWidget()
-        if parent is None:
-            return
-        pw = parent.width()
-        ph = parent.height()
-        w = max(980, int(pw * 0.84))
-        h = max(560, int(ph * 0.74))
-        self.resize(min(w, pw - 80), min(h, ph - 80))
-        x = parent.x() + (pw - self.width()) // 2
-        y = parent.y() + (ph - self.height()) // 2
-        self.move(max(0, x), max(0, y))
+        _fit_dialog_to_screen(self, parent, width_ratio=0.93, height_ratio=0.88, min_width=680, min_height=460)
+        self._apply_responsive_style()
         QtCore.QTimer.singleShot(0, lambda: self._set_focus_zone(self._focus_zone))
+
+    def _apply_responsive_style(self):
+        base_style = getattr(self, '_social_base_style', '')
+        if not base_style:
+            return
+        scale = max(0.72, min(1.0, float(self.width()) / 1280.0))
+        px = lambda value, floor: max(floor, int(round(value * scale)))
+        self.setStyleSheet(base_style + f'''
+            QLabel#social_title {{ font-size:{px(40, 28)}px; }}
+            QLabel#social_hint {{ font-size:{px(16, 12)}px; }}
+            QLabel#social_col_title {{ font-size:{px(20, 14)}px; }}
+            QListWidget {{ font-size:{px(21, 14)}px; }}
+            QPlainTextEdit {{ font-size:{px(16, 12)}px; }}
+            QLineEdit {{ font-size:{px(20, 14)}px; padding:{px(8, 5)}px; }}
+            QPushButton {{ font-size:{px(18, 13)}px; padding:{px(8, 5)}px {px(12, 7)}px; }}
+        ''')
+
+    def resizeEvent(self, e):
+        super().resizeEvent(e)
+        self._apply_responsive_style()
 
     def keyPressEvent(self, e):
         k = e.key()
@@ -5794,15 +5839,8 @@ class QuickMenu(QtWidgets.QDialog):
     def showEvent(self, e):
         super().showEvent(e)
         parent = self.parentWidget()
-        if parent is None:
-            return
-        # Xbox-360 style: centered guide panel inside dashboard.
-        w = min(max(900, int(parent.width() * 0.74)), max(900, parent.width() - 80))
-        h = min(max(540, int(parent.height() * 0.72)), max(540, parent.height() - 80))
-        self.resize(w, h)
-        x = parent.x() + (parent.width() - w) // 2
-        y = parent.y() + (parent.height() - h) // 2
-        self.move(max(0, x), max(0, y))
+        _fit_dialog_to_screen(self, parent, width_ratio=0.86, height_ratio=0.82, min_width=680, min_height=430)
+        self.info_text.setMinimumWidth(min(280, max(160, self.width() // 3)))
         self._animate_open()
 
     def _animate_open(self):
@@ -6058,13 +6096,7 @@ class GamesHubMenu(QtWidgets.QDialog):
     def showEvent(self, e):
         super().showEvent(e)
         parent = self.parentWidget()
-        if parent is not None:
-            w = min(max(980, int(parent.width() * 0.78)), max(980, parent.width() - 80))
-            h = min(max(560, int(parent.height() * 0.74)), max(560, parent.height() - 80))
-            self.resize(w, h)
-            x = parent.x() + (parent.width() - w) // 2
-            y = parent.y() + (parent.height() - h) // 2
-            self.move(max(0, x), max(0, y))
+        _fit_dialog_to_screen(self, parent, width_ratio=0.92, height_ratio=0.86, min_width=740, min_height=460)
         self._animate_open()
 
     def _animate_open(self):
@@ -7339,14 +7371,7 @@ class XboxGuideMenu(QtWidgets.QDialog):
     def showEvent(self, e):
         super().showEvent(e)
         parent = self.parentWidget()
-        if parent is not None:
-            # Keep current guide style, but render it smaller and centered.
-            w = min(max(820, int(parent.width() * 0.74)), max(820, parent.width() - 46))
-            h = min(max(430, int(parent.height() * 0.63)), max(430, parent.height() - 46))
-            self.resize(w, h)
-            x = parent.x() + max(8, (parent.width() - self.width()) // 2)
-            y = parent.y() + max(8, (parent.height() - self.height()) // 2)
-            self.move(max(0, x), max(0, y))
+        _fit_dialog_to_screen(self, parent, width_ratio=0.88, height_ratio=0.82, min_width=700, min_height=420)
         self._refresh_meta()
         self._refresh_side_blades()
         self._sfx('open')
@@ -10629,9 +10654,26 @@ exit 0
             argv = list(args or [])
             if str(cmd) in ('/bin/sh', 'sh', '/bin/bash', 'bash') and len(argv) >= 2 and str(argv[0]) in ('-c', '-lc'):
                 argv[1] = self._with_controller_env_cmd(argv[1])
-            QtCore.QProcess.startDetached(cmd, argv)
-        except Exception:
-            pass
+            result = QtCore.QProcess.startDetached(str(cmd), argv)
+            started = result[0] if isinstance(result, tuple) else bool(result)
+            if not started:
+                self._msg('App launch', f'No se pudo iniciar: {cmd}. Comprueba que el archivo exista y tenga permiso de ejecución.')
+            return bool(started)
+        except Exception as exc:
+            self._msg('App launch', f'No se pudo iniciar {cmd}: {exc}')
+            return False
+
+    def _launch_local_python_app(self, title, relative_script):
+        script = XUI_HOME / relative_script
+        if not script.is_file():
+            self._msg(str(title or 'App'), f'No se encontró el archivo de la app:\n{script}\n\nEjecuta de nuevo el instalador para restaurar los archivos.')
+            return False
+        launcher = XUI_HOME / 'bin' / 'xui_python.sh'
+        program = str(launcher) if launcher.is_file() and os.access(launcher, os.X_OK) else sys.executable
+        if not program or not Path(program).exists():
+            self._msg(str(title or 'App'), 'No se encontró Python 3 para abrir esta app.')
+            return False
+        return self._run(program, [str(script)])
 
     def _controller_env_exports(self):
         env_file = XUI_HOME / 'data' / 'controller_profile.env'
@@ -11828,9 +11870,9 @@ exit 0
         elif action == 'No recent games':
             self._msg('Recently Played', 'No recent games.')
         elif action == 'Casino':
-            self._run('/bin/sh', ['-c', f'{xui}/bin/xui_python.sh {xui}/casino/casino.py'])
+            self._launch_local_python_app('Casino', 'casino/casino.py')
         elif action == 'Runner':
-            self._run('/bin/sh', ['-c', f'{xui}/bin/xui_python.sh {xui}/games/runner.py'])
+            self._launch_local_python_app('Runner', 'games/runner.py')
         elif action in ('Gem Match', 'Bejeweled'):
             self._run('/bin/sh', ['-c', f'{xui}/bin/xui_gem_match.sh'])
         elif action == 'Showcase Halo 4':
@@ -11932,7 +11974,11 @@ exit 0
                 'https://github.com/xenia-canary/xenia-canary/wiki/Quickstart#how-to-rip-games',
             )
         elif action in ('Store', 'Avatar Store'):
-            self._run('/bin/sh', ['-c', f'{xui}/bin/xui_store.sh'])
+            store_launcher = XUI_HOME / 'bin' / 'xui_store.sh'
+            if store_launcher.is_file():
+                self._run('/bin/sh', [str(store_launcher)])
+            else:
+                self._launch_local_python_app('Store', 'bin/xui_store_modern.py')
         elif action == 'Web Browser':
             self._run('/bin/sh', ['-c', f'{xui}/bin/xui_browser.sh --hub https://www.xbox.com'])
         elif action == 'Close Active App':
@@ -11944,12 +11990,7 @@ exit 0
             dialog.exec_()
             self._play_sfx('close')
         elif action in ('Missions', 'Misiones'):
-            mission_window = XUI_HOME / 'games' / 'missions.py'
-            python_launcher = XUI_HOME / 'bin' / 'xui_python.sh'
-            if mission_window.exists() and python_launcher.exists():
-                self._run('/bin/sh', ['-c', f'"{python_launcher}" "{mission_window}"'])
-            else:
-                self._msg('Missions', 'Mission center is not installed. Re-run the XUI installer to restore it.')
+            self._launch_local_python_app('Missions', 'games/missions.py')
         elif action in ('Achievements', 'Logros'):
             self._open_achievements_hub()
         elif action == 'LAN':
