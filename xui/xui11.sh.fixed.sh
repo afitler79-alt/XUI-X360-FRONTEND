@@ -296,6 +296,7 @@ parse_args(){
     XUI_APT_WAIT_SECONDS="${XUI_APT_WAIT_SECONDS:-180}"
     XUI_ONLY_REFRESH_STORE=0
     XUI_ONLY_REFRESH_CONTROLLERS=0
+    XUI_ONLY_REFRESH_UPDATER=0
     XUI_EXPORT_WIN=0
     XUI_ONLY_EXPORT_WIN=0
     XUI_SKIP_XENIA=0
@@ -340,6 +341,10 @@ parse_args(){
                 XUI_ONLY_REFRESH_CONTROLLERS=1
                 shift
                 ;;
+            --refresh-updater|--fix-updater)
+                XUI_ONLY_REFRESH_UPDATER=1
+                shift
+                ;;
             --export-win|--windows-bundle)
                 XUI_EXPORT_WIN=1
                 shift
@@ -350,14 +355,14 @@ parse_args(){
                 shift
                 ;;
             --help|-h)
-                echo "Usage: $0 [--yes-install|-y] [--no-auto-install] [--skip-xenia] [--use-external-dashboard] [--skip-apt-wait] [--apt-wait-seconds N] [--refresh-store-ui] [--refresh-controllers] [--export-win] [--export-win-only]"; exit 0 ;;
+                echo "Usage: $0 [--yes-install|-y] [--no-auto-install] [--skip-xenia] [--use-external-dashboard] [--skip-apt-wait] [--apt-wait-seconds N] [--refresh-store-ui] [--refresh-controllers] [--refresh-updater] [--export-win] [--export-win-only]"; exit 0 ;;
             *)
                 warn "Ignoring unknown argument: $1"
                 shift
                 ;;
         esac
     done
-    export AUTO_INSTALL_TOOLS XUI_INSTALL_SYSTEM XUI_USE_EXTERNAL_DASHBOARD XUI_SKIP_APT_WAIT XUI_APT_WAIT_SECONDS XUI_ONLY_REFRESH_STORE XUI_ONLY_REFRESH_CONTROLLERS XUI_EXPORT_WIN XUI_ONLY_EXPORT_WIN XUI_SKIP_XENIA
+    export AUTO_INSTALL_TOOLS XUI_INSTALL_SYSTEM XUI_USE_EXTERNAL_DASHBOARD XUI_SKIP_APT_WAIT XUI_APT_WAIT_SECONDS XUI_ONLY_REFRESH_STORE XUI_ONLY_REFRESH_CONTROLLERS XUI_ONLY_REFRESH_UPDATER XUI_EXPORT_WIN XUI_ONLY_EXPORT_WIN XUI_SKIP_XENIA
 }
 
 ensure_dirs(){
@@ -6732,7 +6737,7 @@ class MandatoryUpdateFailedDialog(QtWidgets.QDialog):
 class UpdateProgressDialog(QtWidgets.QDialog):
     def __init__(self, parent=None):
         super().__init__(parent)
-        self._phase = 0
+        self._progress_value = 5
         self.setWindowTitle('Update in Progress')
         self.setWindowFlags(QtCore.Qt.Dialog | QtCore.Qt.FramelessWindowHint)
         self.setModal(True)
@@ -6790,35 +6795,31 @@ class UpdateProgressDialog(QtWidgets.QDialog):
         body_l.addWidget(self.lbl)
         self.bar = QtWidgets.QProgressBar()
         self.bar.setRange(0, 100)
-        self.bar.setValue(6)
+        self.bar.setValue(self._progress_value)
         self.bar.setFormat('%p%')
         body_l.addWidget(self.bar)
         self.detail = QtWidgets.QLabel('Preparing update...')
         self.detail.setObjectName('detail')
+        self.detail.setTextInteractionFlags(QtCore.Qt.TextSelectableByMouse)
         body_l.addWidget(self.detail)
         body_l.addStretch(1)
         v.addWidget(body, 1)
-        self._tick = QtCore.QTimer(self)
-        self._tick.timeout.connect(self._pulse)
-        self._tick.start(120)
-
-    def _pulse(self):
-        cur = self.bar.value()
-        target = 92 if self._phase < 1 else 98
-        nxt = cur + 1
-        if nxt > target:
-            nxt = target
-        self.bar.setValue(nxt)
+    def set_stage(self, text, percent):
+        try:
+            percent = max(self._progress_value, min(99, int(percent)))
+        except (TypeError, ValueError):
+            percent = self._progress_value
+        self._progress_value = percent
+        self.bar.setValue(percent)
+        self.detail.setText(str(text or 'Applying update...')[:220])
 
     def set_detail(self, text):
         t = str(text or '').strip()
         if t:
             self.detail.setText(t[:220])
-        if self.bar.value() < 92:
-            self.bar.setValue(min(92, self.bar.value() + 1))
 
     def finish_ok(self):
-        self._phase = 1
+        self._progress_value = 100
         self.bar.setValue(100)
         self.detail.setText('Update installed successfully. Restarting dashboard...')
 
@@ -9398,6 +9399,11 @@ class Dashboard(QtWidgets.QMainWindow):
         self._mandatory_update_proc = None
         self._mandatory_update_progress = None
         self._mandatory_update_output = ''
+        self._mandatory_update_stage = 'starting'
+        self._mandatory_update_watchdog = QtCore.QTimer(self)
+        self._mandatory_update_watchdog.setSingleShot(True)
+        self._mandatory_update_watchdog.setInterval(300000)
+        self._mandatory_update_watchdog.timeout.connect(self._on_mandatory_update_stalled)
         self._mandatory_update_retry_scheduled = False
         self._mandatory_payload_cache = None
         self._mandatory_payload_checked_at = 0.0
@@ -10308,9 +10314,11 @@ class Dashboard(QtWidgets.QMainWindow):
                 return
         self._mandatory_update_in_progress = True
         self._mandatory_update_output = ''
+        self._mandatory_update_stage = 'starting'
         self._play_sfx('open')
 
         progress = UpdateProgressDialog(self)
+        progress.set_stage('Conectando con el actualizador…', 6)
         progress.show()
         self._mandatory_update_progress = progress
 
@@ -10318,6 +10326,10 @@ class Dashboard(QtWidgets.QMainWindow):
         env = QtCore.QProcessEnvironment.systemEnvironment()
         env.insert('AUTO_CONFIRM', '1')
         env.insert('XUI_SKIP_LAUNCH_PROMPT', '1')
+        env.insert('GIT_TERMINAL_PROMPT', '0')
+        env.insert('GCM_INTERACTIVE', 'Never')
+        env.insert('GIT_HTTP_LOW_SPEED_LIMIT', '1000')
+        env.insert('GIT_HTTP_LOW_SPEED_TIME', '30')
         proc.setProcessEnvironment(env)
         proc.setProgram(invocation[0])
         proc.setArguments(invocation[1])
@@ -10326,6 +10338,7 @@ class Dashboard(QtWidgets.QMainWindow):
         proc.finished.connect(self._on_mandatory_update_finished)
         proc.errorOccurred.connect(self._on_mandatory_update_error)
         self._mandatory_update_proc = proc
+        self._mandatory_update_watchdog.start()
         proc.start()
 
     def _close_mandatory_update_progress(self):
@@ -10352,14 +10365,54 @@ class Dashboard(QtWidgets.QMainWindow):
             chunk = ''
         if not chunk:
             return
-        self._mandatory_update_output = (self._mandatory_update_output + chunk)[-22000:]
+        self._mandatory_update_watchdog.start()
+        clean = re.sub(r'\x1b\][^\x07]*(?:\x07|\x1b\\)', '', chunk)
+        clean = re.sub(r'\x1b\[[0-?]*[ -/]*[@-~]', '', clean)
+        clean = re.sub(r'\[\]P[0-9A-Fa-f]{6,}', '', clean)
+        clean = ''.join(ch for ch in clean if ch in '\n\r\t' or ord(ch) >= 32)
+        clean = clean.replace('\r', '\n')
+        self._mandatory_update_output = (self._mandatory_update_output + clean)[-22000:]
         dlg = self._mandatory_update_progress
         if dlg is None:
             return
-        lines = [ln.strip() for ln in self._mandatory_update_output.splitlines() if ln.strip()]
-        tail = lines[-1][:160] if lines else 'Applying mandatory update from GitHub...'
-        if hasattr(dlg, 'set_detail'):
-            dlg.set_detail(tail)
+        stages = {
+            'metadata-check': ('Comprobando la versión en GitHub…', 8),
+            'sudo-auth': ('Comprobando permisos de actualización…', 10),
+            'sudo-check': ('Comprobando permisos sin solicitar contraseña…', 12),
+            'pkexec-auth': ('Esperando la confirmación de permisos del sistema…', 16),
+            'git-clone': ('Descargando el repositorio inicial…', 24),
+            'git-fetch': ('Descargando cambios de GitHub…', 38),
+            'git-checkout': ('Seleccionando la rama de XUI…', 47),
+            'git-reset': ('Preparando los archivos actualizados…', 54),
+            'installer-search': ('Preparando el instalador de XUI…', 59),
+            'installer-start': ('Aplicando archivos y configuración…', 64),
+            'installer-done': ('Finalizando la instalación…', 91),
+            'fnae-deps-background': ('Finalizando dependencias opcionales…', 94),
+            'state-written': ('Guardando la versión instalada…', 97),
+            'update-applied': ('Actualización aplicada; reiniciando XUI…', 99),
+        }
+        lines = [ln.strip() for ln in clean.splitlines() if ln.strip()]
+        for line in lines:
+            step = line.partition('=')[2].strip() if line.startswith('step=') else ''
+            if line.startswith('step=') and step in stages:
+                self._mandatory_update_stage = step
+                label, percent = stages[step]
+                dlg.set_stage(label, percent)
+        useful = [line for line in lines if not line.startswith('step=')]
+        if useful and hasattr(dlg, 'set_detail'):
+            dlg.set_detail(useful[-1][:220])
+
+    def _on_mandatory_update_stalled(self):
+        proc = self._mandatory_update_proc
+        if proc is None or proc.state() == QtCore.QProcess.NotRunning:
+            return
+        stage = str(self._mandatory_update_stage or 'unknown')
+        marker = f'ERROR: updater produced no output for 5 minutes (last stage: {stage}).'
+        self._mandatory_update_output = (self._mandatory_update_output + '\n' + marker)[-22000:]
+        dlg = self._mandatory_update_progress
+        if dlg is not None:
+            dlg.set_detail('La actualización no responde; se detendrá para mostrar el diagnóstico.')
+        proc.kill()
 
     def _build_update_status_code(self, text='', exit_code=None, process_err=None):
         raw = str(text or '').strip()
@@ -10529,6 +10582,7 @@ exit 1
 
     def _on_mandatory_update_error(self, err):
         self._on_mandatory_update_output()
+        self._mandatory_update_watchdog.stop()
         self._close_mandatory_update_progress()
         proc = self._mandatory_update_proc
         self._mandatory_update_proc = None
@@ -10546,6 +10600,7 @@ exit 1
 
     def _on_mandatory_update_finished(self, code, status):
         self._on_mandatory_update_output()
+        self._mandatory_update_watchdog.stop()
         proc = self._mandatory_update_proc
         self._mandatory_update_proc = None
         if proc is not None:
@@ -22320,17 +22375,15 @@ require_sudo_ticket(){
     XUI_AUTH_MODE="root"
     return 0
   fi
+    echo "step=sudo-check"
   if command -v sudo >/dev/null 2>&1; then
     if sudo -n true >/dev/null 2>&1; then
       XUI_AUTH_MODE="sudo"
       return 0
     fi
-    if sudo -v >/dev/null 2>&1; then
-      XUI_AUTH_MODE="sudo"
-      return 0
-    fi
   fi
   if command -v pkexec >/dev/null 2>&1; then
+        echo "step=pkexec-auth"
     if pkexec /bin/sh -c "true" >/dev/null 2>&1; then
       XUI_AUTH_MODE="pkexec"
       return 0
@@ -22561,16 +22614,17 @@ apply_update(){
     exit 1
   fi
 
-  line="$(remote_meta_line)"
+    echo "step=metadata-check"
+    line="$(remote_meta_line)"
   IFS=$'\t' read -r status branch remote_commit remote_date remote_url extra <<<"$line"
   if [ "$status" != "OK" ]; then
     echo "Cannot reach GitHub metadata: ${extra:-unknown}"
     exit 1
   fi
 
-  echo "step=sudo-auth"
+    echo "step=sudo-auth"
   if ! require_sudo_ticket; then
-    echo "sudo authentication failed or cancelled."
+        echo "ERROR: no passwordless sudo or working graphical pkexec authentication is available."
     exit 1
   fi
   if [ "${XUI_AUTH_MODE:-}" = "sudo" ]; then
@@ -22611,7 +22665,13 @@ apply_update(){
   clone_fresh_repo(){
     local tmp="${SRC}.tmp.$$"
     remove_path_safe "$tmp" || true
-    git clone "https://github.com/$REPO.git" "$tmp"
+        echo "step=git-clone"
+        if command -v timeout >/dev/null 2>&1; then
+            GIT_TERMINAL_PROMPT=0 GCM_INTERACTIVE=Never timeout --signal=TERM --kill-after=10 180 \
+                git clone --progress "https://github.com/$REPO.git" "$tmp"
+        else
+            GIT_TERMINAL_PROMPT=0 GCM_INTERACTIVE=Never git clone --progress "https://github.com/$REPO.git" "$tmp"
+        fi
     if ! remove_path_safe "$SRC"; then
       echo "Cannot replace source dir due permissions: $SRC"
       return 1
@@ -22625,21 +22685,35 @@ apply_update(){
     clone_fresh_repo
   fi
 
-  if ! git -C "$SRC" fetch --all --prune; then
+    echo "step=git-fetch"
+    if command -v timeout >/dev/null 2>&1; then
+        if ! GIT_TERMINAL_PROMPT=0 GCM_INTERACTIVE=Never GIT_HTTP_LOW_SPEED_LIMIT=1000 GIT_HTTP_LOW_SPEED_TIME=30 \
+            timeout --signal=TERM --kill-after=10 180 git -C "$SRC" fetch --all --prune --progress; then
+            echo "Fetch failed or timed out; recloning source..."
+            clone_fresh_repo
+            GIT_TERMINAL_PROMPT=0 GCM_INTERACTIVE=Never timeout --signal=TERM --kill-after=10 180 \
+                git -C "$SRC" fetch --all --prune --progress
+        fi
+    elif ! GIT_TERMINAL_PROMPT=0 GCM_INTERACTIVE=Never GIT_HTTP_LOW_SPEED_LIMIT=1000 GIT_HTTP_LOW_SPEED_TIME=30 \
+        git -C "$SRC" fetch --all --prune --progress; then
     echo "Fetch failed, recloning source..."
     clone_fresh_repo
-    git -C "$SRC" fetch --all --prune
+        GIT_TERMINAL_PROMPT=0 GCM_INTERACTIVE=Never git -C "$SRC" fetch --all --prune --progress
   fi
+    echo "step=git-checkout"
   if ! git -C "$SRC" checkout -B "$branch" "origin/$branch" >/dev/null 2>&1; then
     echo "Checkout failed, recloning source..."
     clone_fresh_repo
-    git -C "$SRC" fetch --all --prune
+        GIT_TERMINAL_PROMPT=0 GCM_INTERACTIVE=Never timeout --signal=TERM --kill-after=10 180 \
+            git -C "$SRC" fetch --all --prune --progress
     git -C "$SRC" checkout -B "$branch" "origin/$branch"
   fi
-  if ! git -C "$SRC" reset --hard "origin/$branch" >/dev/null 2>&1; then
+    echo "step=git-reset"
+    if ! git -C "$SRC" reset --hard "origin/$branch" >/dev/null 2>&1; then
     echo "Reset failed, recloning source..."
     clone_fresh_repo
-    git -C "$SRC" fetch --all --prune
+        GIT_TERMINAL_PROMPT=0 GCM_INTERACTIVE=Never timeout --signal=TERM --kill-after=10 180 \
+            git -C "$SRC" fetch --all --prune --progress
     git -C "$SRC" checkout -B "$branch" "origin/$branch"
     git -C "$SRC" reset --hard "origin/$branch"
   fi
@@ -22687,6 +22761,7 @@ apply_update(){
   }
 
   local installer=""
+    echo "step=installer-search"
   installer="$(find_installer || true)"
   if [ -z "$installer" ]; then
     echo "Installer not found in repo: $SRC"
@@ -29196,6 +29271,13 @@ main(){
     info "  ~/.xui/bin/xui_controller_l4t_fix.sh"
     exit 0
   fi
+    if [ "${XUI_ONLY_REFRESH_UPDATER:-0}" = "1" ]; then
+        info "Refreshing Mandatory Update checker only"
+        ensure_dirs
+        write_auto_update
+        info "Updater refreshed at: $HOME/.xui/bin/xui_update_check.sh"
+        exit 0
+    fi
   if [ "${XUI_ONLY_REFRESH_STORE:-0}" = "1" ]; then
     info "Refreshing store UI only (fast mode)"
     ensure_dirs
