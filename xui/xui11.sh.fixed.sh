@@ -3775,14 +3775,7 @@ class SocialOverlay(QtWidgets.QDialog):
             self.btn_send.setFocus(QtCore.Qt.OtherFocusReason)
 
     def _show_notice(self, title, text):
-        d = GuidePromptDialog(
-            str(title or 'Notice'),
-            str(text or ''),
-            ['OK'],
-            self,
-            default_choice='OK',
-            cancel_choice='OK',
-        )
+        d = InfoNoticeDialog(str(title or 'Notice'), str(text or ''), self)
         d.exec_()
 
     def _pick_from_menu(self, title, options, descriptions=None):
@@ -6772,6 +6765,126 @@ class GuidePromptDialog(QtWidgets.QDialog):
         super().keyPressEvent(e)
 
 
+class InfoNoticeDialog(QtWidgets.QDialog):
+    def __init__(self, title, text, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle(str(title or 'Information'))
+        self.setWindowFlags(QtCore.Qt.Dialog | QtCore.Qt.FramelessWindowHint | QtCore.Qt.WindowStaysOnTopHint)
+        self.setAttribute(QtCore.Qt.WA_TranslucentBackground, True)
+        self.setModal(True)
+        self.setObjectName('notice_overlay')
+        screen = parent.screen() if parent is not None else QtWidgets.QApplication.primaryScreen()
+        if screen is None:
+            screen = QtWidgets.QApplication.primaryScreen()
+        if screen is not None:
+            self.setGeometry(screen.geometry())
+        else:
+            self.resize(900, 600)
+        self.setWindowState(self.windowState() | QtCore.Qt.WindowFullScreen)
+        warning = any(word in str(title or '').casefold() for word in ('error', 'failed', 'warning', 'aviso', 'falló'))
+        icon_text = '×' if warning else 'i'
+        icon_color = '#d64545' if warning else '#5795c7'
+        self.setStyleSheet('''
+            QDialog#notice_overlay { background:rgba(5,8,12,0.54); }
+            QFrame#notice_panel { background:#e3e7eb; border:1px solid #f4f7f9; }
+            QFrame#notice_header {
+                background:qlineargradient(x1:0,y1:0,x2:1,y2:0, stop:0 #69717a, stop:1 #505860);
+                border:none;
+            }
+            QLabel#notice_title { color:#f7f9fa; font-size:26px; font-weight:800; }
+            QLabel#notice_icon {
+                color:#ffffff; border-radius:15px; font-size:22px; font-weight:900;
+            }
+            QPlainTextEdit#notice_text {
+                background:#e3e7eb; border:none; color:#252d35;
+                font-size:17px; font-weight:550; selection-background-color:#4e9e38;
+            }
+            QPushButton#notice_ok {
+                background:#078d13; color:#ffffff; border:1px solid #08750f;
+                padding:10px 16px; min-height:48px; font-size:22px; font-weight:700;
+            }
+            QPushButton#notice_ok:hover, QPushButton#notice_ok:focus { background:#0aa11a; }
+            QLabel#notice_hint { color:#2c343b; font-size:14px; font-weight:700; }
+        ''')
+        outer = QtWidgets.QVBoxLayout(self)
+        outer.setContentsMargins(0, 0, 0, 0)
+        outer.addWidget(self._build_panel(str(title or 'Information'), str(text or ''), icon_text, icon_color), 0, QtCore.Qt.AlignCenter)
+
+    def _build_panel(self, title, text, icon_text, icon_color):
+        panel = QtWidgets.QFrame()
+        panel.setObjectName('notice_panel')
+        self.notice_panel = panel
+        screen = self.screen() or QtWidgets.QApplication.primaryScreen()
+        bounds = screen.availableGeometry() if screen is not None else QtCore.QRect(0, 0, 1000, 700)
+        width = min(980, max(360, int(bounds.width() * 0.74)))
+        height = min(820, max(320, int(bounds.height() * 0.80)))
+        width = min(width, max(1, bounds.width() - 40))
+        height = min(height, max(1, bounds.height() - 40))
+        panel.setFixedSize(width, height)
+
+        root = QtWidgets.QVBoxLayout(panel)
+        root.setContentsMargins(0, 0, 0, 0)
+        root.setSpacing(0)
+        header = QtWidgets.QFrame()
+        header.setObjectName('notice_header')
+        header_layout = QtWidgets.QHBoxLayout(header)
+        header_layout.setContentsMargins(14, 8, 16, 8)
+        icon = QtWidgets.QLabel(icon_text)
+        icon.setObjectName('notice_icon')
+        icon.setAlignment(QtCore.Qt.AlignCenter)
+        icon.setFixedSize(30, 30)
+        icon.setStyleSheet(f'background:{icon_color};')
+        title_label = QtWidgets.QLabel(title)
+        title_label.setObjectName('notice_title')
+        title_label.setWordWrap(True)
+        header_layout.addWidget(icon)
+        header_layout.addSpacing(8)
+        header_layout.addWidget(title_label, 1)
+        root.addWidget(header, 0)
+
+        self.text_view = QtWidgets.QPlainTextEdit()
+        self.text_view.setObjectName('notice_text')
+        self.text_view.setReadOnly(True)
+        self.text_view.setLineWrapMode(QtWidgets.QPlainTextEdit.WidgetWidth)
+        self.text_view.setPlainText(text)
+        root.addWidget(self.text_view, 1)
+
+        self.ok_button = QtWidgets.QPushButton('OK')
+        self.ok_button.setObjectName('notice_ok')
+        self.ok_button.clicked.connect(self.accept)
+        root.addWidget(self.ok_button, 0)
+        hint = QtWidgets.QLabel('A  Select     B  Back')
+        hint.setObjectName('notice_hint')
+        hint.setContentsMargins(10, 5, 10, 5)
+        root.addWidget(hint, 0, QtCore.Qt.AlignLeft)
+        return panel
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        screen = self.screen() or QtWidgets.QApplication.primaryScreen()
+        if screen is not None:
+            bounds = screen.geometry()
+            if self.geometry() != bounds:
+                self.setGeometry(bounds)
+            self.layout().activate()
+            self.notice_panel.move(
+                (self.width() - self.notice_panel.width()) // 2,
+                (self.height() - self.notice_panel.height()) // 2,
+            )
+        self.raise_()
+        self.activateWindow()
+        self.ok_button.setFocus(QtCore.Qt.OtherFocusReason)
+
+    def keyPressEvent(self, event):
+        if event.key() in (QtCore.Qt.Key_Escape, QtCore.Qt.Key_Back, QtCore.Qt.Key_B):
+            self.reject()
+            return
+        if event.key() in (QtCore.Qt.Key_Return, QtCore.Qt.Key_Enter, QtCore.Qt.Key_A):
+            self.accept()
+            return
+        super().keyPressEvent(event)
+
+
 class MandatoryUpdateFailedDialog(QtWidgets.QDialog):
     def __init__(self, detail_text='', status_code='4476-4497-A080-0F00-8007-2EE2', parent=None):
         super().__init__(parent)
@@ -8745,6 +8858,339 @@ class WebKioskWindow(QtWidgets.QMainWindow):
             self.keyboard_button.raise_()
 
 
+class StorageConsoleDialog(QtWidgets.QDialog):
+    SETTINGS = [
+        ('Console Settings', 'Console Settings', 'Manage core console preferences and local system information.'),
+        ('Kinect Settings', 'Kinect Settings', 'Configure Kinect-style controls and voice navigation.'),
+        ('Storage', 'Storage', 'Move or delete saved games, profiles, and other items on storage devices.'),
+        ('Network Settings', 'Network Setup', 'Review network adapters, Wi-Fi, and connection diagnostics.'),
+        ('Computers', 'Network Info', 'View computers and network information available to this device.'),
+        ('TV', 'Live TV', 'Open the TV and video experience.'),
+        ('Xbox Live Vision', 'Kinect Settings', 'Configure camera and related device settings.'),
+        ('Initial Setup', 'Setup Wizard', 'Run the initial console-style setup again.'),
+    ]
+
+    def __init__(self, parent=None, start_section='Console Settings'):
+        super().__init__(parent)
+        self._page = 'settings'
+        self._action = ''
+        self._settings_rows = []
+        self._destination_rows = []
+        self.setWindowTitle('Console Settings')
+        self.setWindowFlags(QtCore.Qt.Dialog | QtCore.Qt.FramelessWindowHint | QtCore.Qt.WindowStaysOnTopHint)
+        self.setModal(True)
+        screen = parent.screen() if parent is not None else QtWidgets.QApplication.primaryScreen()
+        if screen is None:
+            screen = QtWidgets.QApplication.primaryScreen()
+        if screen is not None:
+            self.setGeometry(screen.geometry())
+        else:
+            self.resize(1280, 720)
+        self.setWindowState(self.windowState() | QtCore.Qt.WindowFullScreen)
+        self._build()
+        self._load_destination_devices()
+        initial_row = next(
+            (i for i, row in enumerate(self.SETTINGS) if row[0] == str(start_section)),
+            0,
+        )
+        self.settings_list.setCurrentRow(initial_row)
+        self._show_setting(initial_row)
+
+    def _build(self):
+        self.setObjectName('storage_dialog')
+        self.setStyleSheet('''
+            QDialog#storage_dialog {
+                background:qlineargradient(x1:0,y1:0,x2:0,y2:1, stop:0 #72797d, stop:1 #aab1b4);
+            }
+            QFrame#storage_list_panel {
+                background:#dfe5e6;
+                border:1px solid #9ca7aa;
+            }
+            QFrame#storage_detail_panel {
+                background:qlineargradient(x1:0,y1:0,x2:0,y2:1, stop:0 #969ea1, stop:1 #7d8588);
+                border:1px solid #8c9699;
+            }
+            QLabel#storage_heading {
+                color:#f4f6f6;
+                font-size:28px;
+                font-weight:700;
+                padding:6px 12px;
+            }
+            QLabel#storage_detail_title {
+                color:#f4f6f6;
+                font-size:25px;
+                font-weight:700;
+            }
+            QLabel#storage_detail_text {
+                color:#f2f4f4;
+                font-size:20px;
+                font-weight:500;
+            }
+            QLabel#storage_hint {
+                color:#eef2f2;
+                font-size:14px;
+                font-weight:700;
+            }
+            QListWidget#storage_items {
+                background:#dfe5e6;
+                color:#263238;
+                border:none;
+                outline:none;
+                font-size:22px;
+                font-weight:600;
+            }
+            QListWidget#storage_items::item {
+                min-height:48px;
+                padding:5px 12px;
+                border-bottom:1px solid #b5bec0;
+            }
+            QListWidget#storage_items::item:selected {
+                background:#078d13;
+                color:#f5fff5;
+                border-bottom:1px solid #54b75a;
+            }
+        ''')
+        root = QtWidgets.QVBoxLayout(self)
+        root.setContentsMargins(8, 8, 8, 8)
+        root.setSpacing(6)
+
+        self.pages = QtWidgets.QStackedWidget()
+        root.addWidget(self.pages, 1)
+        self.settings_page = self._build_settings_page()
+        self.destination_page = self._build_destination_page()
+        self.pages.addWidget(self.settings_page)
+        self.pages.addWidget(self.destination_page)
+
+        self.hint = QtWidgets.QLabel('A  Select     B  Back')
+        self.hint.setObjectName('storage_hint')
+        root.addWidget(self.hint, 0, QtCore.Qt.AlignLeft)
+
+    def _build_settings_page(self):
+        page = QtWidgets.QWidget()
+        layout = QtWidgets.QHBoxLayout(page)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(0)
+
+        left = QtWidgets.QFrame()
+        left.setObjectName('storage_list_panel')
+        left_layout = QtWidgets.QVBoxLayout(left)
+        left_layout.setContentsMargins(0, 0, 0, 0)
+        left_layout.setSpacing(0)
+        self.settings_list = QtWidgets.QListWidget()
+        self.settings_list.setObjectName('storage_items')
+        for icon, title, description in self.SETTINGS:
+            item = QtWidgets.QListWidgetItem(f'▣  {icon}')
+            item.setData(QtCore.Qt.UserRole, (title, description))
+            self.settings_list.addItem(item)
+        self.settings_list.currentRowChanged.connect(self._show_setting)
+        self.settings_list.itemActivated.connect(self._activate_setting)
+        left_layout.addWidget(self.settings_list, 1)
+
+        right = QtWidgets.QFrame()
+        right.setObjectName('storage_detail_panel')
+        detail = QtWidgets.QVBoxLayout(right)
+        detail.setContentsMargins(30, 24, 30, 24)
+        detail.setSpacing(16)
+        self.settings_detail_title = QtWidgets.QLabel('Storage')
+        self.settings_detail_title.setObjectName('storage_detail_title')
+        self.settings_detail_text = QtWidgets.QLabel('')
+        self.settings_detail_text.setObjectName('storage_detail_text')
+        self.settings_detail_text.setWordWrap(True)
+        detail.addWidget(self.settings_detail_title, 0, QtCore.Qt.AlignLeft | QtCore.Qt.AlignTop)
+        detail.addWidget(self.settings_detail_text, 0, QtCore.Qt.AlignLeft | QtCore.Qt.AlignTop)
+        detail.addStretch(1)
+        layout.addWidget(left, 1)
+        layout.addWidget(right, 1)
+        return page
+
+    def _build_destination_page(self):
+        page = QtWidgets.QWidget()
+        layout = QtWidgets.QHBoxLayout(page)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(0)
+
+        left = QtWidgets.QFrame()
+        left.setObjectName('storage_list_panel')
+        left_layout = QtWidgets.QVBoxLayout(left)
+        left_layout.setContentsMargins(0, 0, 0, 0)
+        left_layout.setSpacing(0)
+        self.destination_heading = QtWidgets.QLabel('Destination')
+        self.destination_heading.setObjectName('storage_heading')
+        self.destination_instruction = QtWidgets.QLabel('Select a destination device.')
+        self.destination_instruction.setStyleSheet('color:#303a3d;font-size:16px;padding:0 12px 8px;')
+        self.destination_list = QtWidgets.QListWidget()
+        self.destination_list.setObjectName('storage_items')
+        self.destination_list.setStyleSheet('QListWidget{font-size:19px;} QListWidget::item{min-height:58px;}')
+        self.destination_list.currentRowChanged.connect(self._show_destination)
+        self.destination_list.itemActivated.connect(self._activate_destination)
+        left_layout.addWidget(self.destination_heading)
+        left_layout.addWidget(self.destination_instruction)
+        left_layout.addWidget(self.destination_list, 1)
+
+        right = QtWidgets.QFrame()
+        right.setObjectName('storage_detail_panel')
+        detail = QtWidgets.QVBoxLayout(right)
+        detail.setContentsMargins(28, 24, 28, 24)
+        detail.setSpacing(14)
+        self.destination_icon = QtWidgets.QLabel('▰')
+        self.destination_icon.setStyleSheet('color:#f5f7f7;font-size:38px;')
+        self.destination_name = QtWidgets.QLabel('Hard Drive')
+        self.destination_name.setObjectName('storage_detail_title')
+        self.destination_capacity = QtWidgets.QLabel('')
+        self.destination_capacity.setObjectName('storage_detail_text')
+        self.destination_bar = QtWidgets.QProgressBar()
+        self.destination_bar.setTextVisible(False)
+        self.destination_bar.setFixedHeight(12)
+        self.destination_bar.setStyleSheet('QProgressBar{background:#b7bec0;border:0;} QProgressBar::chunk{background:#e1e5e6;}')
+        self.destination_description = QtWidgets.QLabel('')
+        self.destination_description.setObjectName('storage_detail_text')
+        self.destination_description.setWordWrap(True)
+        detail.addWidget(self.destination_icon, 0, QtCore.Qt.AlignLeft)
+        detail.addWidget(self.destination_name, 0, QtCore.Qt.AlignLeft)
+        detail.addWidget(self.destination_capacity, 0, QtCore.Qt.AlignLeft)
+        detail.addWidget(self.destination_bar, 0)
+        detail.addWidget(self.destination_description, 0, QtCore.Qt.AlignLeft)
+        detail.addStretch(1)
+        layout.addWidget(left, 1)
+        layout.addWidget(right, 1)
+        return page
+
+    def _load_destination_devices(self):
+        try:
+            disk = shutil.disk_usage(Path.home())
+            total = int(disk.total)
+            free = int(disk.free)
+            used_pct = int(round(100 * (total - free) / max(1, total)))
+            hard_drive = {
+                'name': 'Hard Drive',
+                'capacity': f'{free / (1024 ** 3):.1f} GB free',
+                'detail': f'Home storage • {total / (1024 ** 3):.1f} GB total',
+                'used_pct': used_pct,
+            }
+        except Exception:
+            hard_drive = {'name': 'Hard Drive', 'capacity': 'Capacity unavailable', 'detail': str(Path.home()), 'used_pct': 0}
+
+        memory_units = []
+        media_roots = [Path('/media') / os.environ.get('USER', ''), Path('/run/media') / os.environ.get('USER', '')]
+        for root in media_roots:
+            try:
+                for mount in root.iterdir():
+                    if not mount.is_dir():
+                        continue
+                    try:
+                        disk = shutil.disk_usage(mount)
+                    except OSError:
+                        continue
+                    memory_units.append({
+                        'name': mount.name or 'Memory Unit',
+                        'capacity': f'{disk.free / (1024 ** 3):.1f} GB free',
+                        'detail': f'USB Storage Device • {disk.total / (1024 ** 3):.1f} GB total',
+                        'used_pct': int(round(100 * (disk.total - disk.free) / max(1, disk.total))),
+                    })
+            except OSError:
+                continue
+        if not memory_units:
+            memory_units.append({
+                'name': 'Memory Unit',
+                'capacity': 'No device connected',
+                'detail': 'Connect a removable storage device to use it as a memory unit.',
+                'used_pct': 0,
+            })
+        cloud = {
+            'name': 'Cloud Saved Games',
+            'capacity': 'Not configured',
+            'detail': 'Cloud storage is not connected in this local XUI installation.',
+            'used_pct': 0,
+        }
+        self._destination_rows = [hard_drive, *memory_units[:4], cloud]
+        self.destination_list.clear()
+        for row in self._destination_rows:
+            item = QtWidgets.QListWidgetItem(f'▰  {row["name"]}\n    {row["capacity"]}')
+            item.setData(QtCore.Qt.UserRole, row)
+            self.destination_list.addItem(item)
+        if self.destination_list.count():
+            self.destination_list.setCurrentRow(0)
+
+    def _show_setting(self, row):
+        if row < 0 or row >= len(self.SETTINGS):
+            return
+        title, action, description = self.SETTINGS[row]
+        self.settings_detail_title.setText(title)
+        self.settings_detail_text.setText(description)
+
+    def _show_destination(self, row):
+        if row < 0 or row >= len(self._destination_rows):
+            return
+        device = self._destination_rows[row]
+        self.destination_name.setText(str(device.get('name') or 'Storage Device'))
+        self.destination_capacity.setText(str(device.get('capacity') or ''))
+        self.destination_description.setText(str(device.get('detail') or ''))
+        self.destination_bar.setValue(max(0, min(100, int(device.get('used_pct') or 0))))
+
+    def _activate_setting(self, *_):
+        row = self.settings_list.currentRow()
+        if row < 0 or row >= len(self.SETTINGS):
+            return
+        title, action, _description = self.SETTINGS[row]
+        if title == 'Storage':
+            self._page = 'destinations'
+            self.pages.setCurrentWidget(self.destination_page)
+            self.destination_list.setFocus(QtCore.Qt.OtherFocusReason)
+            return
+        if title == 'Console Settings':
+            return
+        self._action = action
+        self.accept()
+
+    def _activate_destination(self, *_):
+        row = self.destination_list.currentRow()
+        if 0 <= row < len(self._destination_rows):
+            self.destination_description.setText(
+                str(self._destination_rows[row].get('detail') or '')
+                + '\n\nSaved-game file management is local-only in this XUI build.'
+            )
+
+    def selected_action(self):
+        return str(self._action or '')
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        screen = self.screen() or QtWidgets.QApplication.primaryScreen()
+        if screen is not None and self.geometry() != screen.geometry():
+            self.setGeometry(screen.geometry())
+        self.raise_()
+        self.activateWindow()
+        active_list = self.settings_list if self._page == 'settings' else self.destination_list
+        active_list.setFocus(QtCore.Qt.OtherFocusReason)
+
+    def keyPressEvent(self, event):
+        key = event.key()
+        if key in (QtCore.Qt.Key_Escape, QtCore.Qt.Key_Back, QtCore.Qt.Key_B):
+            if self._page == 'destinations':
+                self._page = 'settings'
+                self.pages.setCurrentWidget(self.settings_page)
+                self.settings_list.setCurrentRow(2)
+                self.settings_list.setFocus(QtCore.Qt.OtherFocusReason)
+            else:
+                self.reject()
+            return
+        if key in (QtCore.Qt.Key_Return, QtCore.Qt.Key_Enter, QtCore.Qt.Key_A):
+            if self._page == 'settings':
+                self._activate_setting()
+            else:
+                self._activate_destination()
+            return
+        if key == QtCore.Qt.Key_Up:
+            target = self.settings_list if self._page == 'settings' else self.destination_list
+            target.setCurrentRow(max(0, target.currentRow() - 1))
+            return
+        if key == QtCore.Qt.Key_Down:
+            target = self.settings_list if self._page == 'settings' else self.destination_list
+            target.setCurrentRow(min(target.count() - 1, target.currentRow() + 1))
+            return
+        super().keyPressEvent(event)
+
+
 class DashboardPage(QtWidgets.QWidget):
     actionTriggered = QtCore.pyqtSignal(str)
 
@@ -9353,7 +9799,7 @@ class AchievementsHubDialog(QtWidgets.QDialog):
         unlocked = bool(row.get('unlocked', False))
         state = 'Desbloqueado' if unlocked else 'Bloqueado'
         detail_txt = f'{desc}\n\nEstado: {state}\nGamerscore: {score}G'
-        dlg = GuidePromptDialog(title, detail_txt, ['OK'], self, default_choice='OK', cancel_choice='OK')
+        dlg = InfoNoticeDialog(title, detail_txt, self)
         dlg.exec_()
 
     def reload(self):
@@ -12284,8 +12730,26 @@ exit 1
 
     def _msg(self, title, text):
         self._play_sfx('open')
-        self._popup_message(title, text, QtWidgets.QMessageBox.Information, QtWidgets.QMessageBox.Ok)
+        title_text = str(title or 'Information')
+        if title_text.strip().casefold() == 'update':
+            # Preserve the existing update notice appearance/flow.
+            self._popup_message(
+                title_text,
+                text,
+                QtWidgets.QMessageBox.Information,
+                QtWidgets.QMessageBox.Ok,
+            )
+        else:
+            dialog = InfoNoticeDialog(title_text, str(text or ''), self)
+            dialog.exec_()
         self._play_sfx('close')
+
+    def _open_storage_console(self, start_section='Console Settings'):
+        dialog = StorageConsoleDialog(self, start_section=start_section)
+        if dialog.exec_() == QtWidgets.QDialog.Accepted:
+            action = dialog.selected_action()
+            if action:
+                self.handle_action(action)
 
     def _popup_message(self, title, text, icon, buttons, default_button=None):
         flag_names = [
@@ -13499,9 +13963,9 @@ exit 1
         elif action == 'Theme Toggle':
             self._run('/bin/sh', ['-c', f'{xui}/bin/xui_theme.sh toggle'])
         elif action == 'System Settings':
-            self._menu('System Settings', ['Theme Toggle', 'Power Profile', 'Battery Saver', 'Update Check', 'System Update', 'Setup Wizard'])
+            self._open_storage_console('Console Settings')
         elif action == 'Storage':
-            self.handle_action('Disk Usage')
+            self._open_storage_console('Storage')
         elif action == 'Network Setup':
             self._menu('Network Setup', ['Network Info', 'WiFi Toggle', 'Bluetooth Toggle', 'Ping Test', 'LAN Status', 'P2P Internet Help'])
         elif action == 'Account Security':
