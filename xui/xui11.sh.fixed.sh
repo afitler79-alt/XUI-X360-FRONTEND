@@ -9274,6 +9274,11 @@ class StorageConsoleDialog(QtWidgets.QDialog):
         left_layout.addWidget(self.destination_heading)
         left_layout.addWidget(self.destination_instruction)
         left_layout.addWidget(self.destination_list, 1)
+        self.format_button = QtWidgets.QPushButton('Format selected disk')
+        self.format_button.setObjectName('format_disk_button')
+        self.format_button.setEnabled(False)
+        self.format_button.clicked.connect(self._open_format_selected_disk)
+        left_layout.addWidget(self.format_button)
 
         right = QtWidgets.QFrame()
         right.setObjectName('storage_detail_panel')
@@ -9342,17 +9347,20 @@ class StorageConsoleDialog(QtWidgets.QDialog):
             name = str(device.get('model') or device.get('name') or 'Secondary Disk')
             path = str(device.get('name') or '')
             formatted = bool(device.get('fstype'))
+            mounted = bool(device.get('mounted'))
             capacity = int(device.get('size') or 0)
             free = capacity if formatted else capacity
+            state = 'Mounted' if mounted else ('Formatted as ' + str(device.get('fstype')) if formatted else 'Unformatted — format with caution')
             memory_units.append({
                 'name': f'{name} — {path}',
                 'capacity': f'{free / (1024 ** 3):.1f} GB free',
-                'detail': f'Secondary disk • {"Formatted as " + str(device.get("fstype")) if formatted else "Unformatted — format with caution"}',
+                'detail': f'Secondary disk • {state}',
                 'used_pct': 0,
                 'device': path,
                 'secondary': True,
                 'formatted': formatted,
                 'fstype': str(device.get('fstype') or ''),
+                'mounted': mounted,
             })
         if not memory_units:
             memory_units.append({
@@ -9403,8 +9411,7 @@ class StorageConsoleDialog(QtWidgets.QDialog):
                     continue
                 if name == root_device or name == root_parent:
                     continue
-                if block.get('mountpoints'):
-                    continue
+                mounts = block.get('mountpoints') or []
                 result.append({
                     'name': f'/dev/{name}',
                     'model': str(block.get('model') or 'Secondary disk'),
@@ -9412,6 +9419,8 @@ class StorageConsoleDialog(QtWidgets.QDialog):
                     'fstype': str(block.get('fstype') or ''),
                     'transport': str(block.get('tran') or ''),
                     'read_only': bool(block.get('ro')),
+                    'mounted': bool(mounts),
+                    'mountpoints': list(mounts),
                 })
             return result
         except Exception:
@@ -9432,6 +9441,25 @@ class StorageConsoleDialog(QtWidgets.QDialog):
         self.destination_capacity.setText(str(device.get('capacity') or ''))
         self.destination_description.setText(str(device.get('detail') or ''))
         self.destination_bar.setValue(max(0, min(100, int(device.get('used_pct') or 0))))
+        self.format_button.setEnabled(bool(device.get('secondary')) and not bool(device.get('mounted')))
+        if device.get('secondary') and device.get('mounted'):
+            self.destination_description.setText(
+                str(device.get('detail') or '') + '\n\nUnmount the disk before formatting it.'
+            )
+
+    def _open_format_selected_disk(self):
+        row = self.destination_list.currentRow()
+        if row < 0 or row >= len(self._destination_rows):
+            return
+        device = self._destination_rows[row]
+        if not device.get('secondary') or device.get('mounted'):
+            self._msg('Format unavailable', 'Select an unmounted secondary disk to format it.')
+            return
+        dialog = SecondaryDiskFormatDialog(device.get('device'), self)
+        dialog.exec_()
+        if dialog.result() == QtWidgets.QDialog.Accepted:
+            self._load_destination_devices()
+            self.destination_list.setCurrentRow(row)
 
     def _activate_setting(self, *_):
         row = self.settings_list.currentRow()
@@ -9452,7 +9480,12 @@ class StorageConsoleDialog(QtWidgets.QDialog):
         row = self.destination_list.currentRow()
         if 0 <= row < len(self._destination_rows):
             device = self._destination_rows[row]
-            if device.get('secondary') and not device.get('formatted'):
+            if device.get('secondary'):
+                if device.get('mounted'):
+                    self.destination_description.setText(
+                        str(device.get('detail') or '') + '\n\nUnmount the disk before formatting it.'
+                    )
+                    return
                 dialog = SecondaryDiskFormatDialog(device.get('device'), self)
                 dialog.exec_()
                 if dialog.result() == QtWidgets.QDialog.Accepted:
