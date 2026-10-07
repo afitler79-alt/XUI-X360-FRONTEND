@@ -9318,6 +9318,7 @@ class StorageConsoleDialog(QtWidgets.QDialog):
         except Exception:
             hard_drive = {'name': 'Hard Drive', 'capacity': 'Capacity unavailable', 'detail': str(Path.home()), 'used_pct': 0}
 
+        secondary_disks = self._detect_secondary_disks()
         memory_units = []
         media_roots = [Path('/media') / os.environ.get('USER', ''), Path('/run/media') / os.environ.get('USER', '')]
         for root in media_roots:
@@ -9337,6 +9338,22 @@ class StorageConsoleDialog(QtWidgets.QDialog):
                     })
             except OSError:
                 continue
+        for device in secondary_disks:
+            name = str(device.get('model') or device.get('name') or 'Secondary Disk')
+            path = str(device.get('name') or '')
+            formatted = bool(device.get('fstype'))
+            capacity = int(device.get('size') or 0)
+            free = capacity if formatted else capacity
+            memory_units.append({
+                'name': f'{name} — {path}',
+                'capacity': f'{free / (1024 ** 3):.1f} GB free',
+                'detail': f'Secondary disk • {"Formatted as " + str(device.get("fstype")) if formatted else "Unformatted — format with caution"}',
+                'used_pct': 0,
+                'device': path,
+                'secondary': True,
+                'formatted': formatted,
+                'fstype': str(device.get('fstype') or ''),
+            })
         if not memory_units:
             memory_units.append({
                 'name': 'Memory Unit',
@@ -9350,7 +9367,7 @@ class StorageConsoleDialog(QtWidgets.QDialog):
             'detail': 'Cloud storage is not connected in this local XUI installation.',
             'used_pct': 0,
         }
-        self._destination_rows = [hard_drive, *memory_units[:4], cloud]
+        self._destination_rows = [hard_drive, *memory_units[:8], cloud]
         self.destination_list.clear()
         for row in self._destination_rows:
             item = QtWidgets.QListWidgetItem(f'▰  {row["name"]}\n    {row["capacity"]}')
@@ -9358,6 +9375,47 @@ class StorageConsoleDialog(QtWidgets.QDialog):
             self.destination_list.addItem(item)
         if self.destination_list.count():
             self.destination_list.setCurrentRow(0)
+
+    @staticmethod
+    def _detect_secondary_disks():
+        try:
+            raw = subprocess.run(
+                ['lsblk', '-J', '-o', 'NAME,TYPE,PKNAME,MOUNTPOINTS,FSTYPE,TRAN,SIZE,MODEL,RO'],
+                check=True,
+                capture_output=True,
+                text=True,
+                timeout=10,
+            ).stdout
+            rows = json.loads(raw)
+            root_device = ''
+            root_parent = ''
+            for block in rows.get('blockdevices') or []:
+                mounts = block.get('mountpoints') or []
+                if '/' in mounts:
+                    root_device = str(block.get('name') or '')
+                    root_parent = str(block.get('pkname') or block.get('name') or '')
+                    break
+            result = []
+            for block in rows.get('blockdevices') or []:
+                name = str(block.get('name') or '')
+                kind = str(block.get('type') or '')
+                if kind != 'disk' or not name:
+                    continue
+                if name == root_device or name == root_parent:
+                    continue
+                if block.get('mountpoints'):
+                    continue
+                result.append({
+                    'name': f'/dev/{name}',
+                    'model': str(block.get('model') or 'Secondary disk'),
+                    'size': int(block.get('size') or 0),
+                    'fstype': str(block.get('fstype') or ''),
+                    'transport': str(block.get('tran') or ''),
+                    'read_only': bool(block.get('ro')),
+                })
+            return result
+        except Exception:
+            return []
 
     def _show_setting(self, row):
         if row < 0 or row >= len(self.SETTINGS):
@@ -9393,8 +9451,16 @@ class StorageConsoleDialog(QtWidgets.QDialog):
     def _activate_destination(self, *_):
         row = self.destination_list.currentRow()
         if 0 <= row < len(self._destination_rows):
+            device = self._destination_rows[row]
+            if device.get('secondary') and not device.get('formatted'):
+                dialog = SecondaryDiskFormatDialog(device.get('device'), self)
+                dialog.exec_()
+                if dialog.result() == QtWidgets.QDialog.Accepted:
+                    self._load_destination_devices()
+                    self.destination_list.setCurrentRow(row)
+                return
             self.destination_description.setText(
-                str(self._destination_rows[row].get('detail') or '')
+                str(device.get('detail') or '')
                 + '\n\nSaved-game file management is local-only in this XUI build.'
             )
 
@@ -9437,6 +9503,144 @@ class StorageConsoleDialog(QtWidgets.QDialog):
             target.setCurrentRow(min(target.count() - 1, target.currentRow() + 1))
             return
         super().keyPressEvent(event)
+
+
+class SecondaryDiskFormatDialog(QtWidgets.QDialog):
+    """Safe, explicit formatter for an unmounted secondary disk."""
+
+    FORMATS = [
+        ('FAT32', 'FAT32', 'Compatible with Windows, Xbox and most consoles.'),
+        ('exFAT', 'exFAT', 'Large files supported; compatible with modern Windows and Linux.'),
+        ('NTFS', 'NTFS', 'Large capacity and Windows compatibility; Linux read/write support is available.'),
+    ]
+
+    def __init__(self, device, parent=None):
+        super().__init__(parent)
+        self.device = str(device or '')
+        self.selected_format = 'FAT32'
+        self.setWindowTitle('Format secondary disk')
+        self.setWindowFlags(QtCore.Qt.Dialog | QtCore.Qt.FramelessWindowHint)
+        self.resize(760, 480)
+        self.setStyleSheet('''
+            QDialog { background:#cbd1d4; color:#20272c; font-family:"Segoe UI",sans-serif; }
+            QFrame { background:#dfe5e6; border:1px solid #9ca7aa; }
+            QLabel { color:#263238; font-size:18px; }
+            QComboBox { background:#f2f5f6; color:#263238; border:1px solid #69777d; padding:8px; font-size:18px; }
+            QPushButton { background:#078d13; color:#fff; border:1px solid #54b75a; padding:10px 18px; font-size:17px; font-weight:700; }
+            QPushButton:hover { background:#0d9f18; }
+            QPushButton#cancel { background:#666f73; border-color:#aeb6b9; }
+        ''')
+        root = QtWidgets.QVBoxLayout(self)
+        root.setContentsMargins(18, 18, 18, 18)
+        root.setSpacing(14)
+        warning = QtWidgets.QLabel(
+            'WARNING: Formatting destroys every partition and file on this disk. '
+            'This operation cannot be undone.'
+        )
+        warning.setStyleSheet('color:#8c2020;font-weight:700;')
+        root.addWidget(warning)
+        root.addWidget(QtWidgets.QLabel(f'Secondary disk: {self.device}'))
+        self.format_combo = QtWidgets.QComboBox()
+        for label, value, description in self.FORMATS:
+            self.format_combo.addItem(f'{label} — {description}', value)
+        self.format_combo.currentIndexChanged.connect(self._show_format_description)
+        root.addWidget(self.format_combo)
+        self.format_description = QtWidgets.QLabel('')
+        self.format_description.setWordWrap(True)
+        root.addWidget(self.format_description)
+        self.result_label = QtWidgets.QLabel('')
+        self.result_label.setWordWrap(True)
+        root.addWidget(self.result_label)
+        root.addStretch(1)
+        buttons = QtWidgets.QHBoxLayout()
+        buttons.addStretch(1)
+        cancel = QtWidgets.QPushButton('Cancel')
+        cancel.setObjectName('cancel')
+        cancel.clicked.connect(self.reject)
+        confirm = QtWidgets.QPushButton('Format disk')
+        confirm.clicked.connect(self._confirm_format)
+        buttons.addWidget(cancel)
+        buttons.addWidget(confirm)
+        root.addLayout(buttons)
+        self._show_format_description()
+
+    def _show_format_description(self):
+        index = self.format_combo.currentIndex()
+        if index < 0:
+            return
+        self.selected_format = str(self.format_combo.currentData() or 'FAT32')
+        self.format_description.setText(self.format_combo.currentText().split(' — ', 1)[1])
+
+    def _confirm_format(self):
+        if not self.device:
+            self.result_label.setText('No disk selected.')
+            return
+        if not QtWidgets.QMessageBox.warning(
+            self,
+            'Confirm destructive operation',
+            f'Format {self.device} completely as {self.selected_format}?\n\nAll partitions and data will be erased.',
+            QtWidgets.QMessageBox.Yes | QtWidgets.QMessageBox.No,
+            QtWidgets.QMessageBox.No,
+        ):
+            return
+        self.result_label.setText('Formatting disk...')
+        self.result_label.setEnabled(False)
+        QtCore.QApplication.processEvents()
+        result = self._format_device(self.device, self.selected_format)
+        self.result_label.setEnabled(True)
+        if result[0]:
+            QtWidgets.QMessageBox.information(
+                self,
+                'Format completed',
+                f'{self.device} was formatted as {self.selected_format}.\n\n{result[1]}',
+            )
+            self.accept()
+        else:
+            self.result_label.setText(result[1])
+
+    @staticmethod
+    def _format_device(device, file_system):
+        if not device or not file_system:
+            return False, 'Invalid disk or filesystem.'
+        if os.geteuid() != 0:
+            if not shutil.which('sudo'):
+                return False, 'Run XUI as root or install sudo to format this disk.'
+            command_prefix = ['sudo', '-n']
+        else:
+            command_prefix = []
+        label = 'XUI-SECONDARY'
+        fs_commands = {
+            'FAT32': ('mkfs.fat', ['-F', '32', '-n', label]),
+            'exFAT': ('mkfs.exfat', ['-n', label]),
+            'NTFS': ('mkfs.ntfs', ['-Q', '-L', label]),
+        }
+        formatter = fs_commands.get(file_system)
+        if formatter is None:
+            return False, 'Unsupported filesystem.'
+        executable, arguments = formatter
+        if not shutil.which(executable):
+            return False, f'The {file_system} filesystem tool is not installed.'
+        try:
+            subprocess.run(command_prefix + ['wipefs', '-a', device], check=True, capture_output=True, text=True, timeout=30)
+            subprocess.run(command_prefix + [executable, *arguments, device], check=True, capture_output=True, text=True, timeout=60)
+            out = subprocess.run(
+                command_prefix + ['blkid', '-s', 'TYPE', '-o', 'value', device],
+                check=True,
+                capture_output=True,
+                text=True,
+                timeout=10,
+            ).stdout.strip()
+            expected_type = {'FAT32': 'vfat', 'exFAT': 'exfat', 'NTFS': 'ntfs'}[file_system]
+            if out.lower() != expected_type:
+                return False, f'Formatting finished, but detected filesystem is {out or "unknown"}.'
+            return True, f'Detected filesystem: {out}. Volume label: {label}.'
+        except subprocess.CalledProcessError as exc:
+            detail = (exc.stderr or exc.stdout or '').strip()
+            if 'password' in detail.lower() or 'authentication' in detail.lower():
+                return False, 'Administrative authentication was required. Run XUI with sudo or allow sudo in the terminal.'
+            return False, f'Formatting failed: {detail or exc}.'
+        except Exception as exc:
+            return False, f'Formatting failed: {exc}.'
 
 
 class DashboardPage(QtWidgets.QWidget):
