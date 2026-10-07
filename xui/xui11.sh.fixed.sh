@@ -3273,9 +3273,11 @@ class SocialOverlay(QtWidgets.QDialog):
                 daemon=True,
             ).start()
         self._refresh_world_peer()
-        self.timer = QtCore.QTimer(self)
-        self.timer.timeout.connect(self._poll_events)
-        self.timer.start(120)
+        self.timer = None
+        if self._owns_engine:
+            self.timer = QtCore.QTimer(self)
+            self.timer.timeout.connect(self._poll_events)
+            self.timer.start(120)
         self._append_system('LAN autodiscovery enabled (broadcast + probe).')
         self._append_system('Security: LAN P2P is not encrypted or authenticated; use it only on trusted networks.')
         self._append_system('World room messages use a shared public relay; they are not private or end-to-end encrypted.')
@@ -11121,6 +11123,9 @@ class Dashboard(QtWidgets.QMainWindow):
         self._social_overlay = None
         self._social_engine = InlineSocialEngine(current_gamertag())
         self._social_engine.start()
+        self._social_poll_timer = QtCore.QTimer(self)
+        self._social_poll_timer.timeout.connect(self._poll_social_events)
+        self._social_poll_timer.start(120)
         self.setWindowTitle('XUI - Xbox 360 Style')
         scr = QtWidgets.QApplication.primaryScreen()
         self._runtime_profile = detect_runtime_profile()
@@ -13181,6 +13186,10 @@ exit 1
         self._social_overlay.raise_()
         self._social_overlay.activateWindow()
 
+    def _poll_social_events(self):
+        if self._social_overlay is not None:
+            self._social_overlay._poll_events()
+
     def _platform_specs(self):
         xui_bin = XUI_HOME / 'bin'
         return {
@@ -14900,6 +14909,11 @@ exit 1
             except Exception:
                 pass
             return
+        try:
+            if self._social_poll_timer is not None:
+                self._social_poll_timer.stop()
+        except Exception:
+            pass
         try:
             if self._mandatory_update_timer is not None:
                 self._mandatory_update_timer.stop()
