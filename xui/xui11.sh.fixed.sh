@@ -2393,6 +2393,31 @@ def local_ipv4_broadcasts():
                         targets.add(brd)
     except Exception:
         pass
+    if not targets:
+        # Keep LAN discovery working on minimal Debian installs without iproute2.
+        # Linux SIOCGIF* ioctls expose interface IPv4 address/netmask using stdlib only.
+        try:
+            import fcntl
+            import struct
+            probe = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            for _, ifname in socket.if_nameindex():
+                encoded_name = ifname.encode('ascii', errors='ignore')[:15]
+                request = struct.pack('256s', encoded_name)
+                try:
+                    address = socket.inet_ntoa(fcntl.ioctl(probe.fileno(), 0x8915, request)[20:24])
+                    netmask = socket.inet_ntoa(fcntl.ioctl(probe.fileno(), 0x891B, request)[20:24])
+                    if address.startswith('127.'):
+                        continue
+                    address_int = struct.unpack('!I', socket.inet_aton(address))[0]
+                    mask_int = struct.unpack('!I', socket.inet_aton(netmask))[0]
+                    broadcast = socket.inet_ntoa(struct.pack('!I', address_int | (~mask_int & 0xffffffff)))
+                    if broadcast != address:
+                        targets.add(broadcast)
+                except OSError:
+                    continue
+            probe.close()
+        except Exception:
+            pass
     return sorted(targets)
 
 
@@ -5234,6 +5259,11 @@ class SocialOverlay(QtWidgets.QDialog):
                 _kind, _key, data = evt
                 self._upsert_peer(data, persist=False)
                 self._mark_friend_online(data, True)
+                if isinstance(data, dict) and str(data.get('source') or '').upper() == 'LAN':
+                    self._append_system(
+                        f"LAN player discovered: {data.get('name') or 'Player'} "
+                        f"[{data.get('host')}:{data.get('port')}]"
+                    )
             elif kind == 'peer_down':
                 _kind, key = evt
                 peer = self.peer_data.get(key)
@@ -5304,7 +5334,10 @@ class SocialOverlay(QtWidgets.QDialog):
                     uid = str(data.get('user_id') or '').strip()
                     name = str(data.get('name') or 'Player')
                     if uid and uid != self.user_id:
+                        was_online = bool(self.global_players.get(uid, {}).get('online'))
                         self._touch_global_player(uid, name, 'online')
+                        if not was_online:
+                            self._append_system(f'Online player discovered via public relay: {name}.')
             elif kind == 'party_invite':
                 _kind, data = evt
                 if isinstance(data, dict):
@@ -17315,11 +17348,14 @@ def _safe_archive_target(root, member_name):
     return target
 
 
-def _extract_game_archive(archive, destination):
+def _extract_game_archive(archive, destination, progress_callback=None):
     suffix = ''.join(Path(archive).suffixes).lower()
     if suffix.endswith('.zip'):
         with zipfile.ZipFile(archive) as bundle:
-            for member in bundle.infolist():
+            members = bundle.infolist()
+            total_bytes = sum(member.file_size for member in members if not member.is_dir())
+            completed_bytes = 0
+            for member in members:
                 target = _safe_archive_target(destination, member.filename)
                 mode = (member.external_attr >> 16) & 0o170000
                 if mode == 0o120000:
@@ -17330,10 +17366,16 @@ def _extract_game_archive(archive, destination):
                     target.parent.mkdir(parents=True, exist_ok=True)
                     with bundle.open(member) as src, target.open('wb') as dst:
                         shutil.copyfileobj(src, dst, length=1024 * 1024)
+                    completed_bytes += member.file_size
+                    if callable(progress_callback):
+                        progress_callback(completed_bytes, total_bytes)
         return True
     if suffix.endswith(('.tar', '.tar.gz', '.tgz', '.tar.xz', '.txz', '.tar.bz2', '.tbz2')):
         with tarfile.open(archive, 'r:*') as bundle:
-            for member in bundle.getmembers():
+            members = bundle.getmembers()
+            total_bytes = sum(member.size for member in members if member.isfile())
+            completed_bytes = 0
+            for member in members:
                 target = _safe_archive_target(destination, member.name)
                 if member.issym() or member.islnk() or not (member.isdir() or member.isfile()):
                     raise ValueError('El TAR contiene enlaces o tipos de archivo no permitidos.')
@@ -17346,6 +17388,9 @@ def _extract_game_archive(archive, destination):
                     target.parent.mkdir(parents=True, exist_ok=True)
                     with source, target.open('wb') as output:
                         shutil.copyfileobj(source, output, length=1024 * 1024)
+                    completed_bytes += member.size
+                    if callable(progress_callback):
+                        progress_callback(completed_bytes, total_bytes)
         return True
     if suffix.endswith(('.7z', '.rar')):
         extractor = shutil.which('7z') or shutil.which('7zz')
@@ -17385,7 +17430,10 @@ def _install_xbox360_game(game_id):
     root.mkdir(parents=True, exist_ok=True)
     downloads = Path.home() / '.xui' / 'cache' / 'xbox360_downloads' / str(game_id)
     downloads.mkdir(parents=True, exist_ok=True)
-    print(f'Descargando {item.get("name", slug)}...')
+    def report_progress(percent, message):
+        print(f'XUI_PROGRESS:{int(percent)}:{str(message or "")[:180]}', flush=True)
+
+    report_progress(5, f'Conectando para descargar {item.get("name", slug)}...')
     partial = None
     try:
         with _open_game_download(url) as response:
@@ -17400,17 +17448,54 @@ def _install_xbox360_game(game_id):
                 leaf = slug + '.download'
             archive = downloads / leaf
             partial = archive.with_name(archive.name + '.part')
+            try:
+                content_length = max(0, int(response.headers.get('Content-Length') or 0))
+            except (TypeError, ValueError):
+                content_length = 0
+            downloaded = 0
+            last_reported_percent = -1
+            last_reported_bytes = 0
             with partial.open('wb') as output:
-                shutil.copyfileobj(response, output, length=1024 * 1024)
+                while True:
+                    chunk = response.read(1024 * 1024)
+                    if not chunk:
+                        break
+                    output.write(chunk)
+                    downloaded += len(chunk)
+                    if content_length:
+                        percent = min(68, 8 + int(downloaded * 60 / content_length))
+                        if percent >= last_reported_percent + 2 or downloaded >= content_length:
+                            report_progress(percent, f'Descargando: {downloaded // (1024 * 1024)} MiB de {content_length // (1024 * 1024)} MiB')
+                            last_reported_percent = percent
+                    elif downloaded - last_reported_bytes >= 8 * 1024 * 1024:
+                        report_progress(8, f'Descargando: {downloaded // (1024 * 1024)} MiB recibidos...')
+                        last_reported_bytes = downloaded
+            if downloaded <= 0:
+                raise ValueError('La descarga terminó sin recibir datos.')
         partial.replace(archive)
+        report_progress(70, 'Descarga completa. Preparando extracción...')
         staging = destination.with_name(destination.name + '.installing')
         if staging.exists():
             shutil.rmtree(staging)
         staging.mkdir(parents=True)
         try:
-            extracted = _extract_game_archive(archive, staging)
+            last_extraction_percent = {'value': 70}
+
+            def extraction_progress(done, total):
+                if total > 0:
+                    percent = 71 + int(min(total, done) * 26 / total)
+                    if percent > last_extraction_percent['value'] or done >= total:
+                        report_progress(percent, f'Extrayendo: {min(100, done * 100 // total)}%')
+                        last_extraction_percent['value'] = percent
+                else:
+                    report_progress(97, 'Extracción completa. Finalizando instalación...')
+
+            report_progress(71, 'Extrayendo el paquete del juego...')
+            extracted = _extract_game_archive(archive, staging, extraction_progress)
             if not extracted:
+                report_progress(85, 'El archivo no es comprimido; copiándolo a la biblioteca...')
                 shutil.copy2(archive, staging / archive.name)
+            report_progress(98, 'Guardando los archivos instalados...')
             staging.replace(destination)
         except Exception:
             shutil.rmtree(staging, ignore_errors=True)
@@ -17419,6 +17504,7 @@ def _install_xbox360_game(game_id):
         if partial is not None:
             partial.unlink(missing_ok=True)
         raise
+    report_progress(99, f'Instalación terminada: {destination}')
     print(f'Instalado en: {destination}')
 
 
@@ -18289,40 +18375,45 @@ class StoreInstallProgressDialog(QtWidgets.QDialog):
         self.lbl.setWordWrap(True)
         lay.addWidget(self.lbl)
         self.bar = QtWidgets.QProgressBar()
-        self.bar.setRange(0, 100)
-        self.bar.setValue(7)
-        self.bar.setFormat('%p%')
+        # Do not fabricate a percentage: network downloads and extraction have
+        # unknown duration until the worker reports measurable progress.
+        self.bar.setRange(0, 0)
         lay.addWidget(self.bar)
-        self.detail = QtWidgets.QLabel('Preparing installer...')
+        self.detail = QtWidgets.QLabel('Preparando descarga o instalación...')
         self.detail.setObjectName('detail')
         lay.addWidget(self.detail)
         lay.addStretch(1)
         root.addWidget(body, 1)
-        self._tick = QtCore.QTimer(self)
-        self._tick.timeout.connect(self._pulse)
-        self._tick.start(130)
-
-    def _pulse(self):
-        cur = self.bar.value()
-        target = 93 if self._phase < 1 else 98
-        nxt = min(target, cur + 1)
-        self.bar.setValue(nxt)
 
     def set_detail(self, text):
         t = str(text or '').strip()
         if t:
             self.detail.setText(t[:220])
-        if self.bar.value() < 93:
-            self.bar.setValue(min(93, self.bar.value() + 1))
+
+    def set_progress(self, percent, text=''):
+        try:
+            value = max(0, min(99, int(percent)))
+        except (TypeError, ValueError):
+            return
+        if self.bar.maximum() == 0:
+            self.bar.setRange(0, 100)
+            self.bar.setFormat('%p%')
+        self.bar.setValue(max(self.bar.value(), value))
+        self.set_detail(text)
 
     def finish_ok(self, text='Install completed successfully.'):
         self._phase = 1
+        if self.bar.maximum() == 0:
+            self.bar.setRange(0, 100)
+            self.bar.setFormat('%p%')
         self.bar.setValue(100)
         self.detail.setText(str(text or 'Install completed successfully.'))
 
     def finish_error(self, text='Install failed.'):
         self._phase = 1
-        self.bar.setValue(min(100, max(self.bar.value(), 97)))
+        if self.bar.maximum() == 0:
+            self.bar.setRange(0, 100)
+        self.bar.setFormat('Failed')
         self.detail.setText(str(text or 'Install failed.'))
 
 
@@ -18810,8 +18901,17 @@ class StoreWindow(QtWidgets.QMainWindow):
         if dlg is None:
             return
         lines = [ln.strip() for ln in self._install_output.splitlines() if ln.strip()]
-        if lines:
-            dlg.set_detail(lines[-1][:180])
+        for line in lines:
+            if line.startswith('XUI_PROGRESS:'):
+                parts = line.split(':', 2)
+                if len(parts) != 3:
+                    continue
+                try:
+                    dlg.set_progress(int(parts[1]), parts[2])
+                except (TypeError, ValueError):
+                    continue
+            else:
+                dlg.set_detail(line[:180])
 
     def _on_install_error(self, err):
         self._on_install_output()
