@@ -3217,13 +3217,14 @@ def _fit_dialog_to_screen(dialog, parent=None, width_ratio=0.92, height_ratio=0.
 
 
 class SocialOverlay(QtWidgets.QDialog):
-    def __init__(self, parent=None, notification_cb=None):
+    def __init__(self, parent=None, notification_cb=None, engine=None):
         super().__init__(parent)
         self._notification_cb = notification_cb
         self.nickname = current_gamertag()
         self.social_profile = self._load_social_profile()
         self.user_id = str(self.social_profile.get('user_id') or uuid.uuid4().hex[:16])
-        self.engine = InlineSocialEngine(self.nickname, self.user_id)
+        self.engine = engine or InlineSocialEngine(self.nickname, self.user_id)
+        self._owns_engine = engine is None
         self.peer_items = {}
         self.peer_data = {}
         self.friend_row_widgets = []
@@ -3261,7 +3262,8 @@ class SocialOverlay(QtWidgets.QDialog):
         self._load_party_state()
         self._load_manual_peers()
         self._load_world_settings()
-        self.engine.start()
+        if self._owns_engine:
+            self.engine.start()
         if str(self.party_state.get('party_id') or '').strip():
             threading.Thread(
                 target=self.engine.send_world_party_state,
@@ -5550,8 +5552,14 @@ class SocialOverlay(QtWidgets.QDialog):
         self._save_world_settings()
         self._save_party_state()
         self._save_voice_inbox()
-        self.engine.stop()
-        super().closeEvent(e)
+        if self._owns_engine:
+            self.engine.stop()
+        if self._owns_engine:
+            e.accept()
+            super().closeEvent(e)
+        else:
+            self.hide()
+            e.ignore()
 
 
 class TabLabel(QtWidgets.QLabel):
@@ -11110,6 +11118,9 @@ class Dashboard(QtWidgets.QMainWindow):
     def __init__(self):
         super().__init__()
         ensure_data()
+        self._social_overlay = None
+        self._social_engine = InlineSocialEngine(current_gamertag())
+        self._social_engine.start()
         self.setWindowTitle('XUI - Xbox 360 Style')
         scr = QtWidgets.QApplication.primaryScreen()
         self._runtime_profile = detect_runtime_profile()
@@ -13156,13 +13167,19 @@ exit 1
 
     def _open_social_chat(self, initial_mode='messages'):
         self._play_sfx('open')
-        d = SocialOverlay(self, notification_cb=lambda: self._play_sfx('notification'))
+        if self._social_overlay is None:
+            self._social_overlay = SocialOverlay(
+                self,
+                notification_cb=lambda: self._play_sfx('notification'),
+                engine=self._social_engine,
+            )
         try:
-            d._set_community_mode(initial_mode)
+            self._social_overlay._set_community_mode(initial_mode)
         except Exception:
             pass
-        d.exec_()
-        self._play_sfx('close')
+        self._social_overlay.show()
+        self._social_overlay.raise_()
+        self._social_overlay.activateWindow()
 
     def _platform_specs(self):
         xui_bin = XUI_HOME / 'bin'
@@ -14910,6 +14927,11 @@ exit 1
                     self._install_task_proc.kill()
                 self._install_task_proc.deleteLater()
                 self._install_task_proc = None
+        except Exception:
+            pass
+        try:
+            if self._social_engine is not None:
+                self._social_engine.stop()
         except Exception:
             pass
         for did in list(self._qgamepads.keys()):
