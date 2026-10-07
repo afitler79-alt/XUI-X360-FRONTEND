@@ -1,9 +1,9 @@
 From the repository root, install on Linux with:
 
-	./xui/xui11.sh.fixed.sh --yes-install --skip-apt-wait
+	./xui11.sh.fixed.sh --yes-install --skip-apt-wait
 
 `--yes-install` opts in to installing system packages. To install without that
-step, use `./xui/xui11.sh.fixed.sh --no-auto-install`.
+step, use `./xui11.sh.fixed.sh --no-auto-install`.
 
 The Linux auto-installer also installs the official Xenia Canary AppImage on
 x86_64 and verifies its release SHA-256. Use `--skip-xenia` to omit it. Xenia
