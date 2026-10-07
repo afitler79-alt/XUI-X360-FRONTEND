@@ -2734,12 +2734,18 @@ class InlineSocialEngine:
     def send_world_party_state(self, party_id, state='join'):
         pid = str(party_id or '').strip()
         if not pid:
-            return
-        self.send_world_event(
-            'xui_party_state',
-            party_id=pid,
-            state=str(state or 'join'),
-        )
+            return False
+        try:
+            self.send_world_event(
+                'xui_party_state',
+                party_id=pid,
+                state=str(state or 'join'),
+            )
+            return True
+        except Exception:
+            # Party presence is optional. A blocked public relay must not
+            # terminate the daemon thread or prevent LAN/social operations.
+            return False
 
     def send_world_voice_message(self, to_user_id, mime, duration, encoded_audio, party_id=''):
         to_uid = str(to_user_id or '').strip()
