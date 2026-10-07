@@ -21,6 +21,25 @@ info(){ echo -e "[INFO] $*"; }
 warn(){ echo -e "[WARN] $*" >&2; }
 check_cmd(){ command -v "$1" >/dev/null 2>&1; }
 
+linux_distro_info(){
+    if [ -r /etc/os-release ]; then
+        . /etc/os-release
+        printf '%s|%s|%s' "${ID:-unknown}" "${ID_LIKE:-}" "${PRETTY_NAME:-Linux}"
+    elif check_cmd lsb_release; then
+        printf '%s|%s|%s' "$(lsb_release -si 2>/dev/null | tr '[:upper:]' '[:lower:]')" "" "$(lsb_release -sd 2>/dev/null)"
+    else
+        printf '%s|%s|%s' unknown "" "Linux"
+    fi
+}
+
+apt_binary(){
+    if check_cmd apt; then
+        command -v apt
+    elif check_cmd apt-get; then
+        command -v apt-get
+    fi
+}
+
 run_as_root(){
     if [ "$(id -u)" -eq 0 ]; then
         "$@"
@@ -56,7 +75,7 @@ run_as_root(){
 }
 
 wait_for_apt_lock(){
-    if ! check_cmd apt; then
+    if ! check_cmd apt && ! check_cmd apt-get; then
         return 0
     fi
     if [ "${XUI_SKIP_APT_WAIT:-0}" = "1" ]; then
@@ -106,19 +125,23 @@ wait_for_apt_lock(){
 
 apt_safe_update(){
     wait_for_apt_lock
-    run_as_root apt update
+    local apt_cmd
+    apt_cmd="$(apt_binary)" || return 1
+    run_as_root "$apt_cmd" update
 }
 
 apt_safe_install(){
     wait_for_apt_lock
-    run_as_root apt install -y "$@"
+    local apt_cmd
+    apt_cmd="$(apt_binary)" || return 1
+    run_as_root "$apt_cmd" install -y "$@"
 }
 
 # Install APT packages one by one and continue on errors.
 apt_install_each_best_effort(){
     local pkg
     local failed=0
-    if [ "${XUI_NONINTERACTIVE:-0}" = "1" ] || [ ! -t 0 ]; then
+    if [ "$(id -u)" -ne 0 ] && { [ "${XUI_NONINTERACTIVE:-0}" = "1" ] || [ ! -t 0 ]; }; then
         if ! check_cmd sudo || ! sudo -n true >/dev/null 2>&1; then
             warn "Skipping per-package apt retries to avoid repeated auth popups (cached sudo not available)"
             return 1
@@ -159,16 +182,20 @@ install_dependencies(){
     fi
 
     info "Installing system dependencies (best effort)"
-    if command -v apt >/dev/null 2>&1; then
+    local distro_info distro_id distro_like distro_pretty
+    distro_info="$(linux_distro_info)"
+    IFS='|' read -r distro_id distro_like distro_pretty <<< "$distro_info"
+    if check_cmd apt || check_cmd apt-get; then
         local arch_now
         local core_pkgs optional_pkgs
         arch_now="$(uname -m)"
+        info "Detected Linux distribution: $distro_pretty (ID=$distro_id${distro_like:+, ID_LIKE=$distro_like}); using APT-compatible packages"
         core_pkgs=(
-            python3 python3-pip python3-venv python3-pyqt5
-            python3-pyqt5.qtmultimedia python3-pyqt5.qtgamepad
-            python3-pil python3-evdev
+            python3 python3-pip python3-venv python3-pyqt5 python3-pil
         )
         optional_pkgs=(
+            python3-pyqt5.qtmultimedia python3-pyqt5.qtgamepad python3-pyqt5.qtwebengine python3-evdev
+            hicolor-icon-theme adwaita-icon-theme humanity-icon-theme libqt5svg5 qt5-gtk-platformtheme qt5ct
             ffmpeg mpv jq xdotool curl ca-certificates iproute2 bc
             xclip xsel rofi feh maim scrot udisks2 p7zip-full joystick joycond evtest jstest-gtk xboxdrv
             retroarch lutris kodi
@@ -183,13 +210,10 @@ install_dependencies(){
             warn "Core apt dependencies failed in bulk install; retrying one by one"
             apt_install_each_best_effort "${core_pkgs[@]}" || warn "Some core apt dependencies are still missing"
         fi
-        apt_safe_install python3-pyqt5.qtwebengine || warn "Optional apt package missing: python3-pyqt5.qtwebengine"
-        apt_install_each_best_effort qml-module-qtgamepad libqt5gamepad5 || true
-        # Optional tools (can fail without breaking dashboard runtime)
-        if ! apt_safe_install "${optional_pkgs[@]}"; then
-            warn "Optional apt packages failed in bulk install; retrying one by one"
-            apt_install_each_best_effort "${optional_pkgs[@]}" || warn "Some optional apt packages are still missing"
-        fi
+        # Debian derivatives differ in optional package availability; attempt independently
+        # so one absent package never prevents icons, Qt plugins, or other tools installing.
+        apt_install_each_best_effort qml-module-qtgamepad libqt5gamepad5 qt6-gtk-platformtheme || true
+        apt_install_each_best_effort "${optional_pkgs[@]}" || warn "Some optional APT packages are unavailable on this distribution"
         # Windows compatibility (best effort): Wine + Winetricks + ARM helpers
         if [ "$arch_now" = "x86_64" ] || [ "$arch_now" = "amd64" ]; then
             apt_install_each_best_effort wine wine64 winetricks || warn "Wine/Winetricks install failed on x86_64"
@@ -13602,6 +13626,11 @@ def main():
     app = QtWidgets.QApplication(sys.argv)
     app.setApplicationName('XUI Xbox Style')
     app.setQuitOnLastWindowClosed(False)
+    for icon_name in ('logo.png', 'applogo.png', 'bootlogo.png'):
+        icon_path = ASSETS / icon_name
+        if icon_path.is_file():
+            app.setWindowIcon(QtGui.QIcon(str(icon_path)))
+            break
     if ultra_low_ram:
         try:
             QtGui.QPixmapCache.setCacheLimit(6144)
@@ -13771,6 +13800,94 @@ SH
   info "Wrote startup wrapper to $BIN_DIR/xui_startup_and_dashboard.sh"
 }
 
+install_desktop_icons(){
+    local icon_src icon_root pixmap_dir size candidate
+    icon_src=""
+    for candidate in "$ASSETS_DIR/logo.png" "$ASSETS_DIR/applogo.png" "$ASSETS_DIR/bootlogo.png"; do
+        if [ -s "$candidate" ]; then
+            icon_src="$candidate"
+            break
+        fi
+    done
+    if [ -z "$icon_src" ]; then
+        warn "No XUI logo asset found; desktop entries will use the generic icon"
+        return 0
+    fi
+
+    icon_root="$USER_HOME/.local/share/icons/hicolor"
+    pixmap_dir="$USER_HOME/.local/share/pixmaps"
+    mkdir -p "$pixmap_dir" "$icon_root/256x256/apps" || return 0
+    cp -f "$icon_src" "$pixmap_dir/xui-dashboard.png" || true
+
+    # Generate correctly sized theme icons when Pillow is available; otherwise
+    # copy the source image into each standard hicolor size as a portable fallback.
+    if check_cmd python3 && python3 - "$icon_src" "$icon_root" <<'PY'
+import sys
+from pathlib import Path
+try:
+    from PIL import Image
+except Exception:
+    raise SystemExit(1)
+source = Path(sys.argv[1])
+root = Path(sys.argv[2])
+try:
+    with Image.open(source) as image:
+        image = image.convert('RGBA')
+        for size in (16, 22, 24, 32, 48, 64, 128, 256):
+            folder = root / f'{size}x{size}' / 'apps'
+            folder.mkdir(parents=True, exist_ok=True)
+            resampling = getattr(Image, 'Resampling', Image).LANCZOS
+            image.resize((size, size), resampling).save(folder / 'xui-dashboard.png', format='PNG')
+except Exception:
+    raise SystemExit(1)
+PY
+    then
+        :
+    else
+        for size in 16 22 24 32 48 64 128 256; do
+            mkdir -p "$icon_root/${size}x${size}/apps"
+            cp -f "$icon_src" "$icon_root/${size}x${size}/apps/xui-dashboard.png" || true
+        done
+    fi
+
+    # Publish both a menu launcher and an XDG autostart entry for GNOME,
+    # KDE, Cinnamon, MATE, XFCE, and other freedesktop-compatible desktops.
+    mkdir -p "$USER_HOME/.local/share/applications" "$AUTOSTART_DIR"
+    cat > "$USER_HOME/.local/share/applications/xui-dashboard.desktop" <<DESK
+[Desktop Entry]
+Type=Application
+Name=XUI Dashboard
+Comment=Xbox-style gaming dashboard
+Exec="$BIN_DIR/xui_startup_and_dashboard.sh"
+Icon=xui-dashboard
+Terminal=false
+StartupNotify=false
+Categories=Game;Utility;
+DESK
+    cat > "$AUTOSTART_DIR/xui-dashboard.desktop" <<DESK
+[Desktop Entry]
+Type=Application
+Name=XUI Dashboard
+Comment=Start the XUI dashboard when the graphical session begins
+Exec="$BIN_DIR/xui_startup_and_dashboard.sh"
+Icon=xui-dashboard
+Terminal=false
+StartupNotify=false
+X-GNOME-Autostart-enabled=true
+Hidden=false
+NoDisplay=false
+DBusActivatable=false
+DESK
+
+    if check_cmd gtk-update-icon-cache && [ -f "$icon_root/index.theme" ]; then
+        gtk-update-icon-cache -f "$icon_root" >/dev/null 2>&1 || true
+    fi
+    if check_cmd update-desktop-database; then
+        update-desktop-database "$USER_HOME/.local/share/applications" >/dev/null 2>&1 || true
+    fi
+    info "Installed XUI desktop icons and launchers under $USER_HOME/.local/share"
+}
+
 write_autostart(){
   cat > "$AUTOSTART_DIR/xui-dashboard.desktop" <<DESK
 [Desktop Entry]
@@ -13778,6 +13895,7 @@ Type=Application
 Name=XUI Dashboard
 Comment=Start the XUI dashboard when the graphical session begins
 Exec="$BIN_DIR/xui_startup_and_dashboard.sh"
+Icon=$ASSETS_DIR/logo.png
 Terminal=false
 StartupNotify=false
 X-GNOME-Autostart-enabled=true
@@ -22633,6 +22751,7 @@ Type=Application
 Name=XUI Dashboard
 Comment=Start XUI fullscreen dashboard
 Exec="$START_WRAPPER"
+Icon=$XUI_HOME/assets/logo.png
 Terminal=false
 X-GNOME-Autostart-enabled=true
 Hidden=false
@@ -30033,6 +30152,7 @@ main(){
   write_extras
   write_systemd_and_autostart
   write_enable_autostart_script
+    install_desktop_icons
     # Additional utilities
     write_logger_and_helpers
     write_backup_restore

@@ -28,6 +28,13 @@ chmod +x xui11.sh.fixed.sh
 ~/.xui/bin/xui_startup_and_dashboard.sh
 ```
 
+Debian-family Linux compatibility
+---------------------------------
+
+- The installer detects `/etc/os-release` metadata and supports APT-based Debian derivatives, including Debian, Ubuntu, Linux Mint, Pop!_OS, Kali, and related distributions. Optional packages are attempted independently because package names and repositories vary between derivatives; unavailable optional packages do not block the dashboard dependencies.
+- Desktop icons are installed into the user's XDG `hicolor` icon theme and `~/.local/share/pixmaps`. The installer creates both an application-menu launcher and an autostart entry for freedesktop-compatible desktops such as GNOME, KDE Plasma, Cinnamon, MATE, and XFCE.
+- Pillow is used to generate standard icon sizes when available. If it is missing, the original XUI logo is copied as a fallback and the dashboard still uses it as its Qt window icon.
+
 Kubuntu Noble L4T (NVIDIA Jetson / Noble)
 ----------------------------------------
 

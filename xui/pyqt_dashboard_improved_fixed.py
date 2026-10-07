@@ -1244,6 +1244,11 @@ class MainWindow(QtWidgets.QMainWindow):
 if __name__=='__main__':
     windowed = '--windowed' in sys.argv
     app = QtWidgets.QApplication(sys.argv)
+    for icon_name in ('logo.png', 'applogo.png', 'bootlogo.png'):
+        icon_path = ASSETS / icon_name
+        if icon_path.is_file():
+            app.setWindowIcon(QtGui.QIcon(str(icon_path)))
+            break
     # apply saved theme if present
     s = load_settings()
     theme = s.get('theme', 'dark')
