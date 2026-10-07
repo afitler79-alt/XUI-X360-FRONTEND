@@ -2208,10 +2208,7 @@ def ensure_data():
     if not RECENT_FILE.exists():
         RECENT_FILE.write_text('[]')
     if not FRIENDS_FILE.exists():
-        FRIENDS_FILE.write_text(json.dumps([
-            {'name': 'Friend1', 'online': True},
-            {'name': 'Friend2', 'online': False}
-        ], indent=2))
+        FRIENDS_FILE.write_text('[]')
     if not PROFILE_FILE.exists():
         PROFILE_FILE.write_text(json.dumps({'gamertag': 'Player1', 'signed_in': False}, indent=2))
     if not FRIEND_REQUESTS_FILE.exists():
@@ -2597,7 +2594,18 @@ class InlineSocialEngine:
             'ts': time.time(),
             'reply_port': int(self.chat_port or 0),
         }
-        self._send_packet(host, port, payload)
+        return self._send_packet(host, port, payload)
+
+    def send_friend_accept(self, host, port):
+        payload = {
+            'type': 'friend_accept',
+            'node_id': self.node_id,
+            'user_id': self.user_id,
+            'from': self.nickname,
+            'ts': time.time(),
+            'reply_port': int(self.chat_port or 0),
+        }
+        return self._send_packet(host, port, payload)
 
     def send_voice_message(self, host, port, mime, duration, encoded_audio):
         payload = {
@@ -2912,7 +2920,7 @@ class InlineSocialEngine:
         if not isinstance(msg, dict):
             return
         mtype = str(msg.get('type') or '')
-        if mtype not in ('chat', 'private_message', 'friend_request', 'voice_message'):
+        if mtype not in ('chat', 'private_message', 'friend_request', 'friend_accept', 'voice_message'):
             return
         sender = str(msg.get('from') or host).strip()[:48] or host
         text = str(msg.get('text') or '').strip()
@@ -2939,6 +2947,8 @@ class InlineSocialEngine:
             self._upsert_peer(sender, host, reply_port, 'LAN', sender_node, user_id=sender_user_id)
         if mtype == 'friend_request':
             self.events.put(('friend_request', sender, host, reply_port, note, sender_user_id))
+        elif mtype == 'friend_accept':
+            self.events.put(('friend_accept', sender, host, reply_port, sender_user_id))
         elif mtype == 'voice_message':
             self.events.put(('voice_message', sender, host, reply_port, mime, voice_dur, voice_blob, sender_user_id, message_id))
         elif mtype == 'private_message':
@@ -4581,6 +4591,8 @@ class SocialOverlay(QtWidgets.QDialog):
             if not isinstance(raw, dict):
                 continue
             name = str(raw.get('name') or '').strip()
+            if name.casefold() in {'friend1', 'friend2'}:
+                continue
             host = str(raw.get('host') or '').strip()
             try:
                 port = int(raw.get('port') or 0)
@@ -4597,6 +4609,8 @@ class SocialOverlay(QtWidgets.QDialog):
                 'last_seen': int(raw.get('last_seen', int(time.time()))),
             })
         self.friends = out
+        if out != arr:
+            self._save_friends()
 
     def _save_friends(self):
         safe_json_write(FRIENDS_FILE, self.friends)
@@ -4815,12 +4829,22 @@ class SocialOverlay(QtWidgets.QDialog):
             req_uid = str(req.get('user_id') or '').strip()
             if req_uid:
                 self._touch_global_player(req_uid, req.get('name'), 'friend')
-            to_uid = str(req.get('user_id') or '').strip()
-            if to_uid:
+            if str(req.get('kind') or '').lower() == 'global' and req_uid:
                 try:
-                    self.engine.send_world_friend_accept(to_uid)
+                    self.engine.send_world_friend_accept(req_uid)
                 except Exception:
                     pass
+            else:
+                host = str(req.get('host') or '').strip()
+                try:
+                    port = int(req.get('port') or 0)
+                except (TypeError, ValueError, OverflowError):
+                    port = 0
+                if host and 0 < port <= 65535:
+                    try:
+                        self.engine.send_friend_accept(host, port)
+                    except Exception as exc:
+                        self.status.setText(f'Friend added locally; acceptance reply failed: {exc}')
             self._append_system(f"Friend added: {req.get('name', 'Unknown')}")
             self.status.setText(f"Friend added: {req.get('name', 'Unknown')}")
         else:
@@ -5310,6 +5334,11 @@ class SocialOverlay(QtWidgets.QDialog):
                 self._queue_friend_request(sender, host, port, note, user_id=sender_user_id, kind='lan')
                 self._append_system(f"Friend request from {sender} [{host}:{port}]")
                 self.status.setText(f"Pending friend requests: {len(self.friend_requests)}")
+            elif kind == 'friend_accept':
+                _kind, sender, host, port, sender_user_id = evt
+                self._upsert_friend(sender, host, port, user_id=sender_user_id, source='LAN')
+                self._append_system(f'{sender} accepted your friend request.')
+                self.status.setText(f'Friend added: {sender}')
             elif kind == 'global_friend_request':
                 _kind, sender, sender_user_id, note = evt
                 self._queue_friend_request(sender, '', 0, note, user_id=sender_user_id, kind='global')
@@ -7188,6 +7217,14 @@ class GuideSideBlade(QtWidgets.QFrame):
             bg0, bg1, fg, bdr = '#e5e9ed', '#ccd3da', '#303943', 'rgba(255,255,255,0.88)'
             fs = 13
             fw = 800
+        elif self._section_idx == 2:
+            bg0, bg1, fg, bdr = '#46535e', '#35414b', '#f5f7fa', 'rgba(236,245,253,0.74)'
+            fs = 12
+            fw = 700
+        elif self._section_idx in (0, 3):
+            bg0, bg1, fg, bdr = '#e5e9ed', '#ccd3da', '#303943', 'rgba(255,255,255,0.74)'
+            fs = 12
+            fw = 700
         else:
             bg0, bg1, fg, bdr = '#687fb9', '#526aa5', '#f5f7ff', 'rgba(236,245,253,0.74)'
             fs = 12
@@ -7208,6 +7245,43 @@ class GuideSideBlade(QtWidgets.QFrame):
     def mousePressEvent(self, e):
         self.activated.emit(int(self._section_idx))
         super().mousePressEvent(e)
+
+
+class GuideMenuDelegate(QtWidgets.QStyledItemDelegate):
+    def paint(self, painter, option, index):
+        rect = option.rect
+        row_data = index.data(QtCore.Qt.UserRole)
+        row_data = row_data if isinstance(row_data, dict) else {}
+        selected = bool(option.state & QtWidgets.QStyle.State_Selected)
+        painter.save()
+        if selected:
+            gradient = QtGui.QLinearGradient(rect.topLeft(), rect.topRight())
+            gradient.setColorAt(0.0, QtGui.QColor('#61bb43'))
+            gradient.setColorAt(1.0, QtGui.QColor('#43a735'))
+            painter.fillRect(rect, gradient)
+        else:
+            painter.fillRect(rect, QtGui.QColor('#e8ebee'))
+        painter.setPen(QtGui.QColor(255, 255, 255, 55) if selected else QtGui.QColor(38, 48, 62, 34))
+        painter.drawLine(rect.bottomLeft(), rect.bottomRight())
+        painter.setPen(QtGui.QColor('#ffffff' if selected else '#26303a'))
+        font = QtGui.QFont(option.font)
+        font.setPointSize(17)
+        font.setWeight(QtGui.QFont.Medium)
+        painter.setFont(font)
+        left = rect.adjusted(14, 0, -150, 0)
+        painter.drawText(left, QtCore.Qt.AlignVCenter | QtCore.Qt.AlignLeft, str(index.data(QtCore.Qt.DisplayRole) or ''))
+        icon = str(row_data.get('icon') or '')
+        count = row_data.get('count')
+        if count is not None:
+            painter.setPen(QtGui.QColor('#ffffff' if selected else '#68717a'))
+            painter.drawText(rect.adjusted(0, 0, -43, 0), QtCore.Qt.AlignVCenter | QtCore.Qt.AlignRight, str(count))
+        if icon:
+            painter.setPen(QtGui.QColor('#ffffff' if selected else '#68717a'))
+            painter.drawText(rect.adjusted(0, 0, -15, 0), QtCore.Qt.AlignVCenter | QtCore.Qt.AlignRight, icon)
+        painter.restore()
+
+    def sizeHint(self, option, index):
+        return QtCore.QSize(300, 41)
 
 
 class XboxGuideMenu(QtWidgets.QDialog):
@@ -7236,36 +7310,28 @@ class XboxGuideMenu(QtWidgets.QDialog):
         self.resize(980, 520)
         self.setStyleSheet('''
             QDialog {
-                background:rgba(2, 5, 9, 0.84);
+                background:rgba(5, 9, 14, 0.66);
             }
             QFrame#xguide_panel {
-                background:qlineargradient(x1:0,y1:0,x2:0,y2:1, stop:0 #20272e, stop:0.10 #343c44, stop:1 #252c33);
-                border:2px solid rgba(191,202,212,0.76);
+                background:#252c33;
+                border:2px solid #aeb8c0;
                 border-radius:0px;
             }
             QLabel#xguide_title {
-                color:#f3f7fb;
-                font-size:23px;
+                color:#f5f7f9;
+                font-size:26px;
                 font-weight:800;
                 font-family:"Segoe UI","Noto Sans",sans-serif;
             }
             QLabel#xguide_meta {
-                color:rgba(233,243,251,0.95);
-                font-size:14px;
+                color:#f0f4f7;
+                font-size:15px;
                 font-weight:700;
                 font-family:"Segoe UI","Noto Sans",sans-serif;
             }
             QFrame#xguide_page_host {
-                background:#e7e9ec;
-                border:1px solid rgba(11,16,22,0.48);
-            }
-            QLabel#xguide_avatar {
-                background:#dfe6ed;
-                color:#526aa5;
-                border:2px solid #849bb0;
-                border-radius:15px;
-                font-size:14px;
-                font-weight:900;
+                background:#e8ebee;
+                border:1px solid #89939c;
             }
             QLabel#xguide_section_title {
                 color:#293541;
@@ -7275,67 +7341,44 @@ class XboxGuideMenu(QtWidgets.QDialog):
                 font-family:"Segoe UI","Noto Sans",sans-serif;
             }
             QListWidget#xguide_list {
-                background:#e7e9ec;
+                background:#e8ebee;
                 color:#222930;
                 border:none;
-                font-size:16px;
+                font-size:17px;
                 outline:none;
                 font-family:"Segoe UI","Noto Sans",sans-serif;
             }
             QListWidget#xguide_list::item {
-                min-height:28px;
-                padding:3px 10px;
-                border-bottom:1px solid rgba(38,48,62,0.16);
-            }
-            QListWidget#xguide_list::item:selected {
-                color:#eefeed;
-                background:#58b83c;
-                border:1px solid rgba(255,255,255,0.40);
+                border:none;
+                padding:0px;
             }
             QLabel#xguide_hint {
-                color:#edf3f8;
-                font-size:13px;
+                color:#f0f4f7;
+                font-size:14px;
                 font-weight:800;
                 font-family:"Segoe UI","Noto Sans",sans-serif;
             }
         ''')
 
         outer = QtWidgets.QVBoxLayout(self)
-        outer.setContentsMargins(10, 12, 10, 12)
+        outer.setContentsMargins(0, 0, 0, 0)
         panel = QtWidgets.QFrame()
         panel.setObjectName('xguide_panel')
-        outer.addWidget(panel)
+        self.guide_panel = panel
+        outer.addWidget(panel, 0, QtCore.Qt.AlignCenter)
 
         root = QtWidgets.QVBoxLayout(panel)
         root.setContentsMargins(10, 8, 10, 8)
         root.setSpacing(6)
 
         top = QtWidgets.QHBoxLayout()
-        top.setSpacing(8)
+        top.setSpacing(10)
         title = QtWidgets.QLabel('Xbox Guide')
         title.setObjectName('xguide_title')
-        self.avatar_badge = QtWidgets.QLabel(self.gamertag[:1].upper())
-        self.avatar_badge.setObjectName('xguide_avatar')
-        self.avatar_badge.setAlignment(QtCore.Qt.AlignCenter)
-        self.avatar_badge.setFixedSize(30, 30)
-        profile = safe_json_read(PROFILE_FILE, {})
-        avatar = profile.get('avatar_customization', {}) if isinstance(profile, dict) else {}
-        if isinstance(avatar, dict):
-            outfit = str(avatar.get('outfit') or '').strip()
-            if re.fullmatch(r'#[0-9a-fA-F]{6}', outfit):
-                self.avatar_badge.setStyleSheet(
-                    f'background:{outfit};color:#ffffff;border:2px solid #d5e2df;'
-                    'border-radius:15px;font-size:14px;font-weight:900;'
-                )
-            traits = ', '.join(str(avatar.get(key) or '') for key in ('hair_style', 'accessory') if avatar.get(key))
-            if traits:
-                self.avatar_badge.setToolTip(f'Avatar: {traits}')
         self.meta = QtWidgets.QLabel('')
         self.meta.setObjectName('xguide_meta')
         top.addWidget(title)
         top.addStretch(1)
-        top.addWidget(self.avatar_badge)
-        top.addSpacing(7)
         top.addWidget(self.meta)
         root.addLayout(top)
 
@@ -7343,7 +7386,7 @@ class XboxGuideMenu(QtWidgets.QDialog):
         body.setSpacing(0)
 
         self.blade_tabs = []
-        blade_widths = (42, 50, 34, 36)
+        blade_widths = (46, 58, 46, 50)
         for idx, (section_name, _items) in enumerate(self._sections[:2]):
             blade = GuideSideBlade(clockwise=False, width=blade_widths[idx])
             blade.activated.connect(self._switch_section_from_blade)
@@ -7377,7 +7420,11 @@ class XboxGuideMenu(QtWidgets.QDialog):
         for _section_name, items in self._sections:
             lw = QtWidgets.QListWidget()
             lw.setObjectName('xguide_list')
-            lw.addItems([str(x) for x in items])
+            lw.setItemDelegate(GuideMenuDelegate(lw))
+            for label in items:
+                item = QtWidgets.QListWidgetItem(str(label))
+                item.setData(QtCore.Qt.UserRole, self._row_badge(str(label)))
+                lw.addItem(item)
             lw.itemActivated.connect(self._accept_current)
             lw.itemDoubleClicked.connect(self._accept_current)
             lw.currentRowChanged.connect(self._on_row_changed)
@@ -7387,10 +7434,7 @@ class XboxGuideMenu(QtWidgets.QDialog):
             self.page_stack.addWidget(lw)
         root.addLayout(body, 1)
 
-        if self.mode == 'app':
-            hint_text = '<font color="#49b93e">A Select</font> <font color="#cf2d2d">B Back</font> <font color="#2b7fd8">X Sign Out</font> <font color="#ddb126">Y Xbox Home</font> <font color="#e7eff6">LB/RB Page</font>'
-        else:
-            hint_text = '<font color="#49b93e">A Select</font> <font color="#cf2d2d">B Back</font> <font color="#2b7fd8">X Cerrar sesion</font> <font color="#ddb126">Y Inicio de Xbox</font> <font color="#e7eff6">LB/RB Pagina</font>'
+        hint_text = '<font color="#49b93e">A</font> Select&nbsp;&nbsp; <font color="#cf2d2d">B</font> Back&nbsp;&nbsp; <font color="#2b7fd8">X</font> Close Game&nbsp;&nbsp; <font color="#ddb126">Y</font> Minimize Dashboard&nbsp;&nbsp; <font color="#e7eff6">LB/RB</font> Page'
         hint = QtWidgets.QLabel(hint_text)
         hint.setObjectName('xguide_hint')
         root.addWidget(hint, 0, QtCore.Qt.AlignLeft)
@@ -7400,23 +7444,44 @@ class XboxGuideMenu(QtWidgets.QDialog):
         self._clock.start(1000)
         self._refresh_meta()
         self._setup_shortcuts()
-        self._switch_section(1 if self.mode == 'dashboard' else 0, animate=False)
+        self._switch_section(1, animate=False)
 
     def _build_sections(self):
         media_items = ['Video Marketplace', 'YouTube', 'Netflix', 'Twitch', 'Music Marketplace', 'System Music']
         if self.mode == 'app':
             return [
                 ('Games & Apps', ['Xbox Home', 'Leave Game', 'Manage Storage', 'Open Tray']),
-                (self.gamertag, ['Xbox Home', 'Friends', 'Party', 'Messages', 'Beacons & Activity', 'Chat global', 'Open Tray']),
+                ('Player', ['Xbox Home', 'Friends', 'Party', 'Messages', 'Minimize', 'Chat', '']),
                 ('Media', media_items),
                 ('Settings', ['System Settings', 'Canjear codigo', 'Sign Out']),
             ]
         return [
             ('Games & Apps', ['Mis juegos', 'Reciente', 'Descargas activas', 'Cerrar app actual']),
-            (self.gamertag, ['Xbox Home', 'Friends', 'Party', 'Messages', 'Beacons & Activity', 'Chat global', 'Open Tray']),
+            ('Player', ['Xbox Home', 'Friends', 'Party', 'Messages', 'Minimize', 'Chat', '']),
             ('Media', media_items),
             ('Settings', ['Quick Control Center', 'System Monitor', 'Network Test', 'Manage Favorites', 'Configuracion', 'Cerrar sesion']),
         ]
+
+    def _row_badge(self, label):
+        if label == 'Friends':
+            friends = safe_json_read(FRIENDS_FILE, [])
+            count = len([row for row in friends if isinstance(row, dict)]) if isinstance(friends, list) else 0
+            return {'count': count, 'icon': '♙'}
+        if label == 'Party':
+            party = safe_json_read(PARTY_STATE_FILE, {})
+            members = party.get('members', {}) if isinstance(party, dict) else {}
+            return {'count': len(members) if isinstance(members, dict) else 0, 'icon': '♧'}
+        if label == 'Messages':
+            messages = safe_json_read(SOCIAL_MESSAGES_FILE, [])
+            count = len(messages) if isinstance(messages, list) else 0
+            return {'count': count, 'icon': '✉'}
+        if label == 'Minimize':
+            return {'icon': '×'}
+        if label == 'Chat':
+            return {'icon': '▱'}
+        if not label:
+            return {'icon': '◉'}
+        return {}
 
     def _current_list(self):
         idx = int(self._section_idx)
@@ -7448,10 +7513,10 @@ class XboxGuideMenu(QtWidgets.QDialog):
         # Switch-style shoulder layout fallbacks.
         add_sc(QtCore.Qt.Key_BracketLeft, lambda: self._cycle_section(-1))
         add_sc(QtCore.Qt.Key_BracketRight, lambda: self._cycle_section(1))
-        add_sc(QtCore.Qt.Key_Y, self._go_home)
-        add_sc(QtCore.Qt.Key_Tab, self._go_home)
-        add_sc(QtCore.Qt.Key_X, self._sign_out)
-        add_sc(QtCore.Qt.Key_Space, self._sign_out)
+        add_sc(QtCore.Qt.Key_Y, self._minimize_dashboard)
+        add_sc(QtCore.Qt.Key_Tab, self._minimize_dashboard)
+        add_sc(QtCore.Qt.Key_X, self._close_game)
+        add_sc(QtCore.Qt.Key_Space, self._close_game)
 
     def _switch_section_from_blade(self, section_idx):
         self._switch_section(section_idx, animate=True)
@@ -7630,7 +7695,7 @@ class XboxGuideMenu(QtWidgets.QDialog):
     def _refresh_meta(self):
         now = QtCore.QDateTime.currentDateTime().toString('HH:mm')
         mode_tag = 'APP' if self.mode == 'app' else 'DASH'
-        self.meta.setText(f'◉  {now}   {mode_tag}')
+        self.meta.setText(f'▱   ◉  {now}   {mode_tag}')
 
     def _accept_current(self, *_):
         lw = self._current_list()
@@ -7653,6 +7718,16 @@ class XboxGuideMenu(QtWidgets.QDialog):
         self._sfx('select')
         self.accept()
 
+    def _close_game(self):
+        self._selection = 'Close Game'
+        self._sfx('select')
+        self.accept()
+
+    def _minimize_dashboard(self):
+        self._selection = 'Minimize'
+        self._sfx('select')
+        self.accept()
+
     def selected(self):
         if self._selection:
             return self._selection
@@ -7666,8 +7741,15 @@ class XboxGuideMenu(QtWidgets.QDialog):
         super().showEvent(e)
         self.raise_()
         self.activateWindow()
-        parent = self.parentWidget()
-        _fit_dialog_to_screen(self, parent, width_ratio=0.70, height_ratio=0.62, min_width=560, min_height=340)
+        screen = self.screen() or QtWidgets.QApplication.primaryScreen()
+        if screen is not None:
+            bounds = screen.geometry()
+            self.setGeometry(bounds)
+            panel_w = max(720, int(bounds.width() * 0.88))
+            panel_h = max(300, int(bounds.height() * 0.82))
+            panel_w = min(panel_w, max(1, bounds.width() - 24))
+            panel_h = min(panel_h, max(1, bounds.height() - 24))
+            self.guide_panel.setFixedSize(panel_w, panel_h)
         self._refresh_meta()
         self._refresh_side_blades()
         self._sfx('open')
@@ -7677,40 +7759,41 @@ class XboxGuideMenu(QtWidgets.QDialog):
             cur.setFocus()
 
     def _animate_open(self):
-        effect = QtWidgets.QGraphicsOpacityEffect(self)
-        self.setGraphicsEffect(effect)
+        panel = self.guide_panel
+        effect = QtWidgets.QGraphicsOpacityEffect(panel)
+        panel.setGraphicsEffect(effect)
         effect.setOpacity(0.0)
-        end_rect = self.geometry()
+        end_rect = panel.geometry()
         start_rect = QtCore.QRect(
             end_rect.x() - max(24, end_rect.width() // 16),
             end_rect.y(),
             end_rect.width(),
             end_rect.height(),
         )
-        self.setGeometry(start_rect)
+        panel.setGeometry(start_rect)
         self._open_anim = QtCore.QParallelAnimationGroup(self)
         fade = QtCore.QPropertyAnimation(effect, b'opacity', self)
         fade.setDuration(180)
         fade.setStartValue(0.0)
         fade.setEndValue(1.0)
         fade.setEasingCurve(QtCore.QEasingCurve.OutCubic)
-        slide = QtCore.QPropertyAnimation(self, b'geometry', self)
+        slide = QtCore.QPropertyAnimation(panel, b'geometry', self)
         slide.setDuration(220)
         slide.setStartValue(start_rect)
         slide.setEndValue(end_rect)
         slide.setEasingCurve(QtCore.QEasingCurve.OutCubic)
         self._open_anim.addAnimation(fade)
         self._open_anim.addAnimation(slide)
-        self._open_anim.finished.connect(lambda: self.setGraphicsEffect(None))
+        self._open_anim.finished.connect(lambda: panel.setGraphicsEffect(None))
         self._open_anim.start(QtCore.QAbstractAnimation.DeleteWhenStopped)
 
     def keyPressEvent(self, e):
         k = e.key()
         if k in (QtCore.Qt.Key_Y, QtCore.Qt.Key_Tab):
-            self._go_home()
+            self._minimize_dashboard()
             return
         if k in (QtCore.Qt.Key_X, QtCore.Qt.Key_Space):
-            self._sign_out()
+            self._close_game()
             return
         if k in (QtCore.Qt.Key_PageUp, QtCore.Qt.Key_BracketLeft):
             self._cycle_section(-1)
@@ -12357,8 +12440,11 @@ exit 1
         name = str(action or '').strip()
         if not name:
             return
-        if name == 'Leave Game':
+        if name in ('Close Game', 'Leave Game', 'Cerrar app actual'):
             self.handle_action('Close Active App')
+            return
+        if name == 'Minimize':
+            self.showMinimized()
             return
         if name == 'Xbox Home':
             if 'home' in self.tabs:
