@@ -2209,6 +2209,21 @@ def ensure_data():
         RECENT_FILE.write_text('[]')
     if not FRIENDS_FILE.exists():
         FRIENDS_FILE.write_text('[]')
+    else:
+        try:
+            saved_friends = json.loads(FRIENDS_FILE.read_text(encoding='utf-8'))
+            if isinstance(saved_friends, list):
+                real_friends = [
+                    friend for friend in saved_friends
+                    if not (
+                        isinstance(friend, dict)
+                        and str(friend.get('name') or '').strip().casefold() in {'friend1', 'friend2'}
+                    )
+                ]
+                if real_friends != saved_friends:
+                    safe_json_write(FRIENDS_FILE, real_friends)
+        except Exception:
+            pass
     if not PROFILE_FILE.exists():
         PROFILE_FILE.write_text(json.dumps({'gamertag': 'Player1', 'signed_in': False}, indent=2))
     if not FRIEND_REQUESTS_FILE.exists():
