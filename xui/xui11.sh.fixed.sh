@@ -5207,8 +5207,21 @@ class SocialOverlay(QtWidgets.QDialog):
                     self.status.setText(str(result.get('detail') or 'Message sent.'))
                 else:
                     self._save_conversation_message(peer, 'out', text, 'failed', message_id)
-                    self.status.setText(f"Message not delivered: {result.get('detail') or 'unknown error'}")
-                    self._append_system(f"Message to {peer.get('name') or 'peer'} failed: {result.get('detail') or 'unknown error'}")
+                    detail = str(result.get('detail') or 'unknown error')
+                    detail_lower = detail.lower()
+                    if 'errno 113' in detail_lower or 'no route to host' in detail_lower or 'no existe ninguna ruta hasta el host' in detail_lower:
+                        detail = (
+                            f'{detail}. Las VMs no tienen ruta entre sí: si VirtualBox usa NAT normal, '
+                            'cámbialo en ambas a Adaptador puente, Solo-anfitrión o la misma Red NAT; '
+                            'permite TCP 38600-38623 y UDP 38655 en el firewall.'
+                        )
+                    elif 'errno 111' in detail_lower or 'connection refused' in detail_lower or 'conexión rehusada' in detail_lower:
+                        detail = (
+                            f'{detail}. El host responde, pero el puerto de chat está cerrado o bloqueado; '
+                            'comprueba que XUI siga abierto y permite TCP 38600-38623.'
+                        )
+                    self.status.setText(f'Mensaje no entregado: {detail}')
+                    self._append_system(f"Message to {peer.get('name') or 'peer'} failed: {detail}")
             elif kind == 'status':
                 self.status.setText(str(evt[1]))
             elif kind == 'peer_up':
