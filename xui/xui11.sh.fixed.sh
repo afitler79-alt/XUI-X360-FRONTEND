@@ -9735,11 +9735,12 @@ class DashboardPage(QtWidgets.QWidget):
 
         left_col = QtWidgets.QWidget()
         self.left_col = left_col
-        left_col.setFixedWidth(220)
+        left_col.setSizePolicy(QtWidgets.QSizePolicy.Fixed, QtWidgets.QSizePolicy.Preferred)
         left = QtWidgets.QVBoxLayout(left_col)
         self.left_layout = left
         left.setContentsMargins(0, 0, 0, 0)
         left.setSpacing(7)
+        self._add_column_header(left_col, left, 'PRIMARY ACCESS', 'primary')
         self._build_tiles(
             self.spec.get('left', []),
             self.left_tiles,
@@ -9751,7 +9752,7 @@ class DashboardPage(QtWidgets.QWidget):
 
         center_col = QtWidgets.QWidget()
         self.center_col = center_col
-        center_col.setSizePolicy(QtWidgets.QSizePolicy.Fixed, QtWidgets.QSizePolicy.Preferred)
+        center_col.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Preferred)
         center = QtWidgets.QVBoxLayout(center_col)
         self.center_layout = center
         center.setContentsMargins(0, 0, 0, 0)
@@ -9775,6 +9776,7 @@ class DashboardPage(QtWidgets.QWidget):
 
         center_bottom_defs = self.spec.get('center_bottom', [])
         if center_bottom_defs:
+            self._add_column_header(center_col, center, 'QUICK ACCESS', 'quick')
             center_tiles_wrap = QtWidgets.QWidget()
             center_tiles_row = QtWidgets.QHBoxLayout(center_tiles_wrap)
             self.center_tiles_layout = center_tiles_row
@@ -9794,11 +9796,12 @@ class DashboardPage(QtWidgets.QWidget):
 
         right_col = QtWidgets.QWidget()
         self.right_col = right_col
-        right_col.setFixedWidth(170)
+        right_col.setSizePolicy(QtWidgets.QSizePolicy.Fixed, QtWidgets.QSizePolicy.Preferred)
         right = QtWidgets.QVBoxLayout(right_col)
         self.right_layout = right
         right.setContentsMargins(0, 0, 0, 0)
         right.setSpacing(6)
+        self._add_column_header(right_col, right, 'MORE ACTIONS', 'more')
         self._build_tiles(
             self.spec.get('right', []),
             self.right_tiles,
@@ -9810,11 +9813,22 @@ class DashboardPage(QtWidgets.QWidget):
 
         body.addStretch(1)
         body.addWidget(left_col, 0, alignment=QtCore.Qt.AlignTop)
-        body.addWidget(center_col, 0, alignment=QtCore.Qt.AlignTop)
+        body.addWidget(center_col, 1, alignment=QtCore.Qt.AlignTop)
         body.addWidget(right_col, 0, alignment=QtCore.Qt.AlignTop)
         body.addStretch(1)
         wrap.addLayout(body, 0)
         wrap.addStretch(1)
+
+    @staticmethod
+    def _add_column_header(parent, layout, label, kind):
+        header = QtWidgets.QLabel(label)
+        header.setObjectName(f'dashboard_tile_section_{kind}')
+        header.setAlignment(QtCore.Qt.AlignLeft | QtCore.Qt.AlignVCenter)
+        header.setStyleSheet(
+            'color:#dce6e7; font-size:12px; font-weight:800; letter-spacing:2px; '
+            'padding:0 6px 5px;'
+        )
+        layout.addWidget(header, 0, QtCore.Qt.AlignLeft)
 
     def _apply_scale_once(self, scale=1.0, compact=False):
         s = max(0.58, float(scale))
@@ -9831,17 +9845,22 @@ class DashboardPage(QtWidgets.QWidget):
             self.center_tiles_layout.setSpacing(max(3, int(6 * s * compact_factor)))
         if self.right_layout is not None:
             self.right_layout.setSpacing(col_gap)
+        available_width = max(320, int(self.width() - self._body_layout.contentsMargins().left() - self._body_layout.contentsMargins().right()))
+        if self.left_col is not None and self.right_col is not None:
+            compact_columns = available_width < 1080
+            left_width = 150 if compact_columns else 220
+            right_width = 125 if compact_columns else 170
+            left_width = max(left_width, int(left_width * s * compact_factor))
+            right_width = max(right_width, int(right_width * s * compact_factor))
+            self.left_col.setFixedWidth(left_width)
+            self.right_col.setFixedWidth(right_width)
+            available_center = max(320, available_width - left_width - right_width - max(0, gap * 2))
+            s = min(s, available_center / 780.0)
         for group in (self.left_tiles, self.center_tiles, self.right_tiles):
             for tile in group:
-                tile.apply_scale(s, compact)
-        if self.left_col is not None:
-            left_tiles_width = max((tile.width() for tile in self.left_tiles), default=0)
-            self.left_col.setFixedWidth(max(left_tiles_width, int(220 * s * compact_factor)))
-        if self.right_col is not None:
-            right_tiles_width = max((tile.width() for tile in self.right_tiles), default=0)
-            self.right_col.setFixedWidth(max(right_tiles_width, int(170 * s * compact_factor)))
+                tile.apply_scale(max(0.58, s), compact)
         if self.hero is not None:
-            self.hero.apply_scale(s, compact)
+            self.hero.apply_scale(max(0.58, s), compact)
 
     def _content_size_hint(self):
         gap = int(self._body_layout.spacing()) if self._body_layout is not None else 0
@@ -11545,6 +11564,10 @@ class Dashboard(QtWidgets.QMainWindow):
                 background:{stage_bg};
                 border:1px solid {stage_border};
                 border-radius:0px;
+            }}
+            QLabel#dashboard_tile_section_primary, QLabel#dashboard_tile_section_quick, QLabel#dashboard_tile_section_more {{
+                color:#dce6e7; background:rgba(38,48,53,0.34); border:1px solid rgba(255,255,255,0.10);
+                border-radius:4px; padding:5px 7px; font-size:11px; font-weight:800; letter-spacing:1px;
             }}
             QLabel#dashboard_profile_name {{ color:rgba(255,255,255,0.72); font-size:13px; font-weight:500; padding:0 8px; }}
             QLabel#dashboard_clock {{ color:rgba(255,255,255,0.64); font-size:12px; font-weight:500; padding-left:8px; }}
