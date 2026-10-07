@@ -2662,8 +2662,20 @@ class InlineSocialEngine:
                 'X-Title': f'XUI:{self.nickname}:{self.user_id}',
             },
         )
-        with urllib.request.urlopen(req, timeout=8) as r:
-            _ = r.read(256)
+        try:
+            with urllib.request.urlopen(req, timeout=8) as r:
+                _ = r.read(256)
+        except urllib.error.HTTPError as exc:
+            if exc.code == 429:
+                retry_after = str(exc.headers.get('Retry-After') or '').strip()
+                detail = f' (retry after {retry_after}s)' if retry_after.isdigit() else ''
+                raise RuntimeError(
+                    'El relay público limitó las solicitudes (HTTP 429)'
+                    f'{detail}. Prueba por LAN o configura XUI_WORLD_RELAY_URL con un relay propio.'
+                ) from exc
+            raise RuntimeError(f'El relay devolvió HTTP {exc.code}.') from exc
+        except urllib.error.URLError as exc:
+            raise RuntimeError(f'No se pudo conectar con el relay: {exc.reason}') from exc
 
     def send_world_event(self, kind, **extra):
         payload = {
@@ -2755,7 +2767,9 @@ class InlineSocialEngine:
                     )
                 except Exception:
                     pass
-            time.sleep(12.0)
+            # Public ntfy topics are rate-limited; avoid flooding presence on a
+            # shared room (many clients share the same topic).
+            time.sleep(60.0)
 
     def _peer_key(self, host, port):
         return f'{host}:{int(port)}'
@@ -3223,9 +3237,18 @@ class SocialOverlay(QtWidgets.QDialog):
         self._active_conversation_key = ''
         self._pending_sends = set()
         self.setModal(True)
-        self.setWindowFlags(QtCore.Qt.Dialog | QtCore.Qt.FramelessWindowHint)
+        self.setWindowFlags(QtCore.Qt.Dialog | QtCore.Qt.FramelessWindowHint | QtCore.Qt.WindowStaysOnTopHint)
         self.setAttribute(QtCore.Qt.WA_TranslucentBackground, True)
+        screen = parent.screen() if parent is not None else QtWidgets.QApplication.primaryScreen()
+        if screen is None:
+            screen = QtWidgets.QApplication.primaryScreen()
+        if screen is not None:
+            self.setGeometry(screen.geometry())
+        else:
+            self.resize(1200, 760)
+        self.setWindowState(self.windowState() | QtCore.Qt.WindowFullScreen)
         self._build()
+        self.setWindowTitle('Community / Messages')
         self._load_friends()
         self._load_friend_requests()
         self._load_voice_inbox()
@@ -3256,9 +3279,10 @@ class SocialOverlay(QtWidgets.QDialog):
         self._vk_last_close = 0.0
         self._action_items = {}
         self.setStyleSheet('''
+            QDialog { background:rgba(5,8,12,0.48); }
             QFrame#social_panel {
-                background:#cbd0d5;
-                border:1px solid #70777e;
+                background:#cbd1d4;
+                border:1px solid #f0f3f4;
                 border-radius:0px;
             }
             QFrame#social_header {
@@ -3266,44 +3290,44 @@ class SocialOverlay(QtWidgets.QDialog):
                 border:none;
             }
             QFrame#social_col {
-                background:#e6e9ec;
-                border:1px solid #aeb4ba;
+                background:#dfe5e6;
+                border:1px solid #9ca7aa;
             }
-            QLabel#social_title { color:#f4f7fa; font-size:26px; font-weight:800; }
-            QLabel#social_hint { color:#5a626b; font-size:14px; font-weight:650; }
-            QFrame#social_header QLabel#social_hint { color:#d5dbe0; }
-            QLabel#social_col_title { color:#303840; font-size:18px; font-weight:800; }
+            QLabel#social_title { color:#f4f7f8; font-size:26px; font-weight:800; }
+            QLabel#social_hint { color:#596469; font-size:14px; font-weight:650; }
+            QFrame#social_header QLabel#social_hint { color:#e2e7e8; }
+            QLabel#social_col_title { color:#303a3d; font-size:18px; font-weight:800; }
             QListWidget {
-                background:#f1f3f5;
-                color:#252b31;
-                border:1px solid #c1c7cc;
-                font-size:17px;
+                background:#dfe5e6;
+                color:#263238;
+                border:1px solid #bac3c5;
+                font-size:15px;
                 font-weight:600;
                 outline:none;
             }
             QListWidget::item {
-                padding:8px 12px;
+                padding:7px 8px;
                 border:none;
-                border-bottom:1px solid #cbd0d5;
+                border-bottom:1px solid #b5bec0;
             }
             QListWidget::item:selected {
                 color:#ffffff;
-                background:#56b83c;
+                background:#078d13;
                 border:none;
             }
-            QListWidget:focus { border:2px solid #3d9533; }
+            QListWidget:focus { border:2px solid #08750f; }
             QPlainTextEdit {
-                background:#f5f6f7;
-                border:1px solid #c1c7cc;
-                color:#242a30;
-                font-size:15px;
+                background:#e3e7eb;
+                border:1px solid #bac3c5;
+                color:#252d35;
+                font-size:14px;
                 font-weight:500;
             }
             QLineEdit {
                 background:#ffffff;
                 border:1px solid #929aa2;
                 color:#22282e;
-                font-size:16px;
+                font-size:14px;
                 font-weight:600;
                 padding:7px;
             }
@@ -3311,15 +3335,15 @@ class SocialOverlay(QtWidgets.QDialog):
                 background:#d5dade;
                 color:#252b31;
                 border:1px solid #9ea5ac;
-                font-size:15px;
+                font-size:14px;
                 font-weight:700;
-                padding:7px 12px;
-                min-height:32px;
+                padding:6px 8px;
+                min-height:30px;
             }
             QPushButton:hover { background:#c0c7cd; }
             QPushButton:focus { border:2px solid #3d9533; }
             QPushButton:pressed { background:#aeb8bf; }
-            QPushButton#social_primary_action { background:#58b83c; color:#ffffff; border:1px solid #3a8f2b; }
+            QPushButton#social_primary_action { background:#078d13; color:#ffffff; border:1px solid #08750f; }
         ''')
         self._social_base_style = self.styleSheet()
         outer = QtWidgets.QVBoxLayout(self)
@@ -3442,19 +3466,19 @@ class SocialOverlay(QtWidgets.QDialog):
         right.addWidget(self.status)
 
         body.addWidget(left_wrap, 3)
-        body.addWidget(center_wrap, 2)
+        body.addWidget(center_wrap, 3)
         body.addWidget(right_wrap, 5)
         self.community_body = body
         root.addLayout(body, 1)
 
-        self._add_action_item('reply', 'Reply / Send Message')
-        self._add_action_item('friend_request', 'Send Friend Request')
-        self._add_action_item('friend_requests', 'Friend Requests')
+        self._add_action_item('reply', 'Reply / Message')
+        self._add_action_item('friend_request', 'Add Friend')
+        self._add_action_item('friend_requests', 'Requests')
         self._add_action_item('friends', 'Friends List')
-        self._add_action_item('party_hub', 'Party Hub')
-        self._add_action_item('voice_hub', 'Voice/Call Hub')
+        self._add_action_item('party_hub', 'Party')
+        self._add_action_item('voice_hub', 'Voice / Call')
         self._add_action_item('players_hub', 'Global Players')
-        self._add_action_item('add_peer', 'Add Peer ID (Advanced)')
+        self._add_action_item('add_peer', 'Add Peer ID')
         self._add_action_item('peer_ids', 'My Peer IDs')
         self._add_action_item('lan_status', 'LAN Status')
         self._add_action_item('world_toggle', 'World Chat: ON')
@@ -3937,8 +3961,9 @@ class SocialOverlay(QtWidgets.QDialog):
 
     def showEvent(self, e):
         super().showEvent(e)
-        parent = self.parentWidget()
-        _fit_dialog_to_screen(self, parent, width_ratio=0.93, height_ratio=0.88, min_width=680, min_height=460)
+        screen = self.screen() or QtWidgets.QApplication.primaryScreen()
+        if screen is not None and self.geometry() != screen.geometry():
+            self.setGeometry(screen.geometry())
         self._apply_responsive_style()
         QtCore.QTimer.singleShot(0, lambda: self._set_focus_zone(self._focus_zone))
 
@@ -3949,13 +3974,13 @@ class SocialOverlay(QtWidgets.QDialog):
         scale = max(0.72, min(1.0, float(self.width()) / 1280.0))
         px = lambda value, floor: max(floor, int(round(value * scale)))
         self.setStyleSheet(base_style + f'''
-            QLabel#social_title {{ font-size:{px(40, 28)}px; }}
-            QLabel#social_hint {{ font-size:{px(16, 12)}px; }}
-            QLabel#social_col_title {{ font-size:{px(20, 14)}px; }}
-            QListWidget {{ font-size:{px(21, 14)}px; }}
-            QPlainTextEdit {{ font-size:{px(16, 12)}px; }}
-            QLineEdit {{ font-size:{px(20, 14)}px; padding:{px(8, 5)}px; }}
-            QPushButton {{ font-size:{px(18, 13)}px; padding:{px(8, 5)}px {px(12, 7)}px; }}
+            QLabel#social_title {{ font-size:{px(36, 24)}px; }}
+            QLabel#social_hint {{ font-size:{px(15, 11)}px; }}
+            QLabel#social_col_title {{ font-size:{px(18, 13)}px; }}
+            QListWidget {{ font-size:{px(18, 12)}px; }}
+            QPlainTextEdit {{ font-size:{px(14, 11)}px; }}
+            QLineEdit {{ font-size:{px(17, 12)}px; padding:{px(7, 4)}px; }}
+            QPushButton {{ font-size:{px(15, 11)}px; padding:{px(7, 4)}px {px(9, 6)}px; }}
         ''')
 
     def resizeEvent(self, e):
@@ -4768,7 +4793,27 @@ class SocialOverlay(QtWidgets.QDialog):
                 self._append_system(f'Global friend request sent to {peer_name}')
                 return
             except Exception as exc:
-                self.status.setText(f'Friend request failed: {exc}')
+                relay_error = str(exc)
+                # A GLOBAL player may also have a LAN discovery endpoint. Try
+                # that direct route when the shared public relay is throttled.
+                candidates = self._send_candidates(peer)
+                sent = None
+                for host, port, _key in candidates:
+                    try:
+                        if self.engine.send_friend_request(host, port, f'Add {self.nickname} as friend'):
+                            sent = (host, int(port))
+                            break
+                    except Exception:
+                        continue
+                if sent:
+                    self.status.setText(f'Friend request sent to {peer_name} over LAN ({sent[0]}:{sent[1]})')
+                    self._append_system(f'Friend request sent to {peer_name} over LAN; public relay was rate-limited.')
+                    return
+                self.status.setText(f'Friend request failed: {relay_error}')
+                self._append_system(
+                    f'Could not send request to {peer_name}. The public relay may be rate-limited; '
+                    'both players must be on the same reachable LAN for direct fallback.'
+                )
                 return
         candidates = self._send_candidates(peer)
         err = None
