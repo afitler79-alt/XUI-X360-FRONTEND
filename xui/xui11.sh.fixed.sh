@@ -11306,6 +11306,10 @@ class Dashboard(QtWidgets.QMainWindow):
         self._mandatory_payload_cache = None
         self._mandatory_payload_checked_at = 0.0
         self._mandatory_payload_proc = None
+        self._mandatory_payload_watchdog = QtCore.QTimer(self)
+        self._mandatory_payload_watchdog.setSingleShot(True)
+        self._mandatory_payload_watchdog.setInterval(45000)
+        self._mandatory_payload_watchdog.timeout.connect(self._on_mandatory_payload_stalled)
         self._install_task_proc = None
         self._install_task_progress = None
         self._install_task_output = ''
@@ -12205,6 +12209,7 @@ class Dashboard(QtWidgets.QMainWindow):
         p.setProcessChannelMode(QtCore.QProcess.MergedChannels)
 
         def finished(_code, _status):
+            self._mandatory_payload_watchdog.stop()
             try:
                 out = bytes(p.readAllStandardOutput()).decode('utf-8', errors='ignore')
             except Exception:
@@ -12224,6 +12229,7 @@ class Dashboard(QtWidgets.QMainWindow):
                 QtCore.QTimer.singleShot(0, self._check_mandatory_update_gate)
 
         def errored(_err):
+            self._mandatory_payload_watchdog.stop()
             self._mandatory_payload_cache = {'checked': False, 'update_required': False}
             self._mandatory_payload_checked_at = time.monotonic()
             self._mandatory_payload_proc = None
@@ -12235,6 +12241,7 @@ class Dashboard(QtWidgets.QMainWindow):
         p.finished.connect(finished)
         p.errorOccurred.connect(errored)
         self._mandatory_payload_proc = p
+        self._mandatory_payload_watchdog.start()
         p.start()
         return True
 
@@ -12272,6 +12279,8 @@ class Dashboard(QtWidgets.QMainWindow):
         self._mandatory_update_in_progress = True
         self._mandatory_update_output = ''
         self._mandatory_update_stage = 'starting'
+        self._mandatory_update_watchdog.stop()
+        self._mandatory_update_watchdog.start()
         self._play_sfx('open')
 
         progress = UpdateProgressDialog(self)
@@ -12295,7 +12304,6 @@ class Dashboard(QtWidgets.QMainWindow):
         proc.finished.connect(self._on_mandatory_update_finished)
         proc.errorOccurred.connect(self._on_mandatory_update_error)
         self._mandatory_update_proc = proc
-        self._mandatory_update_watchdog.start()
         proc.start()
 
     def _close_mandatory_update_progress(self):
@@ -12363,13 +12371,25 @@ class Dashboard(QtWidgets.QMainWindow):
         proc = self._mandatory_update_proc
         if proc is None or proc.state() == QtCore.QProcess.NotRunning:
             return
+        self._mandatory_update_watchdog.stop()
         stage = str(self._mandatory_update_stage or 'unknown')
-        marker = f'ERROR: updater produced no output for 5 minutes (last stage: {stage}).'
+        marker = f'ERROR: updater stalled for 5 minutes (last stage: {stage}).'
         self._mandatory_update_output = (self._mandatory_update_output + '\n' + marker)[-22000:]
         dlg = self._mandatory_update_progress
         if dlg is not None:
             dlg.set_detail('La actualización no responde; se detendrá para mostrar el diagnóstico.')
         proc.kill()
+
+    def _on_mandatory_payload_stalled(self):
+        proc = self._mandatory_payload_proc
+        if proc is None or proc.state() == QtCore.QProcess.NotRunning:
+            return
+        self._mandatory_payload_watchdog.stop()
+        proc.kill()
+        self._mandatory_payload_proc = None
+        self._mandatory_payload_checked_at = time.monotonic()
+        self._mandatory_payload_cache = {'checked': False, 'update_required': False}
+        self._queue_mandatory_update_retry(3000)
 
     def _build_update_status_code(self, text='', exit_code=None, process_err=None):
         raw = str(text or '').strip()
@@ -24635,7 +24655,12 @@ require_sudo_ticket(){
   fi
   if command -v pkexec >/dev/null 2>&1; then
         echo "step=pkexec-auth"
-    if pkexec /bin/sh -c "true" >/dev/null 2>&1; then
+    if command -v timeout >/dev/null 2>&1; then
+      if timeout --signal=TERM --kill-after=5 60 pkexec /bin/sh -c "true" >/dev/null 2>&1; then
+        XUI_AUTH_MODE="pkexec"
+        return 0
+      fi
+    elif pkexec /bin/sh -c "true" >/dev/null 2>&1; then
       XUI_AUTH_MODE="pkexec"
       return 0
     fi
@@ -25032,7 +25057,7 @@ apply_update(){
         cd "$SRC"
         if command -v timeout >/dev/null 2>&1; then
           pkexec env AUTO_CONFIRM=1 XUI_SKIP_LAUNCH_PROMPT=1 XUI_NONINTERACTIVE=1 XUI_SYSTEMCTL_TIMEOUT_SEC="${XUI_SYSTEMCTL_TIMEOUT_SEC:-15}" \
-            timeout "${XUI_APPLY_INSTALLER_TIMEOUT_SEC:-900}" bash "$installer" --no-auto-install --skip-apt-wait
+            timeout "${XUI_APPLY_INSTALLER_TIMEOUT_SEC:-300}" bash "$installer" --no-auto-install --skip-apt-wait
         else
           pkexec env AUTO_CONFIRM=1 XUI_SKIP_LAUNCH_PROMPT=1 XUI_NONINTERACTIVE=1 XUI_SYSTEMCTL_TIMEOUT_SEC="${XUI_SYSTEMCTL_TIMEOUT_SEC:-15}" \
             bash "$installer" --no-auto-install --skip-apt-wait
@@ -25043,7 +25068,7 @@ apply_update(){
         cd "$SRC"
         if command -v timeout >/dev/null 2>&1; then
           AUTO_CONFIRM=1 XUI_SKIP_LAUNCH_PROMPT=1 XUI_NONINTERACTIVE=1 XUI_SYSTEMCTL_TIMEOUT_SEC="${XUI_SYSTEMCTL_TIMEOUT_SEC:-15}" \
-            timeout "${XUI_APPLY_INSTALLER_TIMEOUT_SEC:-900}" bash "$installer" --no-auto-install --skip-apt-wait
+            timeout "${XUI_APPLY_INSTALLER_TIMEOUT_SEC:-300}" bash "$installer" --no-auto-install --skip-apt-wait
         else
           AUTO_CONFIRM=1 XUI_SKIP_LAUNCH_PROMPT=1 XUI_NONINTERACTIVE=1 XUI_SYSTEMCTL_TIMEOUT_SEC="${XUI_SYSTEMCTL_TIMEOUT_SEC:-15}" \
             bash "$installer" --no-auto-install --skip-apt-wait
