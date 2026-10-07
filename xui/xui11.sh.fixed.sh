@@ -5691,32 +5691,42 @@ def tile_icon(action, text=''):
 class GreenTile(QtWidgets.QFrame):
     clicked = QtCore.pyqtSignal(str)
 
-    def __init__(self, action, text, size=(250, 140), parent=None, icon_scale=1.0, dense=False):
+    def __init__(self, action, text, size=(250, 140), parent=None, icon_scale=1.0, text_scale=1.0, dense=False):
         super().__init__(parent)
         self.action = action
         self.text = text
         self.base_size = (int(size[0]), int(size[1]))
         self.icon_scale = max(0.55, float(icon_scale))
+        self.text_scale = max(0.65, float(text_scale))
         self.dense = bool(dense)
         self._selected = None
         self._scale_key = None
         self._last_icon_px = None
+        self._last_label_px = None
         self.setObjectName('green_tile')
         self.setFocusPolicy(QtCore.Qt.StrongFocus)
         self.setCursor(QtGui.QCursor(QtCore.Qt.PointingHandCursor))
-        self.setAccessibleName(f'{action}: tile')
+        self.setAccessibleName(f'{text}: {action}')
         v = QtWidgets.QVBoxLayout(self)
         self._layout = v
         v.setContentsMargins(10, 8, 10, 8)
-        v.setSpacing(0)
+        top = QtWidgets.QHBoxLayout()
+        self._top_layout = top
+        top.setContentsMargins(0, 0, 0, 0)
         self.icon = QtWidgets.QLabel()
         self.icon.setObjectName('tile_icon')
         self.icon.setFixedSize(52, 52)
         self.icon.setAlignment(QtCore.Qt.AlignCenter)
         icon = tile_icon(action, text)
         self.icon.setPixmap(icon.pixmap(34, 34))
-        v.addWidget(self.icon, 0, QtCore.Qt.AlignCenter | QtCore.Qt.AlignVCenter)
+        top.addStretch(1)
+        top.addWidget(self.icon, 0, alignment=QtCore.Qt.AlignTop)
+        top.addStretch(1)
+        v.addLayout(top)
         v.addStretch(1)
+        self.lbl = QtWidgets.QLabel(text)
+        self.lbl.setStyleSheet('color:#f4fff3; font-size:17px; font-weight:700; font-family:"Segoe UI","Noto Sans",sans-serif;')
+        v.addWidget(self.lbl, alignment=QtCore.Qt.AlignLeft | QtCore.Qt.AlignBottom)
         self.apply_scale(1.0, False)
         self.set_selected(False)
 
@@ -5731,7 +5741,8 @@ class GreenTile(QtWidgets.QFrame):
         pad_y = max(4, int((5 if self.dense else 8) * s * compact_factor))
         icon_sz = max(22, int(52 * s * compact_factor * self.icon_scale))
         pix_sz = max(16, int(34 * s * compact_factor * self.icon_scale))
-        scale_key = (w, h, pad_x, pad_y, icon_sz, pix_sz)
+        font_px = max(10, int(17 * s * compact_factor * self.text_scale))
+        scale_key = (w, h, pad_x, pad_y, icon_sz, pix_sz, font_px)
         if scale_key == self._scale_key:
             return
         self._scale_key = scale_key
@@ -5752,6 +5763,12 @@ class GreenTile(QtWidgets.QFrame):
             self._last_icon_px = pix_sz
             icon = tile_icon(self.action, self.text)
             self.icon.setPixmap(icon.pixmap(pix_sz, pix_sz))
+        if self._last_label_px != font_px:
+            self._last_label_px = font_px
+            self.lbl.setStyleSheet(
+                f'color:#f4fff3; font-size:{font_px}px; font-weight:700; '
+                'font-family:"Segoe UI","Noto Sans",sans-serif;'
+            )
 
     def set_selected(self, on):
         on = bool(on)
@@ -9690,7 +9707,6 @@ class DashboardPage(QtWidgets.QWidget):
 
     def _build_tiles(self, defs, target, layout, alignment=QtCore.Qt.AlignLeft, tile_opts=None):
         opts = dict(tile_opts or {})
-        index = len(target)
         for action, text, size in defs:
             try:
                 w0, h0 = int(size[0]), int(size[1])
@@ -9707,17 +9723,12 @@ class DashboardPage(QtWidgets.QWidget):
                 text,
                 tile_size,
                 icon_scale=float(opts.get('icon_scale', 1.0)),
+                text_scale=float(opts.get('text_scale', 1.0)),
                 dense=bool(opts.get('dense', False)),
             )
             tile.clicked.connect(self.actionTriggered.emit)
             target.append(tile)
-            if isinstance(layout, QtWidgets.QGridLayout):
-                row = index // 2
-                column = index % 2
-                layout.addWidget(tile, row, column, alignment)
-                index += 1
-            else:
-                layout.addWidget(tile, 0, alignment)
+            layout.addWidget(tile, 0, alignment)
 
     def _build(self):
         wrap = QtWidgets.QVBoxLayout(self)
@@ -9737,19 +9748,14 @@ class DashboardPage(QtWidgets.QWidget):
         self.left_layout = left
         left.setContentsMargins(0, 0, 0, 0)
         left.setSpacing(7)
-        left_grid = QtWidgets.QGridLayout()
-        left_grid.setContentsMargins(0, 0, 0, 0)
-        left_grid.setSpacing(7)
-        left_grid.setColumnStretch(0, 1)
-        left_grid.setColumnStretch(1, 1)
+        self._add_column_header(left_col, left, 'PRIMARY ACCESS', 'primary')
         self._build_tiles(
             self.spec.get('left', []),
             self.left_tiles,
-            left_grid,
+            left,
             QtCore.Qt.AlignLeft,
-            tile_opts={'metro_left': True, 'icon_scale': 0.86},
+            tile_opts={'metro_left': True, 'icon_scale': 0.86, 'text_scale': 0.88},
         )
-        left.addLayout(left_grid, 1)
         left.addStretch(1)
 
         center_col = QtWidgets.QWidget()
@@ -9778,20 +9784,21 @@ class DashboardPage(QtWidgets.QWidget):
 
         center_bottom_defs = self.spec.get('center_bottom', [])
         if center_bottom_defs:
+            self._add_column_header(center_col, center, 'QUICK ACCESS', 'quick')
             center_tiles_wrap = QtWidgets.QWidget()
-            center_tiles_grid = QtWidgets.QGridLayout(center_tiles_wrap)
-            self.center_tiles_layout = center_tiles_grid
-            center_tiles_grid.setContentsMargins(0, 0, 0, 0)
-            center_tiles_grid.setSpacing(6)
-            center_tiles_grid.setColumnStretch(0, 1)
-            center_tiles_grid.setColumnStretch(1, 1)
+            center_tiles_row = QtWidgets.QHBoxLayout(center_tiles_wrap)
+            self.center_tiles_layout = center_tiles_row
+            center_tiles_row.setContentsMargins(0, 0, 0, 0)
+            center_tiles_row.setSpacing(6)
+            center_tiles_row.addStretch(1)
             self._build_tiles(
                 center_bottom_defs,
                 self.center_tiles,
-                center_tiles_grid,
+                center_tiles_row,
                 QtCore.Qt.AlignVCenter,
-                tile_opts={'dense': True, 'icon_scale': 0.72},
+                tile_opts={'dense': True, 'icon_scale': 0.72, 'text_scale': 0.84},
             )
+            center_tiles_row.addStretch(1)
             center.addWidget(center_tiles_wrap, 0, alignment=QtCore.Qt.AlignHCenter | QtCore.Qt.AlignTop)
         center.addStretch(1)
 
@@ -9802,19 +9809,14 @@ class DashboardPage(QtWidgets.QWidget):
         self.right_layout = right
         right.setContentsMargins(0, 0, 0, 0)
         right.setSpacing(6)
-        right_grid = QtWidgets.QGridLayout()
-        right_grid.setContentsMargins(0, 0, 0, 0)
-        right_grid.setSpacing(6)
-        right_grid.setColumnStretch(0, 1)
-        right_grid.setColumnStretch(1, 1)
+        self._add_column_header(right_col, right, 'MORE ACTIONS', 'more')
         self._build_tiles(
             self.spec.get('right', []),
             self.right_tiles,
-            right_grid,
+            right,
             QtCore.Qt.AlignLeft,
-            tile_opts={'dense': True, 'icon_scale': 0.62},
+            tile_opts={'dense': True, 'icon_scale': 0.62, 'text_scale': 0.78},
         )
-        right.addLayout(right_grid, 1)
         right.addStretch(1)
 
         body.addStretch(1)
@@ -9824,6 +9826,17 @@ class DashboardPage(QtWidgets.QWidget):
         body.addStretch(1)
         wrap.addLayout(body, 0)
         wrap.addStretch(1)
+
+    @staticmethod
+    def _add_column_header(parent, layout, label, kind):
+        header = QtWidgets.QLabel(label)
+        header.setObjectName(f'dashboard_tile_section_{kind}')
+        header.setAlignment(QtCore.Qt.AlignLeft | QtCore.Qt.AlignVCenter)
+        header.setStyleSheet(
+            'color:#dce6e7; font-size:12px; font-weight:800; letter-spacing:2px; '
+            'padding:0 6px 5px;'
+        )
+        layout.addWidget(header, 0, QtCore.Qt.AlignLeft)
 
     def _apply_scale_once(self, scale=1.0, compact=False):
         s = max(0.58, float(scale))
