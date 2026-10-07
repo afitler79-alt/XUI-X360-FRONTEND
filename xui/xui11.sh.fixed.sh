@@ -6081,6 +6081,199 @@ class GamesShowcasePanel(QtWidgets.QFrame):
         super().mousePressEvent(e)
 
 
+class StorageMenuDialog(QtWidgets.QDialog):
+    """Reusable full-screen menu with Storage-style navigation and nested items."""
+
+    def __init__(self, title, options, descriptions=None, parent=None, action_handler=None):
+        super().__init__(parent)
+        self._title = str(title or 'Menu')
+        self._descriptions = descriptions or {}
+        self._root = self._normalise_options(options)
+        self._history = []
+        self._selected_action = ''
+        self._action_handler = action_handler
+        self._page_history = []
+        self.setWindowTitle(self._title)
+        self.setWindowFlags(
+            QtCore.Qt.Dialog
+            | QtCore.Qt.FramelessWindowHint
+            | QtCore.Qt.WindowStaysOnTopHint
+        )
+        self.setAttribute(QtCore.Qt.WA_TranslucentBackground, True)
+        self.setModal(True)
+        screen = parent.screen() if parent is not None else QtWidgets.QApplication.primaryScreen()
+        if screen is not None:
+            self.setGeometry(screen.geometry())
+        else:
+            self.resize(1280, 720)
+        self.setWindowState(self.windowState() | QtCore.Qt.WindowFullScreen)
+        self._build()
+
+    @staticmethod
+    def _normalise_options(options):
+        result = []
+        for item in options or []:
+            if isinstance(item, dict):
+                label = str(item.get('label') or item.get('title') or 'Option').strip()
+                action = str(item.get('action') or label)
+                children = item.get('children') or item.get('items') or []
+                description = str(item.get('description') or item.get('desc') or '')
+                result.append({'label': label, 'action': action, 'children': children, 'description': description})
+            elif isinstance(item, (tuple, list)) and len(item) >= 2:
+                label, action = str(item[0]), str(item[1])
+                description = str(item[2]) if len(item) > 2 else ''
+                result.append({'label': label, 'action': action, 'children': [], 'description': description})
+            else:
+                label = str(item).strip()
+                result.append({'label': label, 'action': label, 'children': [], 'description': ''})
+        return result
+
+    def _build(self):
+        self.setObjectName('storage_menu_dialog')
+        self.setStyleSheet('''
+            QDialog#storage_menu_dialog { background:qlineargradient(x1:0,y1:0,x2:0,y2:1, stop:0 #727b80, stop:1 #a8afb2); }
+            QFrame#storage_menu_list_panel { background:#dfe5e6; border:1px solid #9ca7aa; }
+            QFrame#storage_menu_detail_panel { background:qlineargradient(x1:0,y1:0,x2:0,y2:1, stop:0 #969ea1, stop:1 #7d8588); border:1px solid #8c9699; }
+            QLabel#storage_menu_breadcrumb, QLabel#storage_menu_title, QLabel#storage_menu_detail_title, QLabel#storage_menu_detail_text, QLabel#storage_menu_hint { color:#f4f6f6; }
+            QLabel#storage_menu_breadcrumb { font-size:15px; font-weight:700; padding:8px 12px 0; }
+            QLabel#storage_menu_title { font-size:28px; font-weight:800; padding:6px 12px 12px; }
+            QLabel#storage_menu_detail_title { font-size:25px; font-weight:800; }
+            QLabel#storage_menu_detail_text { font-size:20px; }
+            QLabel#storage_menu_hint { font-size:14px; font-weight:700; padding:0 12px 8px; }
+            QListWidget#storage_menu_list { background:#dfe5e6; color:#263238; border:none; outline:none; font-size:22px; font-weight:600; }
+            QListWidget#storage_menu_list::item { min-height:50px; padding:6px 12px; border-bottom:1px solid #b5bec0; }
+            QListWidget#storage_menu_list::item:selected { background:#078d13; color:#f5fff5; border-bottom:1px solid #54b75a; }
+        ''')
+        root = QtWidgets.QVBoxLayout(self)
+        root.setContentsMargins(8, 8, 8, 8)
+        root.setSpacing(6)
+        self.breadcrumb = QtWidgets.QLabel('')
+        self.breadcrumb.setObjectName('storage_menu_breadcrumb')
+        root.addWidget(self.breadcrumb)
+        self.title_label = QtWidgets.QLabel(self._title)
+        self.title_label.setObjectName('storage_menu_title')
+        root.addWidget(self.title_label)
+        self.pages = QtWidgets.QStackedWidget()
+        root.addWidget(self.pages, 1)
+        self.hint = QtWidgets.QLabel('A/ENTER Select | B/ESC Back | LB/RB Page')
+        self.hint.setObjectName('storage_menu_hint')
+        root.addWidget(self.hint, 0, QtCore.Qt.AlignLeft)
+        self._build_page(self._root, self._title)
+
+    def _build_page(self, options, title):
+        page = QtWidgets.QWidget()
+        layout = QtWidgets.QHBoxLayout(page)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(0)
+        left = QtWidgets.QFrame()
+        left.setObjectName('storage_menu_list_panel')
+        left_layout = QtWidgets.QVBoxLayout(left)
+        left_layout.setContentsMargins(0, 0, 0, 0)
+        left_layout.setSpacing(0)
+        self.current_list = QtWidgets.QListWidget()
+        self.current_list.setObjectName('storage_menu_list')
+        for item in options:
+            widget_item = QtWidgets.QListWidgetItem(f'▣  {item["label"]}')
+            widget_item.setData(QtCore.Qt.UserRole, item)
+            self.current_list.addItem(widget_item)
+        self.current_list.currentRowChanged.connect(self._show_item)
+        self.current_list.itemActivated.connect(self._activate_item)
+        left_layout.addWidget(self.current_list, 1)
+        right = QtWidgets.QFrame()
+        right.setObjectName('storage_menu_detail_panel')
+        detail = QtWidgets.QVBoxLayout(right)
+        detail.setContentsMargins(30, 24, 30, 24)
+        detail.setSpacing(16)
+        self.detail_title = QtWidgets.QLabel(title)
+        self.detail_title.setObjectName('storage_menu_detail_title')
+        self.detail_text = QtWidgets.QLabel('Select an option to see its details.')
+        self.detail_text.setObjectName('storage_menu_detail_text')
+        self.detail_text.setWordWrap(True)
+        detail.addWidget(self.detail_title, 0, QtCore.Qt.AlignLeft | QtCore.Qt.AlignTop)
+        detail.addWidget(self.detail_text, 0, QtCore.Qt.AlignLeft | QtCore.Qt.AlignTop)
+        detail.addStretch(1)
+        layout.addWidget(left, 1)
+        layout.addWidget(right, 1)
+        page_index = self.pages.count()
+        self.pages.addWidget(page)
+        self._page_history.append((page_index, self.current_list))
+        self._show_item(self.current_list.currentRow())
+        return page
+
+    def _show_item(self, row):
+        item = self.current_list.item(row)
+        if item is None:
+            return
+        data = item.data(QtCore.Qt.UserRole)
+        self.detail_title.setText(str(data.get('label') or ''))
+        description = str(data.get('description') or self._descriptions.get(str(data.get('label')) or '') or '')
+        if not description and data.get('children'):
+            description = f'{len(data["children"])} submenu option(s). Select it to continue.'
+        if not description:
+            description = 'Select this option to continue.'
+        self.detail_text.setText(description)
+
+    def _activate_item(self, *_):
+        item = self.current_list.currentItem()
+        if item is None:
+            return
+        data = item.data(QtCore.Qt.UserRole)
+        if data.get('children'):
+            self._history.append((str(data['label']), self.current_list))
+            self._build_page(data['children'], str(data['label']))
+            self.pages.setCurrentIndex(self.pages.count() - 1)
+            self.breadcrumb.setText('  >  '.join(self._breadcrumb_labels()))
+            self.current_list.setFocus(QtCore.Qt.OtherFocusReason)
+            return
+        self._selected_action = str(data.get('action') or '')
+        self.accept()
+
+    def _breadcrumb_labels(self):
+        labels = [self._title]
+        labels.extend(str(label) for label, _ in self._history)
+        return labels
+
+    def selected_action(self):
+        return self._selected_action
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        screen = self.screen() or QtWidgets.QApplication.primaryScreen()
+        if screen is not None:
+            self.setGeometry(screen.geometry())
+        self.raise_()
+        self.activateWindow()
+        self.current_list.setFocus(QtCore.Qt.OtherFocusReason)
+
+    def keyPressEvent(self, event):
+        key = event.key()
+        if key in (QtCore.Qt.Key_Escape, QtCore.Qt.Key_Back, QtCore.Qt.Key_B):
+            if self._history:
+                _, parent_list = self._history.pop()
+                self.pages.removeWidget(self.pages.widget(self.pages.count() - 1))
+                self.pages.setCurrentIndex(self.pages.count() - 2)
+                self.current_list = parent_list
+                self.breadcrumb.setText('  >  '.join(self._breadcrumb_labels()))
+                self.current_list.setFocus(QtCore.Qt.OtherFocusReason)
+            else:
+                self.reject()
+            return
+        if key in (QtCore.Qt.Key_Return, QtCore.Qt.Key_Enter, QtCore.Qt.Key_A):
+            self._activate_item()
+            return
+        if key == QtCore.Qt.Key_Up:
+            self.current_list.setCurrentRow(max(0, self.current_list.currentRow() - 1))
+            return
+        if key == QtCore.Qt.Key_Down:
+            self.current_list.setCurrentRow(min(self.current_list.count() - 1, self.current_list.currentRow() + 1))
+            return
+        if key in (QtCore.Qt.Key_PageUp, QtCore.Qt.Key_PageDown):
+            step = -8 if key == QtCore.Qt.Key_PageUp else 8
+            self.current_list.setCurrentRow(max(0, min(self.current_list.count() - 1, self.current_list.currentRow() + step)))
+            return
+        super().keyPressEvent(event)
+
+
 class QuickMenu(QtWidgets.QDialog):
     def __init__(self, title, options, descriptions=None, parent=None):
         super().__init__(parent)
@@ -7487,40 +7680,38 @@ class XboxGuideMenu(QtWidgets.QDialog):
             self.resize(980, 520)
         self.setWindowState(self.windowState() | QtCore.Qt.WindowFullScreen)
         self.setStyleSheet('''
-            QDialog {
-                background:rgba(5, 9, 14, 0.66);
-            }
+            QDialog { background:rgba(13, 19, 22, 0.78); }
             QFrame#xguide_panel {
-                background:#252c33;
-                border:2px solid #aeb8c0;
-                border-radius:0px;
+                background:qlineargradient(x1:0,y1:0,x2:0,y2:1, stop:0 #727b80, stop:1 #a8afb2);
+                border:2px solid #dfe5e6;
+                border-radius:3px;
             }
             QLabel#xguide_title {
-                color:#f5f7f9;
+                color:#f4f7f7;
                 font-size:26px;
                 font-weight:800;
                 font-family:"Segoe UI","Noto Sans",sans-serif;
             }
             QLabel#xguide_meta {
-                color:#f0f4f7;
+                color:#eef3f3;
                 font-size:15px;
                 font-weight:700;
                 font-family:"Segoe UI","Noto Sans",sans-serif;
             }
             QFrame#xguide_page_host {
-                background:#e8ebee;
-                border:1px solid #89939c;
+                background:#dfe5e6;
+                border:1px solid #9ca7aa;
             }
             QLabel#xguide_section_title {
-                color:#293541;
+                color:#f4f7f7;
                 font-size:13px;
                 font-weight:800;
                 padding:4px 12px;
                 font-family:"Segoe UI","Noto Sans",sans-serif;
             }
             QListWidget#xguide_list {
-                background:#e8ebee;
-                color:#222930;
+                background:#dfe5e6;
+                color:#263238;
                 border:none;
                 font-size:17px;
                 outline:none;
@@ -7528,10 +7719,16 @@ class XboxGuideMenu(QtWidgets.QDialog):
             }
             QListWidget#xguide_list::item {
                 border:none;
-                padding:0px;
+                padding:7px 12px;
+                min-height:43px;
+            }
+            QListWidget#xguide_list::item:selected {
+                background:#078d13;
+                color:#f5fff5;
+                border-bottom:1px solid #54b75a;
             }
             QLabel#xguide_hint {
-                color:#f0f4f7;
+                color:#eef3f3;
                 font-size:14px;
                 font-weight:800;
                 font-family:"Segoe UI","Noto Sans",sans-serif;
@@ -7628,16 +7825,16 @@ class XboxGuideMenu(QtWidgets.QDialog):
         media_items = ['Video Marketplace', 'YouTube', 'Netflix', 'Twitch', 'Music Marketplace', 'System Music']
         if self.mode == 'app':
             return [
-                ('Games & Apps', ['Xbox Home', 'Leave Game', 'Manage Storage', 'Open Tray']),
-                ('Player', ['Xbox Home', 'Friends', 'Party', 'Messages', 'Minimize', 'Chat', '']),
+                ('Games & Apps', ['Xbox Home', 'Leave Game', 'Manage Storage', 'Open Tray', 'Close Game']),
+                ('Player', ['Friends', 'Party', 'Messages', 'Chat', 'Beacons & Activity', 'Minimize']),
                 ('Media', media_items),
-                ('Settings', ['System Settings', 'Canjear codigo', 'Sign Out']),
+                ('Settings', ['System Settings', 'Network Setup', 'Account Security', 'Canjear codigo', 'Sign Out']),
             ]
         return [
             ('Games & Apps', ['Mis juegos', 'Reciente', 'Descargas activas', 'Cerrar app actual']),
-            ('Player', ['Xbox Home', 'Friends', 'Party', 'Messages', 'Minimize', 'Chat', '']),
+            ('Player', ['Xbox Home', 'Friends', 'Party', 'Messages', 'Chat', 'Beacons & Activity', 'Minimize']),
             ('Media', media_items),
-            ('Settings', ['Quick Control Center', 'System Monitor', 'Network Test', 'Manage Favorites', 'Configuracion', 'Cerrar sesion']),
+            ('Settings', ['Quick Control Center', 'System Monitor', 'Network Setup', 'Manage Favorites', 'Configuracion', 'Cerrar sesion']),
         ]
 
     def _row_badge(self, label):
@@ -12897,21 +13094,111 @@ exit 1
         ok = d.exec_() == QtWidgets.QDialog.Accepted
         return d.textValue(), ok
 
+    def _menu_options(self, title, options):
+        """Build a nested Storage-menu tree for legacy dashboard menus."""
+        sections = {
+            'Utilities': [
+                {'label': 'System', 'description': 'System status, updates and profile controls.', 'children': [
+                    'System Info', 'System Monitor', 'Quick Control Center', 'Update Check', 'System Update',
+                    'Theme Toggle', 'Power Profile', 'Battery Saver', 'Battery Info', 'Diagnostics',
+                ]},
+                {'label': 'Network', 'description': 'Network, Wi-Fi and connectivity tools.', 'children': [
+                    'Network Setup', 'Network Test', 'WiFi Toggle', 'Bluetooth Toggle', 'LAN Status',
+                    'P2P Internet Help', 'HTTP Server', 'Ping Test',
+                ]},
+                {'label': 'Controller', 'description': 'Gamepad diagnostics and configuration.', 'children': [
+                    'Gamepad Test', 'Controller Probe', 'Controller Mappings', 'Controller Profile', 'Controller L4T Fix',
+                ]},
+                {'label': 'Applications', 'description': 'Launchers, media and development tools.', 'children': [
+                    'Web Browser', 'Web Control', 'Terminal', 'Process Monitor', 'Logs Viewer', 'File Manager',
+                    'Gallery', 'Screenshot', 'Calculator', 'Virtual Keyboard', 'Open Notes', 'App Launcher',
+                    'Scan Media Games', 'Install Wine Runtime', 'RetroArch', 'Torrent', 'Kodi', 'Screen Recorder',
+                    'Clipboard Tool', 'Emoji Picker', 'Cron Manager', 'Backup Data', 'Restore Last Backup',
+                    'Plugin Manager', 'JSON Browser', 'Archive Manager', 'Hash Tool', 'Docker Status', 'VM Status',
+                ]},
+                {'label': 'Games', 'description': 'Games, integrations and local launchers.', 'children': [
+                    'My Games', 'Games Integrations', 'Steam', 'Install Steam', 'RetroArch', 'Install RetroArch',
+                    'Lutris', 'Install Lutris', 'Heroic', 'Install Heroic', 'FNAE', 'Gem Match', 'Compat X86',
+                    'Close Active App',
+                ]},
+                {'label': 'Security', 'description': 'Profile and account management.', 'children': [
+                    'Account Security', 'Gamer Card', 'Sign In', 'Family', 'Sign Out',
+                ]},
+            ],
+            'Games Integrations': [
+                {'label': 'Platforms', 'description': 'Check installed and available game platforms.', 'children': [
+                    'Platforms Status', 'Compatibility Status', 'Install Box64', 'Install Steam', 'Install RetroArch',
+                    'Install Lutris', 'Install Heroic', 'Steam', 'RetroArch', 'Lutris', 'Heroic', 'Compat X86',
+                ]},
+                {'label': 'Games', 'description': 'Launch local games and compatible emulators.', 'children': [
+                    'FNAE', 'Gem Match', 'My Games', 'Launch Xbox 360 Game Dump', 'Xbox 360 DVD Info',
+                ]},
+            ],
+            'Developer Tools': [
+                {'label': 'Diagnostics', 'description': 'Inspect runtime and service health.', 'children': [
+                    'Terminal', 'Process Monitor', 'Logs Viewer', 'JSON Browser', 'Hash Tool', 'Docker Status',
+                    'VM Status', 'Network Info', 'Disk Usage', 'Diagnostics', 'Gamepad Test', 'Controller Probe',
+                    'Controller Mappings', 'Controller L4T Fix', 'Controller Profile',
+                ]},
+                {'label': 'Services', 'description': 'Manage XUI and web services.', 'children': [
+                    'Service Manager', 'Service Status', 'Web Start', 'Web Stop', 'Web Status', 'Dashboard Service Status',
+                ]},
+            ],
+            'Service Manager': [
+                {'label': 'Services', 'description': 'Start and inspect XUI services.', 'children': [
+                    'Service Status', 'Web Start', 'Web Stop', 'Web Status', 'Dashboard Service Status',
+                ]},
+            ],
+            'Controller Center': [
+                {'label': 'Controller', 'description': 'Test, inspect and configure controllers.', 'children': [
+                    'Gamepad Test', 'Controller Probe', 'Controller Mappings', 'Controller Profile', 'Controller L4T Fix',
+                ]},
+            ],
+            'Network Setup': [
+                {'label': 'Network', 'description': 'Review and configure the current connection.', 'children': [
+                    'Network Info', 'WiFi Toggle', 'Bluetooth Toggle', 'Ping Test', 'LAN Status', 'P2P Internet Help',
+                ]},
+                {'label': 'Social', 'description': 'Social and local communication tools.', 'children': [
+                    'LAN Chat', 'Party', 'Friends', 'Messages', 'Beacons', 'Avatar Store',
+                ]},
+            ],
+            'Account Security': [
+                {'label': 'Profile', 'description': 'Manage local profile and account state.', 'children': [
+                    'Gamer Card', 'Sign In', 'Family', 'Sign Out',
+                ]},
+            ],
+        }
+        if title in sections:
+            return [
+                {'label': str(item['label']), 'action': str(item['label']), 'description': str(item.get('description', '')),
+                 'children': [
+                    {'label': str(child), 'action': str(child), 'description': '', 'children': []}
+                    for child in item['children']
+                 ]}
+                for item in sections[title]
+            ]
+        return [
+            {'label': str(item), 'action': str(item), 'description': '', 'children': []}
+            for item in options
+        ]
+
     def _menu(self, title, options):
         self._play_sfx('open')
         descriptions = self._menu_descriptions(title, options)
-        d = QuickMenu(title, options, descriptions, self)
+        menu_options = self._menu_options(title, options)
+        d = StorageMenuDialog(title, menu_options, descriptions, self)
         if d.exec_() == QtWidgets.QDialog.Accepted:
-            s = d.selected()
-            if s:
-                self.handle_action(s)
+            action = d.selected_action()
+            if action:
+                self.handle_action(action)
         else:
             self._play_sfx('back')
 
     def _choose_from_menu(self, title, options, descriptions=None):
-        d = QuickMenu(title, options, descriptions or {}, self)
+        menu_options = self._menu_options(title, options)
+        d = StorageMenuDialog(title, menu_options, descriptions or {}, self)
         if d.exec_() == QtWidgets.QDialog.Accepted:
-            return d.selected()
+            return d.selected_action()
         return None
 
     def _xbox_guide_recent_text(self):
@@ -13023,6 +13310,15 @@ exit 1
             return
         if name == 'Beacons & Activity':
             self._menu('Beacons & Activity', ['Beacons', 'Activity Feed'])
+            return
+        if name == 'Network Setup':
+            self._menu('Network Setup', ['Network Info', 'WiFi Toggle', 'Bluetooth Toggle', 'Ping Test', 'LAN Status', 'P2P Internet Help'])
+            return
+        if name == 'Account Security':
+            self._menu('Account Security', ['Gamer Card', 'Sign In', 'Family'])
+            return
+        if name == 'System Settings':
+            self._open_storage_console('Console Settings')
             return
         if name == 'Bing':
             if 'bing' in self.tabs:
@@ -26467,64 +26763,43 @@ class Guide(QtWidgets.QDialog):
             self.resize(1060, 560)
         self.setWindowState(self.windowState() | QtCore.Qt.WindowFullScreen)
         self.setStyleSheet('''
-            QDialog {
-                background:rgba(10, 16, 24, 0.56);
-            }
+            QDialog { background:rgba(13, 19, 22, 0.78); }
             QFrame#xguide_panel {
-                background:qlineargradient(x1:0,y1:0,x2:1,y2:1, stop:0 #38414d, stop:1 #222a35);
-                border:1px solid rgba(226,238,248,0.30);
-                border-radius:2px;
+                background:qlineargradient(x1:0,y1:0,x2:0,y2:1, stop:0 #727b80, stop:1 #a8afb2);
+                border:2px solid #dfe5e6;
+                border-radius:3px;
             }
-            QLabel#xguide_title {
-                color:#f2f7fb;
-                font-size:46px;
-                font-weight:800;
-            }
-            QLabel#xguide_meta {
-                color:rgba(233,243,251,0.92);
-                font-size:34px;
-                font-weight:600;
-            }
+            QLabel#xguide_title { color:#f4f7f7; font-size:42px; font-weight:800; }
+            QLabel#xguide_meta { color:#eef3f3; font-size:30px; font-weight:600; }
             QListWidget#xguide_list {
-                background:#d8dce1;
-                color:#1b2b42;
-                border:1px solid rgba(0,0,0,0.26);
-                font-size:52px;
+                background:#dfe5e6;
+                color:#263238;
+                border:1px solid #9ca7aa;
+                font-size:31px;
                 outline:none;
             }
-            QListWidget#xguide_list::item {
-                padding:8px 16px;
-                border:1px solid transparent;
-            }
+            QListWidget#xguide_list::item { padding:8px 16px; min-height:54px; border-bottom:1px solid #b5bec0; }
             QListWidget#xguide_list::item:selected {
-                color:#eefeed;
-                background:qlineargradient(x1:0,y1:0,x2:1,y2:0, stop:0 #59b53f, stop:1 #429b33);
-                border:1px solid rgba(255,255,255,0.25);
+                background:#078d13;
+                color:#f5fff5;
+                border-bottom:1px solid #54b75a;
             }
-            QFrame#xguide_actions {
-                background:rgba(47,58,72,0.88);
-                border:1px solid rgba(206,220,236,0.24);
-            }
+            QFrame#xguide_actions { background:#7d8588; border:1px solid #a8afb2; }
             QPushButton#xguide_action_btn {
                 text-align:left;
-                color:#f3f8fc;
-                background:#222f41;
-                border:1px solid rgba(202,218,236,0.28);
+                color:#f4f7f7;
+                background:#5f696d;
+                border:1px solid #dfe5e6;
                 padding:8px 12px;
-                font-size:34px;
+                font-size:27px;
                 font-weight:800;
-                min-height:62px;
+                min-height:54px;
             }
-            QPushButton#xguide_action_btn:hover,
-            QPushButton#xguide_action_btn:focus {
-                background:#2f4260;
-                border:1px solid rgba(228,239,252,0.48);
+            QPushButton#xguide_action_btn:hover, QPushButton#xguide_action_btn:focus {
+                background:#078d13;
+                border:1px solid #54b75a;
             }
-            QLabel#xguide_hint {
-                color:#eaf1f7;
-                font-size:29px;
-                font-weight:700;
-            }
+            QLabel#xguide_hint { color:#eef3f3; font-size:26px; font-weight:700; }
         ''')
         outer = QtWidgets.QVBoxLayout(self)
         outer.setContentsMargins(18, 18, 18, 18)
@@ -26556,10 +26831,14 @@ class Guide(QtWidgets.QDialog):
             'Reciente',
             'Mensajes recientes',
             'Social global',
-            'Beacons',
+            'Beacons & Activity',
             'Mis juegos',
             'Descargas activas',
             'Canjear codigo',
+            'Manage Storage',
+            'System Settings',
+            'Network Setup',
+            'Account Security',
         ])
         self.listw.setCurrentRow(0)
         self.listw.itemActivated.connect(self._accept_current)
@@ -26572,7 +26851,7 @@ class Guide(QtWidgets.QDialog):
         actions_l = QtWidgets.QVBoxLayout(actions)
         actions_l.setContentsMargins(8, 8, 8, 8)
         actions_l.setSpacing(6)
-        for txt in ('Configuracion', 'Inicio de Xbox', 'Cerrar app actual', 'Cerrar sesion'):
+        for txt in ('Inicio de Xbox', 'Manage Storage', 'System Settings', 'Close Game', 'Sign Out'):
             b = QtWidgets.QPushButton(txt)
             b.setObjectName('xguide_action_btn')
             b.clicked.connect(lambda _=False, action=txt: self._accept_action(action))
