@@ -5366,7 +5366,22 @@ class SocialOverlay(QtWidgets.QDialog):
                 if state == 'connected':
                     self.status.setText(f'Connected to public room #{room}; messages are visible to relay subscribers.')
                 else:
-                    self.status.setText(f"Relay reconnecting ({room}): {detail[0] if detail else 'connection lost'}")
+                    error_text = str(detail[0] if detail else 'connection lost')
+                    error_lower = error_text.lower()
+                    dns_failure = any(marker in error_lower for marker in (
+                        'temporary failure in name resolution',
+                        'name or service not known',
+                        'nodename nor servname provided',
+                        'getaddrinfo failed',
+                        'errno -3',
+                    ))
+                    if dns_failure:
+                        relay_host = urllib.parse.urlparse(self.engine.world_relay).hostname or 'servidor del chat'
+                        self.status.setText(
+                            f'Chat global sin DNS: no se puede resolver {relay_host}. Reintentando…'
+                        )
+                    else:
+                        self.status.setText(f'Chat global reconectando ({room}): {error_text}')
             elif kind == 'world_room':
                 _kind, room = evt
                 self._refresh_world_peer()
@@ -8102,7 +8117,55 @@ class WebKioskWindow(QtWidgets.QMainWindow):
         self.setStyleSheet('background:#000;')
         self.view = QtWebEngineWidgets.QWebEngineView(self)
         self._configure_web_runtime()
-        self.setCentralWidget(self.view)
+        self._browser_stack = QtWidgets.QStackedWidget(self)
+        self._browser_stack.addWidget(self.view)
+        self._browser_error_page = QtWidgets.QWidget(self._browser_stack)
+        error_layout = QtWidgets.QVBoxLayout(self._browser_error_page)
+        error_layout.setContentsMargins(32, 24, 32, 24)
+        error_layout.addStretch(1)
+        error_card = QtWidgets.QFrame()
+        error_card.setStyleSheet(
+            'QFrame{background:#202830;border:1px solid #53616d;border-radius:12px;}'
+            'QLabel{color:#f2f5f7;} QPushButton{background:#318b48;color:white;'
+            'border:0;border-radius:6px;padding:10px 18px;font-weight:700;}'
+            'QPushButton:focus{background:#43ae5e;}'
+        )
+        error_card.setMaximumWidth(760)
+        card_layout = QtWidgets.QVBoxLayout(error_card)
+        card_layout.setContentsMargins(28, 24, 28, 24)
+        error_title = QtWidgets.QLabel('No se pudo cargar la página')
+        error_title.setStyleSheet('font-size:28px;font-weight:800;border:0;')
+        card_layout.addWidget(error_title)
+        error_message = QtWidgets.QLabel(
+            'Comprueba que Debian tenga conexión a Internet y pueda resolver DNS. '
+            'Si continúa en blanco, puede faltar una biblioteca gráfica de QtWebEngine.'
+        )
+        error_message.setWordWrap(True)
+        error_message.setStyleSheet('font-size:17px;border:0;')
+        card_layout.addWidget(error_message)
+        self._browser_error_url = QtWidgets.QLabel()
+        self._browser_error_url.setWordWrap(True)
+        self._browser_error_url.setStyleSheet('color:#b8c4ce;font-size:13px;border:0;')
+        card_layout.addWidget(self._browser_error_url)
+        error_buttons = QtWidgets.QHBoxLayout()
+        self._browser_retry_button = QtWidgets.QPushButton('Reintentar')
+        self._browser_retry_button.clicked.connect(self._retry_browser_load)
+        self._browser_external_button = QtWidgets.QPushButton('Abrir navegador externo')
+        self._browser_external_button.clicked.connect(self._open_external_browser)
+        error_buttons.addWidget(self._browser_retry_button)
+        error_buttons.addWidget(self._browser_external_button)
+        error_buttons.addStretch(1)
+        card_layout.addLayout(error_buttons)
+        error_layout.addWidget(error_card, 0, QtCore.Qt.AlignHCenter)
+        error_layout.addStretch(1)
+        self._browser_stack.addWidget(self._browser_error_page)
+        self.setCentralWidget(self._browser_stack)
+        self.view.loadStarted.connect(lambda: self._browser_stack.setCurrentWidget(self.view))
+        self.view.loadFinished.connect(self._on_browser_load_finished)
+        try:
+            self.view.page().renderProcessTerminated.connect(self._on_browser_renderer_terminated)
+        except Exception:
+            pass
         self.view.load(QtCore.QUrl(url))
         self.keyboard_button = QtWidgets.QPushButton('KB', self)
         self.keyboard_button.setToolTip('On-screen keyboard (F2 / Ctrl+K / controller X)')
@@ -8136,6 +8199,30 @@ class WebKioskWindow(QtWidgets.QMainWindow):
             self._guide_keys.add(key_super_r)
         self._guide_shortcuts = []
         self._setup_gamepad()
+
+    def _on_browser_load_finished(self, ok):
+        if ok:
+            self._browser_stack.setCurrentWidget(self.view)
+            self.setWindowTitle(self.view.title() or self.view.url().toString())
+            return
+        self._browser_error_url.setText(self.view.url().toString())
+        self._browser_stack.setCurrentWidget(self._browser_error_page)
+
+    def _on_browser_renderer_terminated(self, *details):
+        detail = ', '.join(str(item) for item in details)
+        self._browser_error_url.setText(
+            'El proceso Chromium de QtWebEngine se cerró' + (f' ({detail})' if detail else '')
+        )
+        self._browser_stack.setCurrentWidget(self._browser_error_page)
+
+    def _retry_browser_load(self):
+        self._browser_stack.setCurrentWidget(self.view)
+        self.view.reload()
+
+    def _open_external_browser(self):
+        url = self.view.url()
+        if url.isValid():
+            QtGui.QDesktopServices.openUrl(url)
 
     def _configure_web_runtime(self):
         if QtWebEngineWidgets is None or self.view is None:
@@ -11720,9 +11807,8 @@ exit 1
         fail_txt = str(self._install_task_fail_msg or f'{self._install_task_label} install failed.')
         if 'Xbox 360 Homebrew catalog' in self._install_task_label and 'GitHub devolvió 404' in tail:
             fail_txt = (
-                'GitHub no permite leer el repositorio/TXT. El repo parece privado; usa un token fine-grained '
-                'con Contents: Read y acceso a XUI_360GAMES_REP. El token se guarda al pulsar '
-                'Sync 360 Homebrew.\n\n' + tail
+                'No se encontró el catálogo público. Comprueba que el repositorio sea público y que '
+                'el propietario, la rama y la ruta del TXT sean correctos.\n\n' + tail
             )
         if tail:
             if tail not in fail_txt:
@@ -17033,48 +17119,7 @@ def _catalog_url(url):
 
 
 def _github_headers(url):
-    import os
-    parsed = urllib.parse.urlparse(str(url or ''))
-    headers = {'User-Agent': 'XUI-Homebrew-Store/1.0'}
-    if parsed.hostname not in ('github.com', 'raw.githubusercontent.com'):
-        return headers
-    token = (
-        os.environ.get('XUI_360_GITHUB_TOKEN')
-        or os.environ.get('GH_TOKEN')
-        or os.environ.get('GITHUB_TOKEN')
-    )
-    if not token:
-        try:
-            token = XBOX360_GITHUB_TOKEN_FILE.read_text(encoding='utf-8').strip()
-        except Exception:
-            token = ''
-    if not token and shutil.which('gh'):
-        try:
-            result = subprocess.run(
-                ['gh', 'auth', 'token'], capture_output=True, text=True,
-                timeout=3, check=True,
-            )
-            token = result.stdout.strip()
-        except Exception:
-            token = ''
-    if token:
-        headers['Authorization'] = 'Bearer ' + token
-        headers['Accept'] = 'application/vnd.github.raw+json'
-    return headers
-
-
-def _github_api_url(url):
-    parsed = urllib.parse.urlparse(str(url or ''))
-    if parsed.hostname != 'raw.githubusercontent.com':
-        return str(url or '')
-    parts = parsed.path.lstrip('/').split('/', 3)
-    if len(parts) < 4:
-        return str(url or '')
-    owner, repo, branch, path = parts
-    return 'https://api.github.com/repos/{}/{}/contents/{}?{}'.format(
-        urllib.parse.quote(owner, safe=''), urllib.parse.quote(repo, safe=''),
-        urllib.parse.quote(path, safe='/'), urllib.parse.urlencode({'ref': branch}),
-    )
+    return {'User-Agent': 'XUI-Homebrew-Store/1.0'}
 
 
 def _drive_file_id(url):
@@ -17199,6 +17244,11 @@ def _load_xbox360_items():
 
 
 def _sync_xbox360_catalog():
+    # Remove credentials saved by older builds; public catalog reads never need auth.
+    try:
+        XBOX360_GITHUB_TOKEN_FILE.unlink(missing_ok=True)
+    except Exception:
+        pass
     import os
     configured_url = os.environ.get('XUI_360_REPO_URL', '').strip()
     if not configured_url:
@@ -17209,24 +17259,20 @@ def _sync_xbox360_catalog():
     url = _catalog_url(configured_url or XBOX360_REPO_URL)
     if not url:
         raise ValueError('La URL del catálogo debe usar HTTP o HTTPS.')
-    headers = _github_headers(url)
-    request_url = _github_api_url(url) if 'Authorization' in headers else url
-    if request_url != url:
-        headers['Accept'] = 'application/vnd.github.raw+json'
-    request = urllib.request.Request(request_url, headers=headers)
+    request = urllib.request.Request(url, headers=_github_headers(url))
     try:
         with urllib.request.urlopen(request, timeout=45) as response:
             payload = response.read(8 * 1024 * 1024 + 1)
     except urllib.error.HTTPError as exc:
         if exc.code == 404:
             raise ValueError(
-                'GitHub devolvió 404. El repositorio o el TXT es privado: introduce un token GitHub '
-                'con permiso de solo lectura al contenido del repo, o comprueba propietario/rama/ruta.'
+                'GitHub devolvió 404 al leer el catálogo público. Comprueba el propietario, la rama y '
+                'la ruta del TXT, y confirma que el repositorio siga siendo público.'
             ) from None
         if exc.code in (401, 403):
             raise ValueError(
-                f'GitHub rechazó el acceso (HTTP {exc.code}). Revisa que el token sea válido y tenga '
-                'permiso Contents: read para XUI_360GAMES_REP.'
+                f'GitHub rechazó la lectura pública (HTTP {exc.code}). Confirma que el repositorio sea '
+                'público y que GitHub no esté limitando temporalmente las solicitudes.'
             ) from None
         raise ValueError(f'GitHub no pudo entregar el catálogo (HTTP {exc.code}).') from None
     if len(payload) > 8 * 1024 * 1024:
@@ -18433,7 +18479,6 @@ class StoreWindow(QtWidgets.QMainWindow):
         refresh_btn = QtWidgets.QPushButton('Refresh')
         sync_btn = QtWidgets.QPushButton('Sync Sources')
         self.sync_360_btn = QtWidgets.QPushButton('Sync 360 Homebrew')
-        github_token_btn = QtWidgets.QPushButton('GitHub Access')
         close_btn = QtWidgets.QPushButton('Close')
         self.buy_btn.clicked.connect(self.buy_selected)
         self.install_btn.clicked.connect(self.install_selected)
@@ -18442,7 +18487,6 @@ class StoreWindow(QtWidgets.QMainWindow):
         refresh_btn.clicked.connect(self.reload)
         sync_btn.clicked.connect(self.sync_sources)
         self.sync_360_btn.clicked.connect(self.sync_xbox360_catalog)
-        github_token_btn.clicked.connect(self.configure_xbox360_github_token)
         close_btn.clicked.connect(self.close)
         actions.addWidget(self.buy_btn)
         actions.addWidget(self.install_btn)
@@ -18451,7 +18495,6 @@ class StoreWindow(QtWidgets.QMainWindow):
         actions.addWidget(refresh_btn)
         actions.addWidget(sync_btn)
         actions.addWidget(self.sync_360_btn)
-        actions.addWidget(github_token_btn)
         actions.addStretch(1)
         actions.addWidget(close_btn)
 
@@ -18640,58 +18683,14 @@ class StoreWindow(QtWidgets.QMainWindow):
             pass
 
     def sync_xbox360_catalog(self):
-        if not _github_headers(XBOX360_REPO_URL).get('Authorization'):
-            token, accepted = QtWidgets.QInputDialog.getText(
-                self,
-                'Acceso al catálogo privado de GitHub',
-                'El repositorio XUI_360GAMES_REP es privado. Pega un token fine-grained con Contents: Read.\n'
-                'Se guardará localmente en ~/.xui/data con permisos solo para tu usuario. Déjalo vacío '
-                'para intentar sincronizar sin token.',
-                QtWidgets.QLineEdit.Password,
-            )
-            if not accepted:
-                self.info_lbl.setText('Sincronización cancelada.')
-                return
-            token = str(token or '').strip()
-            if token:
-                try:
-                    XBOX360_GITHUB_TOKEN_FILE.parent.mkdir(parents=True, exist_ok=True)
-                    XBOX360_GITHUB_TOKEN_FILE.write_text(token + '\n', encoding='utf-8')
-                    XBOX360_GITHUB_TOKEN_FILE.chmod(0o600)
-                except Exception as exc:
-                    self._menu_notice('GitHub token', f'No se pudo guardar el token con permisos privados: {exc}')
-                    return
         command = ' '.join(shlex.quote(part) for part in (
             sys.executable, str(Path(__file__).resolve()), '--sync-xbox360'
         ))
         self._run_install_task(
             'Xbox 360 Homebrew catalog', command,
             success_msg='Catálogo de homebrew Xbox 360 actualizado.',
-            fail_msg='No se pudo sincronizar el catálogo Xbox 360. Comprueba el enlace/repositorio.',
+            fail_msg='No se pudo sincronizar el catálogo público Xbox 360. Comprueba la conexión, el enlace y que el repositorio sea público.',
         )
-
-    def configure_xbox360_github_token(self):
-        token, accepted = QtWidgets.QInputDialog.getText(
-            self,
-            'GitHub access token',
-            'Fine-grained token for XUI_360GAMES_REP with Contents: Read.\n'
-            'The token is stored locally with owner-only permissions. Leave blank to remove the saved token.',
-            QtWidgets.QLineEdit.Password,
-        )
-        if not accepted:
-            return
-        token = str(token or '').strip()
-        try:
-            if token:
-                XBOX360_GITHUB_TOKEN_FILE.parent.mkdir(parents=True, exist_ok=True)
-                XBOX360_GITHUB_TOKEN_FILE.write_text(token + '\n', encoding='utf-8')
-                XBOX360_GITHUB_TOKEN_FILE.chmod(0o600)
-                self.info_lbl.setText('GitHub token stored locally. Press Sync 360 Homebrew.')
-            else:
-                XBOX360_GITHUB_TOKEN_FILE.unlink(missing_ok=True)
-                self.info_lbl.setText('Saved GitHub token removed.')
-        except Exception as exc:
-            self._menu_notice('GitHub token', f'Could not update the local token: {exc}')
 
     def _on_sync_finished(self, code, status):
         ok = (int(code) == 0 and status == QtCore.QProcess.NormalExit)
