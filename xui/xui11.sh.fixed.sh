@@ -8162,6 +8162,7 @@ class WebKioskWindow(QtWidgets.QMainWindow):
         self._gp = None
         self._gp_prev = {}
         self._gp_timer = None
+        self._gp_repeat_at = {}
         self.setWindowTitle(url)
         self.setAttribute(QtCore.Qt.WA_DeleteOnClose, True)
         self.setWindowState(self.windowState() | QtCore.Qt.WindowFullScreen)
@@ -8220,8 +8221,12 @@ class WebKioskWindow(QtWidgets.QMainWindow):
             pass
         self.view.load(QtCore.QUrl(url))
         self.keyboard_button = QtWidgets.QPushButton('KB', self)
-        self.keyboard_button.setToolTip('On-screen keyboard (F2 / Ctrl+K / controller X)')
-        self.keyboard_button.setAccessibleName('Open on-screen keyboard')
+        self.keyboard_button.setToolTip(
+            'Keyboard: arrows/Tab navigate, Enter/Space activate, Ctrl+L address/search, '
+            'Alt+Left/Right history, F2/Ctrl+K type, Ctrl+W close. '
+            'Controller: D-pad navigates, A selects, X keyboard, Y address, LB/RB history, B back.'
+        )
+        self.keyboard_button.setAccessibleName('Browser controls and on-screen keyboard')
         self.keyboard_button.setFixedSize(58, 48)
         self.keyboard_button.setStyleSheet(
             'QPushButton{background:rgba(24,35,42,0.92);color:#f3f7f8;'
@@ -8230,14 +8235,22 @@ class WebKioskWindow(QtWidgets.QMainWindow):
         )
         self.keyboard_button.clicked.connect(self._open_virtual_keyboard_for_page)
         self.keyboard_button.raise_()
-        self._esc = QtWidgets.QShortcut(QtGui.QKeySequence(QtCore.Qt.Key_Escape), self)
-        self._esc.activated.connect(self.close)
-        self._back = QtWidgets.QShortcut(QtGui.QKeySequence(QtCore.Qt.Key_Back), self)
-        self._back.activated.connect(self.close)
+        self._close_shortcut = QtWidgets.QShortcut(QtGui.QKeySequence('Ctrl+W'), self)
+        self._close_shortcut.activated.connect(self.close)
         self._kbd = QtWidgets.QShortcut(QtGui.QKeySequence(QtCore.Qt.Key_F2), self)
         self._kbd.activated.connect(self._open_virtual_keyboard_for_page)
         self._kbd2 = QtWidgets.QShortcut(QtGui.QKeySequence('Ctrl+K'), self)
         self._kbd2.activated.connect(self._open_virtual_keyboard_for_page)
+        self._address_shortcut = QtWidgets.QShortcut(QtGui.QKeySequence('Ctrl+L'), self)
+        self._address_shortcut.activated.connect(self._open_address_prompt)
+        self._reload_shortcut = QtWidgets.QShortcut(QtGui.QKeySequence('Ctrl+R'), self)
+        self._reload_shortcut.activated.connect(self.view.reload)
+        self._reload_f5 = QtWidgets.QShortcut(QtGui.QKeySequence(QtCore.Qt.Key_F5), self)
+        self._reload_f5.activated.connect(self.view.reload)
+        self._back_shortcut = QtWidgets.QShortcut(QtGui.QKeySequence('Alt+Left'), self)
+        self._back_shortcut.activated.connect(self._go_back)
+        self._forward_shortcut = QtWidgets.QShortcut(QtGui.QKeySequence('Alt+Right'), self)
+        self._forward_shortcut.activated.connect(self._go_forward)
         self._guide = QtWidgets.QShortcut(QtGui.QKeySequence(QtCore.Qt.Key_F1), self)
         self._guide.activated.connect(self._show_guide)
         self._guide2 = QtWidgets.QShortcut(QtGui.QKeySequence(QtCore.Qt.Key_Home), self)
@@ -8256,6 +8269,7 @@ class WebKioskWindow(QtWidgets.QMainWindow):
         if ok:
             self._browser_stack.setCurrentWidget(self.view)
             self.setWindowTitle(self.view.title() or self.view.url().toString())
+            self.view.setFocus(QtCore.Qt.OtherFocusReason)
             return
         self._browser_error_url.setText(self.view.url().toString())
         self._browser_stack.setCurrentWidget(self._browser_error_page)
@@ -8362,6 +8376,7 @@ class WebKioskWindow(QtWidgets.QMainWindow):
 }})();
 """
         self.view.page().runJavaScript(js)
+        self.view.setFocus(QtCore.Qt.OtherFocusReason)
 
     def _open_virtual_keyboard_for_page(self):
         self._sfx('open')
@@ -8449,14 +8464,61 @@ class WebKioskWindow(QtWidgets.QMainWindow):
             return default
 
     def _send_key_to_view(self, key):
-        self.view.setFocus()
+        dialog = self._active_virtual_keyboard()
+        if dialog is not None:
+            target = QtWidgets.QApplication.focusWidget() or dialog
+        else:
+            self.view.setFocus(QtCore.Qt.OtherFocusReason)
+            target = self.view
         press = QtGui.QKeyEvent(QtCore.QEvent.KeyPress, key, QtCore.Qt.NoModifier)
         rel = QtGui.QKeyEvent(QtCore.QEvent.KeyRelease, key, QtCore.Qt.NoModifier)
-        QtWidgets.QApplication.postEvent(self.view, press)
-        QtWidgets.QApplication.postEvent(self.view, rel)
+        QtWidgets.QApplication.postEvent(target, press)
+        QtWidgets.QApplication.postEvent(target, rel)
+
+    def _active_virtual_keyboard(self):
+        modal = QtWidgets.QApplication.activeModalWidget()
+        if isinstance(modal, VirtualKeyboardDialog) and modal.isVisible():
+            return modal
+        for widget in QtWidgets.QApplication.topLevelWidgets():
+            if isinstance(widget, VirtualKeyboardDialog) and widget.isVisible():
+                return widget
+        return None
 
     def _go_back(self):
         self.view.back()
+
+    def _navigate_back_or_close(self):
+        if self.view.history().canGoBack():
+            self._go_back()
+        else:
+            self.close()
+
+    def _open_address_prompt(self):
+        current = self.view.url().toString()
+        dialog = EscInputDialog(self)
+        dialog.setWindowTitle('Open web address')
+        dialog.setLabelText('URL or search query')
+        dialog.setInputMode(QtWidgets.QInputDialog.TextInput)
+        dialog.setTextValue(current)
+        if dialog.exec_() == QtWidgets.QDialog.Accepted:
+            value = str(dialog.textValue() or '').strip()
+            if value:
+                self._load_address(value)
+
+    def _open_address_with_virtual_keyboard(self):
+        dialog = VirtualKeyboardDialog(self.view.url().toString(), self, sfx_cb=self._play_sfx)
+        if dialog.exec_() == QtWidgets.QDialog.Accepted:
+            self._load_address(dialog.text())
+
+    def _load_address(self, raw):
+        value = str(raw or '').strip()
+        if not value:
+            return
+        if '://' not in value and ' ' in value:
+            value = 'https://www.google.com/search?q=' + urllib.parse.quote_plus(value)
+        elif '://' not in value:
+            value = 'https://' + value
+        self.view.load(QtCore.QUrl(value))
 
     def _go_forward(self):
         self.view.forward()
@@ -8482,10 +8544,39 @@ class WebKioskWindow(QtWidgets.QMainWindow):
         def pressed(name):
             return cur.get(name, False) and not self._gp_prev.get(name, False)
 
-        if pressed('guide') or pressed('y'):
+        vk = self._active_virtual_keyboard()
+        if vk is not None:
+            if pressed('guide') or pressed('b'):
+                self._send_key_to_view(QtCore.Qt.Key_Escape)
+            elif pressed('a'):
+                self._send_key_to_view(QtCore.Qt.Key_Return)
+            elif pressed('y'):
+                self._send_key_to_view(QtCore.Qt.Key_Space)
+            elif pressed('x'):
+                self._send_key_to_view(QtCore.Qt.Key_Backspace)
+            else:
+                now = time.monotonic()
+                for name, key in (
+                    ('left', QtCore.Qt.Key_Left), ('right', QtCore.Qt.Key_Right),
+                    ('up', QtCore.Qt.Key_Up), ('down', QtCore.Qt.Key_Down),
+                ):
+                    if not cur.get(name, False):
+                        self._gp_repeat_at.pop(name, None)
+                        continue
+                    repeat_at = self._gp_repeat_at.get(name, 0.0)
+                    if pressed(name) or now >= repeat_at:
+                        self._send_key_to_view(key)
+                        self._gp_repeat_at[name] = now + (0.34 if pressed(name) else 0.11)
+                        break
+            self._gp_prev = cur
+            return
+
+        if pressed('guide'):
             self._show_guide()
+        elif pressed('y'):
+            self._open_address_with_virtual_keyboard()
         elif pressed('b'):
-            self.close()
+            self._navigate_back_or_close()
         elif pressed('x'):
             self._open_virtual_keyboard_for_page()
         elif pressed('lb'):
@@ -8494,26 +8585,33 @@ class WebKioskWindow(QtWidgets.QMainWindow):
             self._go_forward()
         elif pressed('a'):
             self._open_keyboard_if_editable()
-        elif pressed('left'):
-            self._send_key_to_view(QtCore.Qt.Key_Left)
-        elif pressed('right'):
-            self._send_key_to_view(QtCore.Qt.Key_Right)
-        elif pressed('up'):
-            self._send_key_to_view(QtCore.Qt.Key_Up)
-        elif pressed('down'):
-            self._send_key_to_view(QtCore.Qt.Key_Down)
+        else:
+            now = time.monotonic()
+            directions = (
+                ('left', QtCore.Qt.Key_Left),
+                ('right', QtCore.Qt.Key_Right),
+                ('up', QtCore.Qt.Key_Up),
+                ('down', QtCore.Qt.Key_Down),
+            )
+            for name, key in directions:
+                if not cur.get(name, False):
+                    self._gp_repeat_at.pop(name, None)
+                    continue
+                repeat_at = self._gp_repeat_at.get(name, 0.0)
+                if pressed(name):
+                    self._send_key_to_view(key)
+                    self._gp_repeat_at[name] = now + 0.34
+                    break
+                if now >= repeat_at:
+                    self._send_key_to_view(key)
+                    self._gp_repeat_at[name] = now + 0.11
+                    break
         self._gp_prev = cur
 
     def keyPressEvent(self, e):
         k = e.key()
-        if k in (QtCore.Qt.Key_Escape, QtCore.Qt.Key_Back):
-            self.close()
-            return
         if k in self._guide_keys:
             self._show_guide()
-            return
-        if k in (QtCore.Qt.Key_Return, QtCore.Qt.Key_Enter):
-            self._open_keyboard_if_editable()
             return
         super().keyPressEvent(e)
 
@@ -24269,6 +24367,7 @@ class WebHub(QtWidgets.QMainWindow):
         self._gp = None
         self._gp_prev = {}
         self._gp_timer = None
+        self._gp_repeat_at = {}
         self.setWindowTitle('XUI Web Hub')
         self.resize(1366, 768)
         self._build()
@@ -24349,12 +24448,23 @@ class WebHub(QtWidgets.QMainWindow):
         self.btn_refresh = QtWidgets.QPushButton('R')
         self.btn_hub = QtWidgets.QPushButton('H')
         self.btn_close = QtWidgets.QPushButton('X')
+        for button, label in (
+            (self.btn_back, 'Back (Alt+Left / controller B or LB)'),
+            (self.btn_fwd, 'Forward (Alt+Right / controller RB)'),
+            (self.btn_refresh, 'Reload (F5 / Ctrl+R)'),
+            (self.btn_hub, 'Browser home hub'),
+            (self.btn_close, 'Close browser (Ctrl+W)'),
+        ):
+            button.setToolTip(label)
+            button.setAccessibleName(label)
         for b in (self.btn_back, self.btn_fwd, self.btn_refresh, self.btn_hub, self.btn_close):
             b.setObjectName('navbtn')
             row.addWidget(b, 0)
         self.addr = QtWidgets.QLineEdit()
         self.addr.setObjectName('addr')
         self.addr.setPlaceholderText('https://...')
+        self.addr.setToolTip('Ctrl+L to focus; type an address or search and press Enter. F2/Ctrl+K opens the virtual keyboard.')
+        self.addr.setAccessibleName('Web address and search field')
         self.addr.installEventFilter(self)
         row.addWidget(self.addr, 1)
         t.addLayout(row)
@@ -24395,11 +24505,12 @@ class WebHub(QtWidgets.QMainWindow):
             self.web.urlChanged.connect(self._on_url_changed)
             self.web.loadFinished.connect(self._on_loaded)
 
-        QtWidgets.QShortcut(QtGui.QKeySequence(QtCore.Qt.Key_Escape), self, activated=self.close)
-        QtWidgets.QShortcut(QtGui.QKeySequence(QtCore.Qt.Key_Back), self, activated=self.close)
+        QtWidgets.QShortcut(QtGui.QKeySequence('Ctrl+W'), self, activated=self.close)
         QtWidgets.QShortcut(QtGui.QKeySequence('Alt+Left'), self, activated=self._go_back)
         QtWidgets.QShortcut(QtGui.QKeySequence('Alt+Right'), self, activated=self._go_forward)
-        QtWidgets.QShortcut(QtGui.QKeySequence('Ctrl+L'), self, activated=self._focus_addr_with_keyboard)
+        QtWidgets.QShortcut(QtGui.QKeySequence('Ctrl+L'), self, activated=self._focus_addr)
+        QtWidgets.QShortcut(QtGui.QKeySequence('Ctrl+R'), self, activated=self._reload)
+        QtWidgets.QShortcut(QtGui.QKeySequence(QtCore.Qt.Key_F5), self, activated=self._reload)
         QtWidgets.QShortcut(QtGui.QKeySequence(QtCore.Qt.Key_F1), self, activated=self._show_guide)
         QtWidgets.QShortcut(QtGui.QKeySequence(QtCore.Qt.Key_Home), self, activated=self._show_guide)
         QtWidgets.QShortcut(QtGui.QKeySequence(QtCore.Qt.Key_F2), self, activated=self._open_virtual_keyboard_contextual)
@@ -24617,7 +24728,14 @@ class WebHub(QtWidgets.QMainWindow):
             return default
 
     def _send_key_focus(self, key):
-        w = QtWidgets.QApplication.focusWidget() or self
+        vk = self._active_virtual_keyboard()
+        if vk is not None:
+            w = QtWidgets.QApplication.focusWidget() or vk
+        elif self.stack.currentWidget() is self.web and self.web is not None:
+            self.web.setFocus(QtCore.Qt.OtherFocusReason)
+            w = self.web
+        else:
+            w = QtWidgets.QApplication.focusWidget() or self
         press = QtGui.QKeyEvent(QtCore.QEvent.KeyPress, key, QtCore.Qt.NoModifier)
         rel = QtGui.QKeyEvent(QtCore.QEvent.KeyRelease, key, QtCore.Qt.NoModifier)
         QtWidgets.QApplication.postEvent(w, press)
@@ -24698,18 +24816,35 @@ class WebHub(QtWidgets.QMainWindow):
             else:
                 self._send_key_focus(QtCore.Qt.Key_Tab)
                 self._auto_open_keyboard_if_web_editable(140)
-        elif pressed('left'):
-            self._send_key_focus(QtCore.Qt.Key_Left)
-        elif pressed('right'):
-            self._send_key_focus(QtCore.Qt.Key_Right)
-        elif pressed('up'):
-            self._send_key_focus(QtCore.Qt.Key_Up)
-        elif pressed('down'):
-            self._send_key_focus(QtCore.Qt.Key_Down)
+        else:
+            now = time.monotonic()
+            directions = (
+                ('left', QtCore.Qt.Key_Left),
+                ('right', QtCore.Qt.Key_Right),
+                ('up', QtCore.Qt.Key_Up),
+                ('down', QtCore.Qt.Key_Down),
+            )
+            for name, key in directions:
+                if not cur.get(name, False):
+                    self._gp_repeat_at.pop(name, None)
+                    continue
+                repeat_at = self._gp_repeat_at.get(name, 0.0)
+                if pressed(name):
+                    self._send_key_focus(key)
+                    self._gp_repeat_at[name] = now + 0.34
+                    break
+                if now >= repeat_at:
+                    self._send_key_focus(key)
+                    self._gp_repeat_at[name] = now + 0.11
+                    break
         self._gp_prev = cur
 
+    def _focus_addr(self):
+        self.addr.setFocus(QtCore.Qt.OtherFocusReason)
+        self.addr.selectAll()
+
     def _focus_addr_with_keyboard(self):
-        self.addr.setFocus()
+        self._focus_addr()
         self._open_virtual_keyboard_for_addr()
 
     def _open_virtual_keyboard_for_addr(self):
@@ -24782,6 +24917,7 @@ class WebHub(QtWidgets.QMainWindow):
 }})();
 """
         self.web.page().runJavaScript(js)
+        self.web.setFocus(QtCore.Qt.OtherFocusReason)
 
     def _forward_enter_to_web(self):
         if self.web is None:
@@ -24906,22 +25042,10 @@ class WebHub(QtWidgets.QMainWindow):
             self._open_virtual_keyboard_for_web()
 
     def eventFilter(self, obj, event):
-        if obj is self.addr and event.type() in (QtCore.QEvent.FocusIn, QtCore.QEvent.MouseButtonPress):
-            if not self._kbd_opening and (time.monotonic() - float(self._kbd_last_close)) >= 0.35:
-                QtCore.QTimer.singleShot(0, self._open_virtual_keyboard_for_addr)
         if obj is self.web:
             if event.type() == QtCore.QEvent.KeyPress:
-                if event.key() in (QtCore.Qt.Key_Return, QtCore.Qt.Key_Enter):
-                    if self._skip_web_return_once > 0:
-                        self._skip_web_return_once -= 1
-                        return False
-                    self._open_keyboard_if_web_editable()
-                    return True
-                if event.key() == QtCore.Qt.Key_Tab:
-                    QtCore.QTimer.singleShot(90, lambda: self._auto_open_keyboard_if_web_editable(0))
-                    return False
-            if event.type() == QtCore.QEvent.MouseButtonRelease:
-                self._auto_open_keyboard_if_web_editable(130)
+                if event.key() in (QtCore.Qt.Key_Return, QtCore.Qt.Key_Enter) and self._skip_web_return_once > 0:
+                    self._skip_web_return_once -= 1
         return super().eventFilter(obj, event)
 
     def _build_hub_widget(self):
@@ -25043,11 +25167,19 @@ class WebHub(QtWidgets.QMainWindow):
                 self.open_url(fixed)
                 return
             self._remember_recent(current)
-            self._auto_open_keyboard_if_web_editable(280)
+            self.web.setFocus(QtCore.Qt.OtherFocusReason)
 
     def _go_back(self):
         if self.web is not None:
             self.web.back()
+
+    def _browser_back_or_close(self):
+        if self.stack.currentWidget() is self.hub:
+            self.close()
+        elif self.web is not None and self.web.history().canGoBack():
+            self._go_back()
+        else:
+            self.close()
 
     def _go_forward(self):
         if self.web is not None:
@@ -27567,10 +27699,7 @@ class SocialChatWindow(QtWidgets.QWidget):
             if pressed('b'):
                 self._send_key_focus(QtCore.Qt.Key_Escape)
             elif pressed('a'):
-                self._send_key_focus(QtCore.Qt.Key_Return)
-            elif pressed('x'):
-                self._send_key_focus(QtCore.Qt.Key_Backspace)
-            elif pressed('y'):
+                self._browser_back_or_close()
                 self._send_key_focus(QtCore.Qt.Key_Space)
             elif pressed('left'):
                 self._send_key_focus(QtCore.Qt.Key_Left)
