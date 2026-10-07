@@ -3624,9 +3624,10 @@ class SocialOverlay(QtWidgets.QDialog):
 
     def _rebuild_community_rows(self, rows):
         prev = self.peers.currentItem().text() if self.peers.currentItem() is not None else ''
+        # currentItemChanged fires during clear(); discard references to old item widgets first.
+        self.friend_row_widgets = []
         self.peers.clear()
         self.peer_items = {}
-        self.friend_row_widgets = []
         keep_row = -1
         for row in rows:
             it = QtWidgets.QListWidgetItem(self._community_row_text(row))
@@ -3670,20 +3671,25 @@ class SocialOverlay(QtWidgets.QDialog):
     def _update_friend_row_selection(self):
         current = self.peers.currentItem()
         for item, card, avatar, name, status, badge in self.friend_row_widgets:
-            selected = item is current
-            bg = '#58b83c' if selected else '#f1f3f5'
-            fg = '#ffffff' if selected else '#252b31'
-            secondary = '#ecf5e9' if selected else '#66717a'
-            card.setStyleSheet(f'QFrame#friend_row {{ background:{bg}; border-bottom:1px solid #cbd0d5; }}')
-            avatar.setStyleSheet(
-                f'background:{"#3e912d" if selected else "#aeb9c1"}; color:#ffffff; '
-                'border-radius:21px; font-size:18px; font-weight:800;'
-            )
-            name.setStyleSheet(f'color:{fg}; font-size:17px; font-weight:750;')
-            status.setStyleSheet(f'color:{secondary}; font-size:12px; font-weight:600;')
-            badge.setStyleSheet(f'color:{fg}; font-size:13px; font-weight:700;')
+            try:
+                selected = item is current
+                bg = '#58b83c' if selected else '#f1f3f5'
+                fg = '#ffffff' if selected else '#252b31'
+                secondary = '#ecf5e9' if selected else '#66717a'
+                card.setStyleSheet(f'QFrame#friend_row {{ background:{bg}; border-bottom:1px solid #cbd0d5; }}')
+                avatar.setStyleSheet(
+                    f'background:{"#3e912d" if selected else "#aeb9c1"}; color:#ffffff; '
+                    'border-radius:21px; font-size:18px; font-weight:800;'
+                )
+                name.setStyleSheet(f'color:{fg}; font-size:17px; font-weight:750;')
+                status.setStyleSheet(f'color:{secondary}; font-size:12px; font-weight:600;')
+                badge.setStyleSheet(f'color:{fg}; font-size:13px; font-weight:700;')
+            except RuntimeError:
+                continue
 
     def _rebuild_message_peers(self):
+        # This view uses plain list items; never let selection updates retain deleted friend cards.
+        self.friend_row_widgets = []
         self.peers.clear()
         self.peer_items = {}
         ordered = sorted(
