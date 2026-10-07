@@ -2011,6 +2011,7 @@ write_dashboard_py(){
   cat > "$DASH_DIR/pyqt_dashboard_improved.py" <<'PY'
 #!/usr/bin/env python3
 import sys
+import math
 import json
 import subprocess
 import shutil
