@@ -7322,7 +7322,12 @@ class XboxGuideMenu(QtWidgets.QDialog):
         )
         self.setAttribute(QtCore.Qt.WA_TranslucentBackground, True)
         self.setModal(True)
-        self.resize(980, 520)
+        screen = QtWidgets.QApplication.primaryScreen()
+        if screen is not None:
+            self.setGeometry(screen.geometry())
+        else:
+            self.resize(980, 520)
+        self.setWindowState(self.windowState() | QtCore.Qt.WindowFullScreen)
         self.setStyleSheet('''
             QDialog {
                 background:rgba(5, 9, 14, 0.66);
@@ -7759,12 +7764,19 @@ class XboxGuideMenu(QtWidgets.QDialog):
         screen = self.screen() or QtWidgets.QApplication.primaryScreen()
         if screen is not None:
             bounds = screen.geometry()
-            self.setGeometry(bounds)
+            if self.geometry() != bounds:
+                self.setGeometry(bounds)
             panel_w = max(720, int(bounds.width() * 0.88))
             panel_h = max(300, int(bounds.height() * 0.82))
             panel_w = min(panel_w, max(1, bounds.width() - 24))
             panel_h = min(panel_h, max(1, bounds.height() - 24))
             self.guide_panel.setFixedSize(panel_w, panel_h)
+            if self.layout() is not None:
+                self.layout().activate()
+            self.guide_panel.move(
+                (self.width() - panel_w) // 2,
+                (self.height() - panel_h) // 2,
+            )
         self._refresh_meta()
         self._refresh_side_blades()
         self._sfx('open')
@@ -14600,6 +14612,11 @@ GUIDE_FALLBACK_CODES = {
     _c('BTN_BASE3', 296),
     _c('BTN_BASE4', 297),
 }
+KEYBOARD_GUIDE_CODES = {
+    _c('KEY_F1', 59),
+    _c('KEY_HOME', 102),
+    _c('KEY_MENU', 139),
+}
 
 JOYCON_LEFT_BUTTON_MAP = {
     _c('BTN_TL', 310): 'Tab',
@@ -14811,6 +14828,7 @@ def _profile_overrides(kind):
 class ControllerBridge:
     def __init__(self):
         self.devices = {}
+        self.keyboards = {}
         self.device_kind = {}
         self.device_map = {}
         self.device_sig = {}
@@ -14923,11 +14941,6 @@ class ControllerBridge:
         if self._active_window_dashboard():
             emit_key('F1')
             return True
-        active_pid = self._active_external_window_pid()
-        if active_pid is None:
-            active_pid = self._tracked_external_game_pid()
-        if active_pid is None:
-            return False
         if not os.path.exists(GUIDE_SCRIPT):
             return False
         try:
@@ -14995,6 +15008,10 @@ class ControllerBridge:
         except Exception:
             return None
         if not is_controller_device(dev):
+            try:
+                dev.close()
+            except Exception:
+                pass
             return None
         try:
             dev.set_nonblocking(True)
@@ -15002,11 +15019,45 @@ class ControllerBridge:
             pass
         return dev
 
+    def _open_keyboard(self, path):
+        try:
+            dev = InputDevice(path)
+        except PermissionError as exc:
+            logging.warning('permission denied opening keyboard %s: %s', path, exc)
+            return None
+        except Exception:
+            return None
+        try:
+            if is_controller_device(dev):
+                dev.close()
+                return None
+            key_caps = set(dev.capabilities(absinfo=False).get(ecodes.EV_KEY, []))
+            if not (key_caps & KEYBOARD_GUIDE_CODES):
+                dev.close()
+                return None
+            dev.set_nonblocking(True)
+            return dev
+        except Exception:
+            try:
+                dev.close()
+            except Exception:
+                pass
+            return None
+
     def scan(self):
         current = set(list_devices())
-        known = set(self.devices.keys())
+        known = set(self.devices.keys()) | set(self.keyboards.keys())
         for path in sorted(known - current):
             dev = self.devices.pop(path, None)
+            if dev is None:
+                dev = self.keyboards.pop(path, None)
+                if dev is not None:
+                    try:
+                        dev.close()
+                    except Exception:
+                        pass
+                    logging.info('keyboard disconnected: %s', path)
+                continue
             if dev is not None:
                 try:
                     dev.close()
@@ -15022,6 +15073,10 @@ class ControllerBridge:
         for path in sorted(current - known):
             dev = self._open_device(path)
             if dev is None:
+                keyboard = self._open_keyboard(path)
+                if keyboard is not None:
+                    self.keyboards[path] = keyboard
+                    logging.info('keyboard guide hotkey listener connected: %s (%s)', path, keyboard.name)
                 continue
             sig = device_signature(dev)
             kind = classify_controller(dev)
@@ -15110,6 +15165,12 @@ class ControllerBridge:
         emit_key(mapped)
         self.key_last_emit[key] = now
 
+    def _handle_keyboard_key(self, ev):
+        if ev.type != ecodes.EV_KEY or ev.value != 1:
+            return
+        if int(ev.code) in KEYBOARD_GUIDE_CODES:
+            self._open_global_guide()
+
     def _handle_abs(self, dev, ev):
         if dev.path in self.suppressed_paths:
             return
@@ -15137,6 +15198,7 @@ class ControllerBridge:
                 self.scan()
                 last_scan = now
             active_devices = {p: d for p, d in self.devices.items() if p not in self.suppressed_paths}
+            active_devices.update(self.keyboards)
             if not active_devices:
                 time.sleep(0.35)
                 continue
@@ -15152,7 +15214,9 @@ class ControllerBridge:
                     continue
                 try:
                     for ev in dev.read():
-                        if ev.type == ecodes.EV_KEY:
+                        if dev.path in self.keyboards:
+                            self._handle_keyboard_key(ev)
+                        elif ev.type == ecodes.EV_KEY:
                             self._handle_key(dev, ev)
                         elif ev.type == ecodes.EV_ABS:
                             self._handle_abs(dev, ev)
@@ -15162,8 +15226,11 @@ class ControllerBridge:
                         dev.close()
                     except Exception:
                         pass
-                    self.devices.pop(path, None)
-                    logging.info('controller read failed, removed: %s', path)
+                    if self.keyboards.pop(path, None) is not None:
+                        logging.info('keyboard read failed, removed: %s', path)
+                    else:
+                        self.devices.pop(path, None)
+                        logging.info('controller read failed, removed: %s', path)
                 except Exception:
                     continue
 
@@ -15217,6 +15284,7 @@ Global:
   Start -> Enter
   Select/Back -> Escape
   Guide/Home/Mode -> F1 (Xbox Guide)
+    Keyboard F1/Home/Menu -> Xbox Guide overlay, including over external games
 
 Xbox profile:
   LB -> Left
@@ -25883,7 +25951,12 @@ class Guide(QtWidgets.QDialog):
             self.setWindowFlags(self.windowFlags() | QtCore.Qt.X11BypassWindowManagerHint)
         self.setAttribute(QtCore.Qt.WA_TranslucentBackground, True)
         self.setModal(True)
-        self.resize(1060, 560)
+        screen = QtWidgets.QApplication.primaryScreen()
+        if screen is not None:
+            self.setGeometry(screen.geometry())
+        else:
+            self.resize(1060, 560)
+        self.setWindowState(self.windowState() | QtCore.Qt.WindowFullScreen)
         self.setStyleSheet('''
             QDialog {
                 background:rgba(10, 16, 24, 0.56);
@@ -26042,8 +26115,8 @@ class Guide(QtWidgets.QDialog):
             scr = QtWidgets.QApplication.primaryScreen()
         if scr is not None:
             g = scr.geometry()
-            self.setGeometry(g)
-            self.showFullScreen()
+            if self.geometry() != g:
+                self.setGeometry(g)
         self.raise_()
         self.activateWindow()
         _play_sfx('open')
