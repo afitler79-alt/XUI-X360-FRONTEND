@@ -164,12 +164,37 @@ confirm(){
 }
 
 install_dependencies(){
-    if [ "${AUTO_INSTALL_TOOLS:-0}" != "1" ]; then
-        info "AUTO_INSTALL_TOOLS=0; skipping package installation (Python app launcher is ready)"
-        return 0
-    fi
     if ! check_cmd python3; then
         warn "python3 not found; cannot continue dependency setup"
+        return 0
+    fi
+    if [ "${AUTO_INSTALL_TOOLS:-0}" != "1" ]; then
+        info "AUTO_INSTALL_TOOLS=0; skipping system package installation"
+        if ! python3 - <<'PY' >/dev/null 2>&1
+import PyQt5, PIL
+PY
+        then
+            warn "PyQt5/Pillow missing in system Python; preparing the XUI user virtualenv"
+            local venv_dir="$XUI_DIR/.venv"
+            if ! python3 -m venv "$venv_dir"; then
+                warn "Could not create $venv_dir; install python3-venv or run with --yes-install"
+                return 0
+            fi
+            if ! "$venv_dir/bin/python" -m pip install PyQt5 Pillow; then
+                warn "Could not install XUI Python dependencies; check network access and pip, or run with --yes-install"
+                return 0
+            fi
+            "$venv_dir/bin/python" -m pip install PyQtWebEngine pygame evdev >/dev/null 2>&1 || \
+                info "Some optional Python modules are unavailable; core dashboard dependencies are installed"
+            if "$venv_dir/bin/python" - <<'PY' >/dev/null 2>&1
+import PyQt5, PIL
+PY
+            then
+                info "XUI user virtualenv ready (PyQt5/Pillow)"
+            else
+                warn "XUI user virtualenv is missing PyQt5/Pillow; dashboard may not start"
+            fi
+        fi
         return 0
     fi
 
@@ -25307,8 +25332,7 @@ if [ -f "$ASSETS_DIR/startup.mp4" ]; then
             mkdir -p "$SESSION_STATE_DIR" 2>/dev/null || true
             : > "$STARTUP_VIDEO_STATE" 2>/dev/null || true
         else
-            warn "Startup video could not be played; refusing to skip it."
-            exit 1
+            warn "Startup video could not be played; continuing to dashboard."
         fi
     else
         info "Startup video already played this session; skipping playback."
@@ -32578,7 +32602,6 @@ configure_dashboard_passwordless_sudo(){
   tmpf="$(mktemp /tmp/xui-sudoers.XXXXXX)"
   {
     printf '# XUI automatic sudo (generated)\n'
-    printf 'Defaults:%s !requiretty\n' "$target_user"
     printf '%s ALL=(root) NOPASSWD: ALL\n' "$target_user"
   } > "$tmpf"
 
