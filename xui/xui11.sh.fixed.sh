@@ -18596,6 +18596,8 @@ Ctrl+R: actualizar saldo
                     self.multiplayer_status.setText(f'{event[1].get("from")} envió estado para {event[1].get("game")}')
         except queue.Empty:
             pass
+
+    def keyPressEvent(self, event):
         if event.key() in (QtCore.Qt.Key_Return,QtCore.Qt.Key_Enter,QtCore.Qt.Key_Space):
             index=self.tabs.currentIndex()
             if index==0:self.play_slots()
@@ -18606,8 +18608,12 @@ Ctrl+R: actualizar saldo
             elif index==5:self.play_online_dice()
             elif index==6:self._start_party()
             return
-        if event.key()==QtCore.Qt.Key_X and self.tabs.currentIndex()==3: self.play_hilo('low'); return
-        if event.key()==QtCore.Qt.Key_X and self.tabs.currentIndex()==4: self.coin_pick.setCurrentText('TAILS' if self.coin_pick.currentText()=='HEADS' else 'HEADS'); return
+        if event.key()==QtCore.Qt.Key_X and self.tabs.currentIndex()==3:
+            self.play_hilo('low')
+            return
+        if event.key()==QtCore.Qt.Key_X and self.tabs.currentIndex()==4:
+            self.coin_pick.setCurrentText('TAILS' if self.coin_pick.currentText()=='HEADS' else 'HEADS')
+            return
         super().keyPressEvent(event)
 
     def closeEvent(self, event):
