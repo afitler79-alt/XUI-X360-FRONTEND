@@ -15921,6 +15921,7 @@ KEYBOARD_GUIDE_CODES = {
     _c('KEY_F1', 59),
     _c('KEY_HOME', 102),
     _c('KEY_MENU', 139),
+    _c('KEY_HOMEPAGE', 172),
 }
 
 JOYCON_LEFT_BUTTON_MAP = {
@@ -16247,15 +16248,19 @@ class ControllerBridge:
             emit_key('F1')
             return True
         if not os.path.exists(GUIDE_SCRIPT):
+            logging.warning('global guide launcher is missing: %s', GUIDE_SCRIPT)
             return False
         try:
             subprocess.Popen(
-                ['/bin/sh', '-lc', f'"{GUIDE_SCRIPT}"'],
+                [GUIDE_SCRIPT],
+                env=os.environ.copy(),
                 stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL
+                stderr=subprocess.DEVNULL,
+                start_new_session=True,
             )
             return True
-        except Exception:
+        except Exception as exc:
+            logging.exception('could not launch global guide: %s', exc)
             return False
 
     def _mapping_for_kind(self, kind):
@@ -16474,6 +16479,9 @@ class ControllerBridge:
         if ev.type != ecodes.EV_KEY or ev.value != 1:
             return
         if int(ev.code) in KEYBOARD_GUIDE_CODES:
+            # The focused dashboard already receives the physical key; avoid opening a second guide.
+            if self._active_window_dashboard():
+                return
             self._open_global_guide()
 
     def _handle_abs(self, dev, ev):
