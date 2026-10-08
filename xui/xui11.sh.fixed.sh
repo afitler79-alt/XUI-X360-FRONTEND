@@ -429,7 +429,8 @@ ensure_dirs(){
     cat > "$BIN_DIR/xui_python.sh" <<'BASH'
 #!/usr/bin/env bash
 set -euo pipefail
-if [ -x "$HOME/.xui/.venv/bin/python" ]; then
+if [ -x "$HOME/.xui/.venv/bin/python" ] && \
+   "$HOME/.xui/.venv/bin/python" -c 'import PyQt5, PIL' >/dev/null 2>&1; then
     exec "$HOME/.xui/.venv/bin/python" "$@"
 fi
 if command -v python3 >/dev/null 2>&1; then
