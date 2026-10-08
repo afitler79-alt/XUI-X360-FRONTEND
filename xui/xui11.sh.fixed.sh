@@ -2152,25 +2152,15 @@ def play_media(path, video=False, blocking=False):
             'aplay': bool(shutil.which('aplay')),
         }
         play_media._probes = probes
-    try:
-        if probes.get('mpv'):
-            cmd = ['mpv', '--really-quiet', '--no-terminal']
-            if video:
-                cmd.extend(['--fullscreen', '--ontop', '--loop-file=no'])
-            else:
-                cmd.append('--no-video')
-            cmd.append(str(p))
-            if blocking:
-                subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False)
-            else:
-                subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-            return True
-    except Exception:
-        pass
     if video:
         video_cmds = []
         if probes.get('ffplay'):
             video_cmds.append(['ffplay', '-autoexit', '-fs', '-loglevel', 'quiet', str(p)])
+        if probes.get('mpv'):
+            video_cmds.append([
+                'mpv', '--really-quiet', '--no-terminal', '--vo=x11', '--hwdec=no',
+                '--fullscreen', '--loop-file=no', str(p),
+            ])
         if probes.get('gst_play'):
             video_cmds.append(['gst-play-1.0', '--no-interactive', str(p)])
         if probes.get('cvlc'):
@@ -2180,7 +2170,11 @@ def play_media(path, video=False, blocking=False):
         for cmd in video_cmds:
             try:
                 if blocking:
-                    subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False)
+                    result = subprocess.run(
+                        cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False
+                    )
+                    if result.returncode != 0:
+                        continue
                 else:
                     subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
                 return True
@@ -2190,6 +2184,8 @@ def play_media(path, video=False, blocking=False):
     fallback_cmds = []
     if probes.get('ffplay'):
         fallback_cmds.append(['ffplay', '-nodisp', '-autoexit', '-loglevel', 'quiet', str(p)])
+    if probes.get('mpv'):
+        fallback_cmds.append(['mpv', '--really-quiet', '--no-terminal', '--no-video', str(p)])
     if probes.get('paplay'):
         fallback_cmds.append(['paplay', str(p)])
     if probes.get('aplay'):
@@ -2197,39 +2193,17 @@ def play_media(path, video=False, blocking=False):
     for cmd in fallback_cmds:
         try:
             if blocking:
-                subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False)
+                result = subprocess.run(
+                    cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False
+                )
+                if result.returncode != 0:
+                    continue
             else:
                 subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
             return True
         except Exception:
             continue
     return False
-
-
-def ensure_audio_output_ready(min_volume=35):
-    try:
-        v = int(min_volume)
-    except Exception:
-        v = 35
-    v = max(1, min(120, v))
-    now = time.monotonic()
-    last_ts = float(getattr(ensure_audio_output_ready, '_last_ts', 0.0))
-    last_vol = int(getattr(ensure_audio_output_ready, '_last_vol', 0))
-    if (now - last_ts) < 6.0 and v <= last_vol:
-        return
-    cmds = [
-        f'pactl set-sink-mute @DEFAULT_SINK@ 0 || true; pactl set-sink-volume @DEFAULT_SINK@ {v}% || true',
-        f'wpctl set-mute @DEFAULT_AUDIO_SINK@ 0 || true; wpctl set-volume @DEFAULT_AUDIO_SINK@ {v}% || true',
-        f'amixer -D pulse sset Master unmute || true; amixer -D pulse sset Master {v}% || true',
-        f'amixer sset Master unmute || true; amixer sset Master {v}% || true',
-    ]
-    for cmd in cmds:
-        try:
-            subprocess.run(['/bin/sh', '-c', cmd], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False)
-        except Exception:
-            pass
-    ensure_audio_output_ready._last_ts = now
-    ensure_audio_output_ready._last_vol = v
 
 
 def play_startup_video():
@@ -11579,7 +11553,6 @@ class Dashboard(QtWidgets.QMainWindow):
         self._gp_axis_last_dir = {}
         self._gp_axis_deadzone = 0.40
         self._gp_axis_release_zone = 0.22
-        self._last_audio_ready_at = 0.0
         self._sfx_path_cache = {}
         self._guide_keys = {
             QtCore.Qt.Key_F1,
@@ -11627,7 +11600,6 @@ class Dashboard(QtWidgets.QMainWindow):
             ensure_achievements(5000)
         except Exception:
             pass
-        ensure_audio_output_ready(40)
         self._setup_qt_gamepad_input()
         self._apply_responsive_layout()
         self.update_focus()
@@ -13054,9 +13026,6 @@ exit 1
             if (now - self._last_hover_at) < 0.08:
                 return
             self._last_hover_at = now
-        if (now - float(self._last_audio_ready_at)) > 8.0:
-            ensure_audio_output_ready(35)
-            self._last_audio_ready_at = now
         candidates = []
         base = self.sfx.get(key)
         if base:
@@ -25307,11 +25276,18 @@ fi
 play_video(){
     local file="$1"
     if [ ! -f "$file" ]; then return 1; fi
-    if command -v mpv >/dev/null 2>&1; then
-        mpv --no-terminal --really-quiet --fullscreen --loop-file=no --no-config --input-conf=/dev/null --input-default-bindings=no --input-cursor=no --input-vo-keyboard=no --cursor-autohide=always --osc=no --osd-bar=no "$file"
-        return $?
+    if command -v ffplay >/dev/null 2>&1; then
+        if ffplay -autoexit -fs -loglevel quiet "$file"; then
+            return 0
+        fi
+        warn "ffplay could not play startup video; trying mpv software output"
     fi
-    warn "mpv is required to play locked video: $file"
+    if command -v mpv >/dev/null 2>&1; then
+        if mpv --no-terminal --really-quiet --fullscreen --loop-file=no --no-config --vo=x11 --hwdec=no --input-conf=/dev/null --input-default-bindings=no --input-cursor=no --input-vo-keyboard=no --cursor-autohide=always --osc=no --osd-bar=no "$file"; then
+            return 0
+        fi
+    fi
+    warn "No available player could play startup video: $file"
     return 1
 }
 
