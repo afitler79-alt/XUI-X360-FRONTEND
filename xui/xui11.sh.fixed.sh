@@ -18353,6 +18353,7 @@ Ctrl+R: actualizar saldo
     def _hilo_page(self):
         page=QtWidgets.QFrame(); layout=QtWidgets.QVBoxLayout(page); layout.setContentsMargins(28,26,28,26); layout.setSpacing(18)
         title=QtWidgets.QLabel('HI-LO — CARD GAME'); title.setStyleSheet('font-size:25px; font-weight:900; color:#d16cff; letter-spacing:2px;'); layout.addWidget(title); layout.addWidget(self._result_label)
+        self.hilo_value=random.randint(1,13)
         card=QtWidgets.QLabel('A'); card.setAlignment(QtCore.Qt.AlignCenter); card.setStyleSheet('font-size:150px; font-weight:900; color:#f8f8f8; background:linear-gradient(135deg,#3b244f,#15131c); border:2px solid #a46bbd; border-radius:20px; min-height:280px;')
         layout.addWidget(card,1); controls=QtWidgets.QHBoxLayout(); self.hilo_bet=QtWidgets.QSpinBox(); self.hilo_bet.setRange(1,1000); self.hilo_bet.setValue(12)
         self.hilo_high=QtWidgets.QPushButton('MAYOR'); self.hilo_high.clicked.connect(lambda:self.play_hilo('high')); self.hilo_low=QtWidgets.QPushButton('MENOR'); self.hilo_low.clicked.connect(lambda:self.play_hilo('low'))
@@ -18360,6 +18361,8 @@ Ctrl+R: actualizar saldo
         self.hilo_card=card; return page
 
     def _update_hilo_card(self):
+        if not hasattr(self, 'hilo_value'):
+            self.hilo_value=random.randint(1,13)
         self.hilo_card.setText(card_label(self.hilo_value))
 
     def _hilo_tick(self):
