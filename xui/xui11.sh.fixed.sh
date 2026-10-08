@@ -32,14 +32,6 @@ linux_distro_info(){
     fi
 }
 
-apt_binary(){
-    if check_cmd apt; then
-        command -v apt
-    elif check_cmd apt-get; then
-        command -v apt-get
-    fi
-}
-
 run_as_root(){
     if [ "$(id -u)" -eq 0 ]; then
         "$@"
@@ -15830,6 +15822,7 @@ if JOYCON_COMBINED_MODE not in ('auto', 'prefer-combined', 'split'):
     JOYCON_COMBINED_MODE = 'auto'
 XDOTOOL = shutil.which('xdotool')
 GUIDE_SCRIPT = os.path.expanduser('~/.xui/bin/xui_global_guide.sh')
+GUIDE_SOCKET = os.path.expanduser('~/.xui/data/guide_global.sock')
 ACTIVE_GAME_FILE = os.path.expanduser('~/.xui/data/active_game.pid')
 NINTENDO_VENDOR = 0x057E
 MICROSOFT_VENDOR = 0x045E
@@ -15923,6 +15916,26 @@ KEYBOARD_GUIDE_CODES = {
     _c('KEY_MENU', 139),
     _c('KEY_HOMEPAGE', 172),
 }
+KEYBOARD_GUIDE_NAV_CODES = {
+    _c('KEY_UP', 103), _c('KEY_DOWN', 108), _c('KEY_LEFT', 105), _c('KEY_RIGHT', 106),
+    _c('KEY_ENTER', 28), _c('KEY_KPENTER', 96), _c('KEY_ESC', 1),
+    _c('KEY_TAB', 15), _c('KEY_PAGEUP', 104), _c('KEY_PAGEDOWN', 109), _c('KEY_X', 45),
+}
+
+
+def _guide_ipc(command):
+    if not os.path.exists(GUIDE_SOCKET):
+        return False
+    client = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    try:
+        client.settimeout(0.15)
+        client.connect(GUIDE_SOCKET)
+        client.sendall((str(command) + '\n').encode('utf-8'))
+        return client.recv(16).strip() == b'ok'
+    except OSError:
+        return False
+    finally:
+        client.close()
 
 JOYCON_LEFT_BUTTON_MAP = {
     _c('BTN_TL', 310): 'Tab',
@@ -16135,6 +16148,8 @@ class ControllerBridge:
     def __init__(self):
         self.devices = {}
         self.keyboards = {}
+        self.grabbed_keyboards = set()
+        self.keyboard_grab_failures = set()
         self.device_kind = {}
         self.device_map = {}
         self.device_sig = {}
@@ -16241,27 +16256,18 @@ class ControllerBridge:
 
     def _open_global_guide(self):
         now = time.monotonic()
+        if os.path.exists(GUIDE_SOCKET):
+            if _guide_ipc('toggle'):
+                self.last_guide_open = now
+                return True
+        if self._active_window_dashboard():
+            if _open_global_guide():
+                self.last_guide_open = now
+                return True
         if (now - self.last_guide_open) < GUIDE_COOLDOWN_SEC:
             return True
         self.last_guide_open = now
-        if self._active_window_dashboard():
-            emit_key('F1')
-            return True
-        if not os.path.exists(GUIDE_SCRIPT):
-            logging.warning('global guide launcher is missing: %s', GUIDE_SCRIPT)
-            return False
-        try:
-            subprocess.Popen(
-                [GUIDE_SCRIPT],
-                env=os.environ.copy(),
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-                start_new_session=True,
-            )
-            return True
-        except Exception as exc:
-            logging.exception('could not launch global guide: %s', exc)
-            return False
+        return _open_global_guide()
 
     def _mapping_for_kind(self, kind):
         mapping = dict(COMMON_BUTTON_MAP)
@@ -16342,7 +16348,7 @@ class ControllerBridge:
                 dev.close()
                 return None
             key_caps = set(dev.capabilities(absinfo=False).get(ecodes.EV_KEY, []))
-            if not (key_caps & KEYBOARD_GUIDE_CODES):
+            if not (key_caps & (KEYBOARD_GUIDE_CODES | KEYBOARD_GUIDE_NAV_CODES)):
                 dev.close()
                 return None
             dev.set_nonblocking(True)
@@ -16427,6 +16433,27 @@ class ControllerBridge:
         self.axis_last_emit = {k: v for k, v in self.axis_last_emit.items() if k[0] in active}
         self.key_last_emit = {k: v for k, v in self.key_last_emit.items() if k[0] in active}
 
+    def _sync_keyboard_grabs(self):
+        should_grab = os.path.exists(GUIDE_SOCKET)
+        for path, dev in self.keyboards.items():
+            if should_grab and path not in self.grabbed_keyboards:
+                try:
+                    dev.grab()
+                    self.grabbed_keyboards.add(path)
+                    self.keyboard_grab_failures.discard(path)
+                    logging.info('keyboard grabbed for global Guide: %s (%s)', path, dev.name)
+                except Exception as exc:
+                    if path not in self.keyboard_grab_failures:
+                        logging.warning('cannot grab keyboard %s for Guide: %s', path, exc)
+                        self.keyboard_grab_failures.add(path)
+            elif not should_grab and path in self.grabbed_keyboards:
+                try:
+                    dev.ungrab()
+                except Exception:
+                    pass
+                self.grabbed_keyboards.discard(path)
+                self.keyboard_grab_failures.discard(path)
+
     def _axis_direction(self, dev, code, value):
         if code in HAT_CODES:
             if value < 0:
@@ -16472,17 +16499,41 @@ class ControllerBridge:
         if str(mapped).upper() == 'F1':
             if self._open_global_guide():
                 return
+        if os.path.exists(GUIDE_SOCKET):
+            command = {
+                'Up': 'up', 'Down': 'down', 'Left': 'home', 'Right': 'right',
+                'Return': 'select', 'space': 'closegame', 'Escape': 'back',
+                'Tab': 'tab', 'Prior': 'pageup', 'Next': 'pagedown',
+            }.get(str(mapped))
+            if command and _guide_ipc(command):
+                return
+            if os.path.exists(GUIDE_SOCKET):
+                return
         emit_key(mapped)
         self.key_last_emit[key] = now
 
     def _handle_keyboard_key(self, ev):
-        if ev.type != ecodes.EV_KEY or ev.value != 1:
+        if ev.type != ecodes.EV_KEY or ev.value not in (1, 2):
             return
         if int(ev.code) in KEYBOARD_GUIDE_CODES:
-            # The focused dashboard already receives the physical key; avoid opening a second guide.
             if self._active_window_dashboard():
                 return
             self._open_global_guide()
+            return
+        if int(ev.code) not in KEYBOARD_GUIDE_NAV_CODES or not os.path.exists(GUIDE_SOCKET):
+            return
+        if ev.value == 2:
+            return
+        command = {
+            _c('KEY_UP', 103): 'up', _c('KEY_DOWN', 108): 'down',
+            _c('KEY_LEFT', 105): 'left', _c('KEY_RIGHT', 106): 'right',
+            _c('KEY_ENTER', 28): 'select', _c('KEY_KPENTER', 96): 'select',
+            _c('KEY_ESC', 1): 'back', _c('KEY_TAB', 15): 'tab',
+            _c('KEY_PAGEUP', 104): 'pageup', _c('KEY_PAGEDOWN', 109): 'pagedown',
+            _c('KEY_X', 45): 'closegame',
+        }.get(int(ev.code))
+        if command:
+            _guide_ipc(command)
 
     def _handle_abs(self, dev, ev):
         if dev.path in self.suppressed_paths:
@@ -16507,6 +16558,7 @@ class ControllerBridge:
         last_scan = 0.0
         while True:
             now = time.monotonic()
+            self._sync_keyboard_grabs()
             if (now - last_scan) >= RESCAN_SEC:
                 self.scan()
                 last_scan = now
@@ -16540,6 +16592,8 @@ class ControllerBridge:
                     except Exception:
                         pass
                     if self.keyboards.pop(path, None) is not None:
+                        self.grabbed_keyboards.discard(path)
+                        self.keyboard_grab_failures.discard(path)
                         logging.info('keyboard read failed, removed: %s', path)
                     else:
                         self.devices.pop(path, None)
@@ -16573,7 +16627,46 @@ if __name__ == '__main__':
             logging.exception('joy bridge error: %s', exc)
             time.sleep(1.0)
 PY
-  chmod +x "$BIN_DIR/xui_joy_listener.py"
+    chmod +x "$BIN_DIR/xui_joy_listener.py"
+
+    cat > "$BIN_DIR/xui_joy_session.sh" <<'BASH'
+#!/usr/bin/env bash
+set -euo pipefail
+PYRUN="$HOME/.xui/bin/xui_python.sh"
+LISTENER="$HOME/.xui/bin/xui_joy_listener.py"
+LOG="$HOME/.xui/logs/joy_listener.log"
+mkdir -p "$(dirname "$LOG")"
+if [[ -z "${DISPLAY:-}${WAYLAND_DISPLAY:-}" ]]; then
+    printf '%s no graphical session variables (DISPLAY/WAYLAND_DISPLAY); listener not started\n' "$(date -Is)" >> "$LOG"
+    exit 1
+fi
+exec "$PYRUN" "$LISTENER"
+BASH
+    chmod +x "$BIN_DIR/xui_joy_session.sh"
+    mkdir -p "$AUTOSTART_DIR"
+    cat > "$AUTOSTART_DIR/xui-joy.desktop" <<DESK
+[Desktop Entry]
+Type=Application
+Name=XUI Global Guide Input
+Comment=Global controller and keyboard Guide shortcut
+Exec="$BIN_DIR/xui_joy_session.sh"
+Terminal=false
+StartupNotify=false
+X-GNOME-Autostart-enabled=true
+Hidden=false
+NoDisplay=true
+DESK
+
+    if getent group input >/dev/null 2>&1; then
+        local input_user="${SUDO_USER:-${USER:-$(id -un)}}"
+        if ! id -nG "$input_user" 2>/dev/null | tr ' ' '\n' | grep -qx input; then
+            if run_as_root usermod -aG input "$input_user"; then
+                warn "Added $input_user to input group; log out and back in for controller/keyboard hotkeys to work."
+            else
+                warn "Could not add $input_user to input group; global evdev hotkeys need read access to /dev/input."
+            fi
+        fi
+    fi
 
   cat > "$BIN_DIR/xui_controller_mappings.sh" <<'BASH'
 #!/usr/bin/env bash
@@ -17880,7 +17973,7 @@ import uuid
 from datetime import datetime
 from pathlib import Path
 
-from PyQt5 import QtCore, QtGui, QtWidgets
+from PyQt5 import QtCore, QtGui, QtWidgets, QtNetwork
 
 try:
     from PyQt5 import QtGamepad
@@ -24186,11 +24279,8 @@ PartOf=graphical-session.target
 
 [Service]
 Type=simple
-Environment=DISPLAY=:0
-Environment=XDG_RUNTIME_DIR=/run/user/%U
-Environment=XAUTHORITY=%h/.Xauthority
 EnvironmentFile=-%h/.xui/data/controller_profile.env
-ExecStart=%h/.xui/bin/xui_python.sh %h/.xui/bin/xui_joy_listener.py
+ExecStart=%h/.xui/bin/xui_joy_session.sh
 Restart=on-failure
 RestartSec=0.4
 
@@ -25912,7 +26002,7 @@ apply_update(){
   [ -n "${installer_log:-}" ] && rm -f "$installer_log" >/dev/null 2>&1 || true
 
   # Ensure dashboard service stays enabled after updates.
-  if command -v systemctl >/dev/null 2>&1; then
+    if command -v systemctl >/dev/null 2>&1; then
     XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}" \
     DBUS_SESSION_BUS_ADDRESS="${DBUS_SESSION_BUS_ADDRESS:-unix:path=${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/bus}" \
       systemctl --user daemon-reload >/dev/null 2>&1 || true
@@ -27323,6 +27413,7 @@ BASH
 set -euo pipefail
 PID_FILE="$HOME/.xui/data/active_game.pid"
 PAUSED_FILE="$HOME/.xui/data/active_paused.pid"
+TARGET_FILE="$HOME/.xui/data/guide_target_window.id"
 is_dashboard_pid(){
     local candidate="$1" command_line
     [[ "$candidate" =~ ^[0-9]+$ ]] || return 1
@@ -27330,27 +27421,18 @@ is_dashboard_pid(){
     command_line="$(tr '\0' ' ' < "/proc/$candidate/cmdline" 2>/dev/null || true)"
     [[ "$command_line" =~ pyqt_dashboard_improved\.py|xui_startup_and_dashboard|xui-dashboard\.service ]]
 }
-if [ -f "$PID_FILE" ]; then
-  pid="$(cat "$PID_FILE" 2>/dev/null || true)"
-    if [[ "$pid" =~ ^[0-9]+$ ]] && kill -0 "$pid" 2>/dev/null; then
-        if is_dashboard_pid "$pid"; then
-            echo "Tracked PID points to XUI dashboard; refusing to terminate it."
-            exit 1
-        fi
-    kill "$pid" >/dev/null 2>&1 || true
-    sleep 0.3
-    kill -9 "$pid" >/dev/null 2>&1 || true
-    rm -f "$PID_FILE"
-    rm -f "$PAUSED_FILE"
-    echo "Closed tracked game process $pid"
-    exit 0
-  fi
-fi
 if ! command -v xdotool >/dev/null 2>&1; then
   echo "xdotool not installed."
   exit 1
 fi
-wid="$(xdotool getactivewindow 2>/dev/null || true)"
+wid=""
+if [ -f "$TARGET_FILE" ]; then
+    candidate="$(cat "$TARGET_FILE" 2>/dev/null || true)"
+    if [[ "$candidate" =~ ^[0-9]+$ ]] && xdotool getwindowname "$candidate" >/dev/null 2>&1; then
+        wid="$candidate"
+    fi
+fi
+wid="${wid:-$(xdotool getactivewindow 2>/dev/null || true)}"
 if [ -z "$wid" ]; then
   echo "No active window."
   exit 1
@@ -27368,11 +27450,10 @@ fi
 xdotool windowactivate "$wid" key --clearmodifiers Alt+F4 >/dev/null 2>&1 || true
 sleep 0.3
 if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
-  kill "$pid" >/dev/null 2>&1 || true
-  sleep 0.2
-  kill -9 "$pid" >/dev/null 2>&1 || true
+    : # Alt+F4 is the graceful close request; do not kill a multi-window application.
 fi
 rm -f "$PAUSED_FILE"
+rm -f "$TARGET_FILE"
 echo "Close requested for window $wid"
 BASH
     chmod +x "$BIN_DIR/xui_close_active_app.sh"
@@ -27395,7 +27476,9 @@ BASH
     cat > "$BIN_DIR/xui_global_guide.py" <<'PY'
 #!/usr/bin/env python3
 import os
+import logging
 import signal
+import socket
 import subprocess
 import sys
 import time
@@ -27410,6 +27493,7 @@ RECENT_FILE = DATA / 'recent.json'
 PROFILE_FILE = DATA / 'profile.json'
 REDEEM_FILE = DATA / 'redeemed_codes.json'
 LOCK_FILE = DATA / 'guide_global.lock'
+LOCK_SOCKET = DATA / 'guide_global.sock'
 CLOSE_SCRIPT = str(Path.home() / '.xui' / 'bin' / 'xui_close_active_app.sh')
 XUI_BIN = Path.home() / '.xui' / 'bin'
 SOCIAL_CHAT_APP = XUI_BIN / 'xui_social_chat.py'
@@ -27481,6 +27565,60 @@ def _active_window_pid():
         return None
 
 
+def _active_window_id():
+    try:
+        wid = subprocess.check_output(['xdotool', 'getactivewindow'], text=True, stderr=subprocess.DEVNULL).strip()
+        return int(wid) if wid else None
+    except Exception:
+        return None
+
+
+def _session_display():
+    if os.environ.get('DISPLAY') or os.environ.get('WAYLAND_DISPLAY'):
+        return True
+    return any(Path(f'/tmp/.X11-unix/X{idx}').exists() for idx in range(10))
+
+
+def _forward_to_existing():
+    if not LOCK_SOCKET.exists():
+        return False
+    client = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    try:
+        client.settimeout(1.0)
+        client.connect(str(LOCK_SOCKET))
+        client.sendall(b'toggle\n')
+        return client.recv(16).strip() == b'ok'
+    except OSError:
+        return False
+    finally:
+        client.close()
+
+
+def _open_global_guide():
+    if _forward_to_existing():
+        return True
+    if not _session_display():
+        logging.error('cannot open global Guide without DISPLAY/WAYLAND_DISPLAY')
+        return False
+    launcher = XUI_BIN / 'xui_global_guide.sh'
+    if not launcher.is_file():
+        logging.error('global guide launcher missing: %s', launcher)
+        return False
+    try:
+        subprocess.Popen(
+            [str(launcher)],
+            env=os.environ.copy(),
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            start_new_session=True,
+        )
+        return True
+    except Exception:
+        logging.exception('cannot start global guide')
+        return False
+
+
 def _pick_target_pid():
     try:
         if ACTIVE_FILE.exists():
@@ -27492,6 +27630,31 @@ def _pick_target_pid():
     pid = _active_window_pid()
     if pid and pid > 1 and not _is_dashboard_pid(pid):
         return pid
+    return None
+
+
+def _pick_target_window():
+    try:
+        if ACTIVE_FILE.exists():
+            pid = int((ACTIVE_FILE.read_text(encoding='utf-8', errors='ignore') or '0').strip() or '0')
+            if pid > 1 and not _is_dashboard_pid(pid):
+                ids = subprocess.check_output(
+                    ['xdotool', 'search', '--onlyvisible', '--pid', str(pid)],
+                    text=True, stderr=subprocess.DEVNULL,
+                ).splitlines()
+                if ids:
+                    return int(ids[0])
+    except Exception:
+        pass
+    return _active_window_id()
+
+
+def _remember_target_window():
+    wid = _pick_target_window()
+    if wid and wid > 0:
+        DATA.mkdir(parents=True, exist_ok=True)
+        (DATA / 'guide_target_window.id').write_text(str(wid), encoding='utf-8')
+        return wid
     return None
 
 
@@ -27770,9 +27933,10 @@ def _play_sfx(name):
 
 
 class Guide(QtWidgets.QDialog):
-    def __init__(self, gamertag='Player1', paused_pid=None):
+    def __init__(self, gamertag='Player1', paused_pid=None, previous_window=None):
         super().__init__()
         self.paused_pid = paused_pid
+        self.previous_window = previous_window
         self.gamertag = str(gamertag or 'Player1')
         self.action = ''
         self._open_anim = None
@@ -27784,16 +27948,19 @@ class Guide(QtWidgets.QDialog):
             | QtCore.Qt.WindowStaysOnTopHint
             | QtCore.Qt.Tool
         )
+        if hasattr(QtCore.Qt, 'WindowDoesNotAcceptFocus'):
+            self.setWindowFlags(self.windowFlags() | QtCore.Qt.WindowDoesNotAcceptFocus)
         if hasattr(QtCore.Qt, 'X11BypassWindowManagerHint'):
             self.setWindowFlags(self.windowFlags() | QtCore.Qt.X11BypassWindowManagerHint)
         self.setAttribute(QtCore.Qt.WA_TranslucentBackground, True)
-        self.setModal(True)
+        self.setModal(False)
         screen = QtWidgets.QApplication.primaryScreen()
         if screen is not None:
             self.setGeometry(screen.geometry())
         else:
             self.resize(1060, 560)
         self.setWindowState(self.windowState() | QtCore.Qt.WindowFullScreen)
+        self.setAttribute(QtCore.Qt.WA_ShowWithoutActivating, True)
         self.setStyleSheet('''
             QDialog { background:rgba(13, 19, 22, 0.78); }
             QFrame#xguide_panel {
@@ -27873,9 +28040,12 @@ class Guide(QtWidgets.QDialog):
             'Account Security',
         ])
         self.listw.setCurrentRow(0)
+        self.listw.setFocusPolicy(QtCore.Qt.StrongFocus)
         self.listw.itemActivated.connect(self._accept_current)
         self.listw.itemDoubleClicked.connect(self._accept_current)
         self.listw.currentRowChanged.connect(self._on_row_changed)
+        self.listw.installEventFilter(self)
+        self.installEventFilter(self)
         body.addWidget(self.listw, 7)
 
         actions = QtWidgets.QFrame()
@@ -27890,6 +28060,9 @@ class Guide(QtWidgets.QDialog):
             actions_l.addWidget(b)
         actions_l.addStretch(1)
         body.addWidget(actions, 3)
+        for button in actions.findChildren(QtWidgets.QPushButton):
+            button.setFocusPolicy(QtCore.Qt.NoFocus)
+            button.installEventFilter(self)
         root.addLayout(body, 1)
 
         hint = QtWidgets.QLabel('<font color="#49b93e">A Select</font>   <font color="#cf2d2d">B Back</font>   <font color="#2b7fd8">X Sign Out</font>   <font color="#ddb126">Y Inicio de Xbox</font>')
@@ -27938,10 +28111,51 @@ class Guide(QtWidgets.QDialog):
             if self.geometry() != g:
                 self.setGeometry(g)
         self.raise_()
-        self.activateWindow()
         _play_sfx('open')
         self._refresh_meta()
         self._animate_open()
+
+    def eventFilter(self, watched, event):
+        if event.type() == QtCore.QEvent.KeyPress:
+            key = event.key()
+            if key in (QtCore.Qt.Key_Escape, QtCore.Qt.Key_Back, QtCore.Qt.Key_B):
+                self.action = ''
+                _play_sfx('back')
+                self.hide_overlay()
+                return True
+            if key in (QtCore.Qt.Key_Return, QtCore.Qt.Key_Enter, QtCore.Qt.Key_A):
+                if self.listw.currentRow() < 0:
+                    self.listw.setCurrentRow(0)
+                self._accept_current()
+                return True
+            if key in (QtCore.Qt.Key_X, QtCore.Qt.Key_Space):
+                self._accept_action('Close Game')
+                return True
+            if key in (QtCore.Qt.Key_Y, QtCore.Qt.Key_Tab):
+                self.listw.setCurrentRow(min(self.listw.count() - 1, self.listw.currentRow() + 1))
+                return True
+            if key == QtCore.Qt.Key_Left:
+                self._accept_action('Inicio de Xbox')
+                return True
+            if key == QtCore.Qt.Key_Up:
+                self.listw.setCurrentRow(max(0, self.listw.currentRow() - 1))
+                return True
+            if key == QtCore.Qt.Key_Down:
+                self.listw.setCurrentRow(min(self.listw.count() - 1, self.listw.currentRow() + 1))
+                return True
+        return super().eventFilter(watched, event)
+
+    def toggle_visible(self):
+        if self.isVisible():
+            self.hide_overlay()
+            return
+        self.show()
+        self.raise_()
+
+    def hide_overlay(self):
+        self.hide()
+        if self.previous_window:
+            subprocess.run(['xdotool', 'windowactivate', '--sync', str(self.previous_window)], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False)
 
     def _animate_open(self):
         effect = QtWidgets.QGraphicsOpacityEffect(self)
@@ -27973,19 +28187,25 @@ class Guide(QtWidgets.QDialog):
 
     def keyPressEvent(self, e):
         if e.key() in (QtCore.Qt.Key_Y, QtCore.Qt.Key_Tab):
+            self.listw.setCurrentRow(min(self.listw.count() - 1, self.listw.currentRow() + 1))
+            return
+        if e.key() in (QtCore.Qt.Key_X, QtCore.Qt.Key_Space):
+            self.action = 'Close Game'
+            _play_sfx('select')
+            self.accept()
+            return
+        if e.key() == QtCore.Qt.Key_Left:
             self.action = 'Inicio de Xbox'
             _play_sfx('select')
             self.accept()
             return
-        if e.key() in (QtCore.Qt.Key_X, QtCore.Qt.Key_Space):
-            self.action = 'Cerrar sesion'
-            _play_sfx('select')
-            self.accept()
+        if e.key() == QtCore.Qt.Key_Right:
+            self.listw.setCurrentRow(min(self.listw.count() - 1, self.listw.currentRow() + 1))
             return
         if e.key() in (QtCore.Qt.Key_Escape, QtCore.Qt.Key_Back):
             self.action = ''
             _play_sfx('back')
-            self.reject()
+            self.hide_overlay()
             return
         if e.key() in (QtCore.Qt.Key_Return, QtCore.Qt.Key_Enter):
             self._accept_current()
@@ -28087,7 +28307,8 @@ def _launch_social_global(parent):
 def _handle_action(action, parent):
     name = str(action or '').strip()
     if not name:
-        _resume_paused()
+        if getattr(parent, 'previous_window', None):
+            subprocess.run(['xdotool', 'windowactivate', '--sync', str(parent.previous_window)], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False)
         return
     if name == 'Xbox Home':
         _activate_dashboard()
@@ -28132,7 +28353,6 @@ def _handle_action(action, parent):
         'System Settings', 'Account Security', 'Network Setup', 'Family', 'Theme Toggle',
     ):
         _activate_dashboard()
-        _resume_paused()
         return
     if name == 'Reciente':
         _msg(parent, 'Reciente', _recent_text())
@@ -28157,53 +28377,102 @@ def _handle_action(action, parent):
         _resume_paused()
         return
     if name == 'Cerrar app actual':
-        subprocess.getoutput(f'/bin/sh -c "{CLOSE_SCRIPT}"')
+        subprocess.run([CLOSE_SCRIPT], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False)
+        return
+    if name == 'Close Game':
+        subprocess.run([CLOSE_SCRIPT], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False)
         return
     if name == 'Cerrar sesion':
         _close_session()
         _msg(parent, 'Sesion', 'Sesion cerrada.')
         _activate_dashboard()
-        _resume_paused()
         return
     if name == 'Logros':
         if _activate_dashboard():
             subprocess.getoutput('/bin/sh -lc "sleep 0.08; xdotool key --clearmodifiers F1 Return >/dev/null 2>&1 || true"')
-        _resume_paused()
         return
     if name in ('Premios', 'Mis juegos', 'Configuracion', 'Inicio de Xbox'):
         _activate_dashboard()
-        _resume_paused()
         return
-    _resume_paused()
+    if getattr(parent, 'previous_window', None):
+        subprocess.run(['xdotool', 'windowmap', str(parent.previous_window)], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False)
+        subprocess.run(['xdotool', 'windowactivate', '--sync', str(parent.previous_window)], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False)
 
 
 def main():
     DATA.mkdir(parents=True, exist_ok=True)
-    now = int(time.time())
-    if LOCK_FILE.exists():
-        try:
-            old = int((LOCK_FILE.read_text(encoding='utf-8', errors='ignore') or '0').strip() or '0')
-            if now - old < 8:
-                return 0
-        except Exception:
-            pass
-    LOCK_FILE.write_text(str(now), encoding='utf-8')
-
+    if not _session_display():
+        print('No graphical session found (DISPLAY/WAYLAND_DISPLAY); cannot show external Guide.', file=sys.stderr)
+        return 2
+    if _forward_to_existing():
+        return 0
+    previous_window = _remember_target_window()
     app = QtWidgets.QApplication(sys.argv)
-    app.setQuitOnLastWindowClosed(True)
-    d = Guide(gamertag=_profile_gamertag())
+    app.setApplicationName('XUI Global Guide')
+    app.setQuitOnLastWindowClosed(False)
+    d = Guide(gamertag=_profile_gamertag(), previous_window=previous_window)
+    d.accepted.connect(app.quit)
+    d.show()
+    d.raise_()
+    server = QtNetwork.QLocalServer(d)
     try:
-        d.show()
-    except Exception:
-        d.show()
-    accepted = d.exec_() == QtWidgets.QDialog.Accepted
-    action = d.action if accepted else ''
-    _handle_action(action, d)
-    try:
-        LOCK_FILE.unlink()
-    except Exception:
-        pass
-    return 0
+        server.removeServer(str(LOCK_SOCKET))
+        if not server.listen(str(LOCK_SOCKET)):
+            print(f'Cannot listen on Guide IPC socket: {server.errorString()}', file=sys.stderr)
+            return 3
+        os.chmod(LOCK_SOCKET, 0o600)
+    except Exception as exc:
+        print(f'Cannot listen on Guide IPC socket: {exc}', file=sys.stderr)
+        return 3
+
+    def handle_clients():
+        while server.hasPendingConnections():
+            client = server.nextPendingConnection()
+            if client is None:
+                continue
+            client.waitForReadyRead(200)
+            raw = bytes(client.readAll()).decode('utf-8', errors='ignore').strip().lower()
+            if raw == 'toggle':
+                d.toggle_visible()
+            elif raw == 'up':
+                d.listw.setCurrentRow(max(0, d.listw.currentRow() - 1))
+            elif raw == 'down':
+                d.listw.setCurrentRow(min(d.listw.count() - 1, d.listw.currentRow() + 1))
+            elif raw in ('select', 'enter'):
+                d._accept_current()
+            elif raw == 'back':
+                d.action = ''
+                d.hide_overlay()
+            elif raw == 'tab':
+                d.listw.setCurrentRow(min(d.listw.count() - 1, d.listw.currentRow() + 1))
+            elif raw == 'closegame':
+                d._accept_action('Close Game')
+            elif raw == 'home':
+                d._accept_action('Inicio de Xbox')
+            elif raw == 'right':
+                d.listw.setCurrentRow(min(d.listw.count() - 1, d.listw.currentRow() + 1))
+            elif raw == 'left':
+                d.listw.setCurrentRow(max(0, d.listw.currentRow() - 1))
+            elif raw == 'pageup':
+                d.listw.setCurrentRow(max(0, d.listw.currentRow() - 5))
+            elif raw == 'pagedown':
+                d.listw.setCurrentRow(min(d.listw.count() - 1, d.listw.currentRow() + 5))
+            client.write(b'ok\n')
+            client.flush()
+            client.disconnectFromServer()
+
+    server.newConnection.connect(handle_clients)
+    if previous_window:
+        QtCore.QTimer.singleShot(80, d.raise_)
+    result = app.exec_()
+    if LOCK_SOCKET.exists():
+        LOCK_SOCKET.unlink()
+    if d.action:
+        _handle_action(d.action, d)
+    elif previous_window:
+        subprocess.run(['xdotool', 'windowmap', str(previous_window)], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False)
+        subprocess.run(['xdotool', 'windowactivate', '--sync', str(previous_window)], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False)
+    return result
 
 
 if __name__ == '__main__':
@@ -28249,7 +28518,7 @@ import urllib.parse
 import urllib.request
 import uuid
 from pathlib import Path
-from PyQt5 import QtCore, QtGui, QtWidgets
+from PyQt5 import QtCore, QtGui, QtWidgets, QtNetwork
 try:
     from PyQt5 import QtGamepad
 except Exception:
@@ -32173,10 +32442,12 @@ PY
             # The desktop entry is the dashboard autostart source of truth. Disable an old
             # systemd dashboard link so it cannot race the graphical session or grab the lock early.
             run_user_systemctl disable xui-dashboard.service || true
-            run_user_systemctl enable --now xui-joy.service || true
+            # Use XDG autostart for the input bridge so it inherits the actual graphical
+            # session (including Wayland/Xauthority), instead of a user service with DISPLAY=:0.
+            run_user_systemctl disable --now xui-joy.service || true
       run_user_systemctl enable --now xui-battery-monitor.service || true
       run_user_systemctl enable --now xui-power-opt.service || true
-            info "Enabled XDG dashboard autostart and user services: xui-joy, xui-battery-monitor, xui-power-opt"
+            info "Enabled XDG dashboard and Guide-input autostart, plus battery/power services"
     else
             warn "systemctl --user daemon-reload failed; XDG desktop autostart remains enabled"
     fi
