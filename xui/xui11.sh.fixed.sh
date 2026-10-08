@@ -1885,9 +1885,12 @@ copy_assets(){
   local script_dir
   script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
     # First copy explicit common assets if present
-    for name in applogo.png bootlogo.png startup.mp3 startup.mp4; do
+    for name in applogo.png bootlogo.png startup.mp3 startup.mp4 appbootscreen.mp4; do
         if [ -f "$script_dir/$name" ]; then
             cp -f "$script_dir/$name" "$ASSETS_DIR/" && info "Copied $name to assets"
+        fi
+        if [ -f "$script_dir/assets/$name" ]; then
+            cp -f "$script_dir/assets/$name" "$ASSETS_DIR/" && info "Copied assets/$name to assets"
         fi
     done
 
@@ -1898,7 +1901,7 @@ copy_assets(){
             # avoid duplicating files already copied
             bn=$(basename "$f")
             case "$bn" in
-                applogo.png|bootlogo.png|startup.mp3|startup.mp4) continue;;
+                applogo.png|bootlogo.png|startup.mp3|startup.mp4|appbootscreen.mp4) continue;;
             esac
             cp -f "$f" "$ASSETS_DIR/" && info "Copied $bn to assets"
         done
@@ -12213,9 +12216,9 @@ class Dashboard(QtWidgets.QMainWindow):
         appid = str(hits[0][1])
         steam = XUI_HOME / 'bin' / 'xui_steam.sh'
         if steam.exists():
-            self._run('/bin/sh', ['-c', f'"{steam}" -applaunch {appid}'])
+            self._run_game('/bin/sh', ['-c', f'"{steam}" -applaunch {appid}'])
         else:
-            self._open_url_external(f'steam://run/{appid}', normal_mode=True)
+            self._run_game('xdg-open', [f'steam://run/{appid}'])
         self._unlock_achievement_event('launch', 'steam')
         return True
 
@@ -13135,7 +13138,7 @@ exit 1
             self._msg('App launch', f'No se pudo iniciar {cmd}: {exc}')
             return False
 
-    def _launch_local_python_app(self, title, relative_script):
+    def _launch_local_python_app(self, title, relative_script, game=False):
         script = XUI_HOME / relative_script
         if not script.is_file():
             self._msg(str(title or 'App'), f'No se encontró el archivo de la app:\n{script}\n\nEjecuta de nuevo el instalador para restaurar los archivos.')
@@ -13145,7 +13148,18 @@ exit 1
         if not program or not Path(program).exists():
             self._msg(str(title or 'App'), 'No se encontró Python 3 para abrir esta app.')
             return False
+        if game:
+            return self._run_game(program, [str(script)])
         return self._run(program, [str(script)])
+
+    def _run_game(self, cmd, args=None):
+        intro_launcher = XUI_HOME / 'bin' / 'xui_play_game_intro.sh'
+        if not intro_launcher.is_file():
+            self._msg('Game intro', f'No se encontró el reproductor obligatorio del intro:\n{intro_launcher}')
+            return False
+        command = [str(intro_launcher), '--', str(cmd), *(str(arg) for arg in (args or []))]
+        shell_command = ' '.join(shlex.quote(part) for part in command)
+        return self._run('/bin/sh', ['-c', shell_command])
 
     def _controller_env_exports(self):
         env_file = XUI_HOME / 'data' / 'controller_profile.env'
@@ -14331,9 +14345,9 @@ exit 1
             if appid.isdigit():
                 steam = XUI_HOME / 'bin' / 'xui_steam.sh'
                 if steam.exists():
-                    self._run('/bin/sh', ['-c', f'"{steam}" -applaunch {appid}'])
+                    self._run_game('/bin/sh', ['-c', f'"{steam}" -applaunch {appid}'])
                 else:
-                    self._open_url_external(f'steam://run/{appid}', normal_mode=True)
+                    self._run_game('xdg-open', [f'steam://run/{appid}'])
                 self._unlock_achievement_event('launch', 'steam')
                 return
         if action == 'Games Hub':
@@ -14492,11 +14506,11 @@ exit 1
         elif action == 'No recent games':
             self._msg('Recently Played', 'No recent games.')
         elif action == 'Casino':
-            self._launch_local_python_app('Casino', 'casino/casino.py')
+            self._launch_local_python_app('Casino', 'casino/casino.py', game=True)
         elif action == 'Runner':
-            self._launch_local_python_app('Runner', 'games/runner.py')
+            self._launch_local_python_app('Runner', 'games/runner.py', game=True)
         elif action in ('Gem Match', 'Bejeweled'):
-            self._run('/bin/sh', ['-c', f'{xui}/bin/xui_gem_match.sh'])
+            self._run_game('/bin/sh', ['-c', f'"{xui}/bin/xui_gem_match.sh"'])
         elif action == 'Showcase Halo 4':
             if not self._launch_steam_game_by_name('Halo 4'):
                 self._open_url_external('https://www.bing.com/search?q=Halo+4', normal_mode=True)
@@ -14521,7 +14535,7 @@ exit 1
                 ) == 0
             )
             if installed:
-                self._run('/bin/sh', ['-c', f'"{run_fnae}"'])
+                self._run_game(run_fnae)
             else:
                 if self._ask_yes_no(
                     'FNAE',
@@ -14535,7 +14549,7 @@ exit 1
                         f'"{install_fnae}"',
                         success_msg='FNAE installed successfully.',
                         fail_msg='FNAE install failed. Check ~/.xui/logs/fnae_install.log',
-                        launch_cmd=f'"{run_fnae}"',
+                        launch_cmd=f'"{xui}/bin/xui_play_game_intro.sh" -- "{run_fnae}"',
                     )
         elif action == 'Uninstall FNAE':
             if self._ask_yes_no('FNAE', 'Uninstall Five Nights At Epstein\'s from local XUI apps folder?'):
@@ -14679,7 +14693,7 @@ exit 1
             dialog.exec_()
             self._play_sfx('close')
         elif action in ('Missions', 'Misiones'):
-            self._launch_local_python_app('Missions', 'games/missions.py')
+            self._launch_local_python_app('Missions', 'games/missions.py', game=True)
         elif action in ('Achievements', 'Logros'):
             self._open_achievements_hub()
         elif action == 'LAN':
@@ -15521,22 +15535,17 @@ play_video(){
   local file="$1"
   [ -f "$file" ] || return 1
   if command -v mpv >/dev/null 2>&1; then
-    mpv --no-terminal --really-quiet --fullscreen "$file"; return $?
-  elif command -v ffplay >/dev/null 2>&1; then
-    ffplay -autoexit -fs -loglevel quiet "$file"; return $?
-  elif command -v gst-play-1.0 >/dev/null 2>&1; then
-    gst-play-1.0 --no-interactive "$file"; return $?
-  elif command -v cvlc >/dev/null 2>&1; then
-    cvlc --play-and-exit --fullscreen --quiet "$file"; return $?
-  elif command -v vlc >/dev/null 2>&1; then
-    vlc --play-and-exit --fullscreen --quiet "$file"; return $?
+        mpv --no-terminal --really-quiet --fullscreen --no-config --input-conf=/dev/null --input-default-bindings=no --input-cursor=no --input-vo-keyboard=no --cursor-autohide=always --osc=no --osd-bar=no "$file"; return $?
   fi
+    echo "mpv is required to play locked video: $file" >&2
   return 1
 }
 if [ -f "$ASSETS_DIR/startup.mp4" ]; then
   info "Playing startup video"
   if play_video "$ASSETS_DIR/startup.mp4"; then
     PLAYED_STARTUP=1
+    else
+        exit 1
   fi
 fi
 if [ -f "$DASH_SCRIPT" ]; then
@@ -21829,7 +21838,7 @@ class StoreWindow(QtWidgets.QMainWindow):
                 str(cmd),
                 success_msg='FNAE installed. Launching game...',
                 fail_msg='FNAE install failed. Check ~/.xui/logs/fnae_install.log.',
-                launch_cmd=run_fnae,
+                launch_cmd=f'"{XUI_BIN / "xui_play_game_intro.sh"}" -- "{run_fnae}"',
             )
             return
         self._run_install_task(
@@ -21859,6 +21868,10 @@ class StoreWindow(QtWidgets.QMainWindow):
         if not cmd:
             self.reload('No launcher defined for this item.')
             return
+        category = str(item.get('category', '')).strip().lower()
+        if iid.lower().startswith('game_') or 'game' in category:
+            intro_launcher = shlex.quote(str(XUI_BIN / 'xui_play_game_intro.sh'))
+            cmd = f'{intro_launcher} -- /bin/sh -c {shlex.quote(cmd)}'
         self._run_detached(cmd)
         fresh = unlock_for_event('launch', iid, limit=3)
         ach_note = ''
@@ -25237,29 +25250,16 @@ if [ "${XUI_FORCE_SETUP:-0}" = "1" ] || [ ! -s "$SETUP_STATE" ]; then
     fi
 fi
 
-# Helper to play video (blocking) with multiple backends
+# Helper to play video (blocking) with mpv input disabled
 play_video(){
     local file="$1"
     if [ ! -f "$file" ]; then return 1; fi
     if command -v mpv >/dev/null 2>&1; then
-        mpv --no-terminal --really-quiet --fullscreen --loop-file=no "$file"
+        mpv --no-terminal --really-quiet --fullscreen --loop-file=no --no-config --input-conf=/dev/null --input-default-bindings=no --input-cursor=no --input-vo-keyboard=no --cursor-autohide=always --osc=no --osd-bar=no "$file"
         return $?
-    elif command -v ffplay >/dev/null 2>&1; then
-        ffplay -autoexit -fs -loglevel quiet "$file"
-        return $?
-    elif command -v gst-play-1.0 >/dev/null 2>&1; then
-        gst-play-1.0 --no-interactive "$file"
-        return $?
-    elif command -v cvlc >/dev/null 2>&1; then
-        cvlc --play-and-exit --fullscreen --quiet "$file"
-        return $?
-    elif command -v vlc >/dev/null 2>&1; then
-        vlc --play-and-exit --fullscreen --quiet "$file"
-        return $?
-    else
-        warn "No video player found for $file"
-        return 1
     fi
+    warn "mpv is required to play locked video: $file"
+    return 1
 }
 
 # Show an image (blocking until killed) using ffplay/mpv or a small python fallback
@@ -25307,7 +25307,8 @@ if [ -f "$ASSETS_DIR/startup.mp4" ]; then
             mkdir -p "$SESSION_STATE_DIR" 2>/dev/null || true
             : > "$STARTUP_VIDEO_STATE" 2>/dev/null || true
         else
-            warn "Startup video could not be played; continuing directly to dashboard."
+            warn "Startup video could not be played; refusing to skip it."
+            exit 1
         fi
     else
         info "Startup video already played this session; skipping playback."
@@ -25834,60 +25835,6 @@ now_iso(){
   date -u +"%Y-%m-%dT%H:%M:%SZ"
 }
 
-require_sudo_ticket(){
-  XUI_AUTH_MODE="none"
-  if [ "$(id -u)" -eq 0 ]; then
-    XUI_AUTH_MODE="root"
-    return 0
-  fi
-    echo "step=sudo-check"
-  if command -v sudo >/dev/null 2>&1; then
-    if sudo -n true >/dev/null 2>&1; then
-      XUI_AUTH_MODE="sudo"
-      return 0
-    fi
-  fi
-  if command -v pkexec >/dev/null 2>&1; then
-        echo "step=pkexec-auth"
-    if command -v timeout >/dev/null 2>&1; then
-      if timeout --signal=TERM --kill-after=5 60 pkexec /bin/sh -c "true" >/dev/null 2>&1; then
-        XUI_AUTH_MODE="pkexec"
-        return 0
-      fi
-    elif pkexec /bin/sh -c "true" >/dev/null 2>&1; then
-      XUI_AUTH_MODE="pkexec"
-      return 0
-    fi
-  fi
-  return 1
-}
-
-start_sudo_keepalive(){
-  if [ "$(id -u)" -eq 0 ]; then
-    return 0
-  fi
-  if [ "${XUI_AUTH_MODE:-}" != "sudo" ]; then
-    return 0
-  fi
-  if ! command -v sudo >/dev/null 2>&1; then
-    return 0
-  fi
-  (
-    while true; do
-      sudo -n true >/dev/null 2>&1 || exit 0
-      sleep 45
-    done
-  ) &
-  XUI_SUDO_KEEPALIVE_PID=$!
-}
-
-stop_sudo_keepalive(){
-  local pid="${XUI_SUDO_KEEPALIVE_PID:-}"
-  if [ -n "${pid:-}" ]; then
-    kill "$pid" >/dev/null 2>&1 || true
-  fi
-}
-
 read_state_commit(){
   python3 - "$STATE_FILE" <<'PY'
 import json,sys,pathlib
@@ -26114,8 +26061,8 @@ apply_update(){
     fix_src_permissions "$target"
     rm -rf "$target" >/dev/null 2>&1 && return 0
         if [ "${XUI_AUTH_MODE:-}" = "root" ]; then
-      rm -rf "$target" >/dev/null 2>&1 && return 0
-    fi
+            rm -rf "$target" >/dev/null 2>&1 && return 0
+        fi
     return 1
   }
 
@@ -26242,6 +26189,7 @@ apply_update(){
                 AUTO_CONFIRM=1 XUI_SKIP_LAUNCH_PROMPT=1 XUI_NONINTERACTIVE=1 XUI_SYSTEMCTL_TIMEOUT_SEC="${XUI_SYSTEMCTL_TIMEOUT_SEC:-15}" \
                     bash "$installer" --no-auto-install --skip-apt-wait
             fi
+            )
   }
   set +e
   if [ -n "${installer_log:-}" ] && command -v tee >/dev/null 2>&1; then
@@ -26316,10 +26264,6 @@ apply_update(){
   fi
   echo "update-applied"
   echo "installed_commit=$installed_commit"
-  if [ "${XUI_AUTH_MODE:-}" = "sudo" ]; then
-    stop_sudo_keepalive || true
-    trap - EXIT
-  fi
 }
 
 pull_only(){
@@ -32742,7 +32686,37 @@ PY
   info "Installation complete."
 }
 
+write_game_intro_wrapper(){
+    mkdir -p "$BIN_DIR" "$ASSETS_DIR"
+    cat > "$BIN_DIR/xui_play_game_intro.sh" <<'BASH'
+#!/usr/bin/env bash
+set -euo pipefail
+INTRO="${XUI_GAME_INTRO:-$HOME/.xui/assets/appbootscreen.mp4}"
+if [[ ! -s "$INTRO" ]]; then
+    echo "Game intro video is missing: $INTRO" >&2
+    exit 1
+fi
+if ! command -v mpv >/dev/null 2>&1; then
+    echo "mpv is required to play the locked game intro." >&2
+    exit 1
+fi
+if [[ "${1:-}" != "--" ]]; then
+    echo "Usage: $0 -- <game command> [args...]" >&2
+    exit 2
+fi
+shift
+if [[ "$#" -eq 0 ]]; then
+    echo "No game command was provided." >&2
+    exit 2
+fi
+mpv --no-terminal --really-quiet --fullscreen --no-config --input-conf=/dev/null --input-default-bindings=no --input-cursor=no --input-vo-keyboard=no --cursor-autohide=always --osc=no --osd-bar=no "$INTRO"
+exec "$@"
+BASH
+    chmod +x "$BIN_DIR/xui_play_game_intro.sh"
+}
+
 write_xenia_canary_tools(){
+    write_game_intro_wrapper
   info "Writing Xenia Canary installer and launcher"
   mkdir -p "$BIN_DIR" "$XUI_DIR/emulators/xenia-canary"
   cat > "$BIN_DIR/xui_install_xenia_canary.sh" <<'BASH'
@@ -32871,6 +32845,9 @@ if [[ ! -x "$APPIMAGE" ]]; then
 fi
 # Fallback extracts AppImages without requiring system-wide FUSE installation.
 export APPIMAGE_EXTRACT_AND_RUN=1
+if [[ "$#" -gt 0 ]]; then
+    exec "$HOME/.xui/bin/xui_play_game_intro.sh" -- "$APPIMAGE" "$@"
+fi
 exec "$APPIMAGE" "$@"
 BASH
   chmod +x "$BIN_DIR/xui_xenia_canary.sh"
@@ -33005,6 +32982,7 @@ PY
 }
 
 write_xemu_tools(){
+    write_game_intro_wrapper
   info "Writing original Xbox xemu installer, launcher and disc dumper"
   mkdir -p "$BIN_DIR" "$XUI_DIR/emulators/xemu"
   cat > "$BIN_DIR/xui_install_xemu.sh" <<'BASH'
@@ -33140,7 +33118,7 @@ if [[ "$#" -gt 0 && "${1:-}" != -* ]]; then
     exit 2
   fi
   export APPIMAGE_EXTRACT_AND_RUN=1
-  exec "$APPIMAGE" -dvd_path "$IMAGE" "$@"
+    exec "$HOME/.xui/bin/xui_play_game_intro.sh" -- "$APPIMAGE" -dvd_path "$IMAGE" "$@"
 fi
 export APPIMAGE_EXTRACT_AND_RUN=1
 exec "$APPIMAGE" "$@"
@@ -33315,6 +33293,7 @@ main(){
     if [ "${XUI_ONLY_REFRESH_XENIA:-0}" = "1" ]; then
         info "Refreshing Xbox emulator integrations only"
         ensure_dirs
+        copy_assets
         write_dashboard_py
         write_xenia_canary_tools
         write_xemu_tools
