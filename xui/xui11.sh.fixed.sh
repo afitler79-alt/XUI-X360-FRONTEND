@@ -313,6 +313,7 @@ parse_args(){
     XUI_ONLY_REFRESH_STORE=0
     XUI_ONLY_REFRESH_CONTROLLERS=0
     XUI_ONLY_REFRESH_UPDATER=0
+    XUI_ONLY_REFRESH_XENIA=0
     XUI_EXPORT_WIN=0
     XUI_ONLY_EXPORT_WIN=0
     XUI_SKIP_XENIA=0
@@ -361,6 +362,10 @@ parse_args(){
                 XUI_ONLY_REFRESH_UPDATER=1
                 shift
                 ;;
+            --refresh-xenia|--fix-xenia)
+                XUI_ONLY_REFRESH_XENIA=1
+                shift
+                ;;
             --export-win|--windows-bundle)
                 XUI_EXPORT_WIN=1
                 shift
@@ -371,14 +376,14 @@ parse_args(){
                 shift
                 ;;
             --help|-h)
-                echo "Usage: $0 [--yes-install|-y] [--no-auto-install] [--skip-xenia] [--use-external-dashboard] [--skip-apt-wait] [--apt-wait-seconds N] [--refresh-store-ui|--refresh-casino] [--refresh-controllers] [--refresh-updater] [--export-win] [--export-win-only]"; exit 0 ;;
+                echo "Usage: $0 [--yes-install|-y] [--no-auto-install] [--skip-xenia] [--use-external-dashboard] [--skip-apt-wait] [--apt-wait-seconds N] [--refresh-store-ui|--refresh-casino] [--refresh-controllers] [--refresh-updater] [--refresh-xenia] [--export-win] [--export-win-only]"; exit 0 ;;
             *)
                 warn "Ignoring unknown argument: $1"
                 shift
                 ;;
         esac
     done
-    export AUTO_INSTALL_TOOLS XUI_INSTALL_SYSTEM XUI_USE_EXTERNAL_DASHBOARD XUI_SKIP_APT_WAIT XUI_APT_WAIT_SECONDS XUI_ONLY_REFRESH_STORE XUI_ONLY_REFRESH_CONTROLLERS XUI_ONLY_REFRESH_UPDATER XUI_EXPORT_WIN XUI_ONLY_EXPORT_WIN XUI_SKIP_XENIA
+    export AUTO_INSTALL_TOOLS XUI_INSTALL_SYSTEM XUI_USE_EXTERNAL_DASHBOARD XUI_SKIP_APT_WAIT XUI_APT_WAIT_SECONDS XUI_ONLY_REFRESH_STORE XUI_ONLY_REFRESH_CONTROLLERS XUI_ONLY_REFRESH_UPDATER XUI_ONLY_REFRESH_XENIA XUI_EXPORT_WIN XUI_ONLY_EXPORT_WIN XUI_SKIP_XENIA
 }
 
 ensure_dirs(){
@@ -12273,11 +12278,18 @@ class Dashboard(QtWidgets.QMainWindow):
                 'desc': 'Choose an owned ISO or XEX dump and open it in Xenia Canary.',
             },
             {
+                'label': 'Dump Homebrew DVD to Xenia',
+                'play': 'Dump Homebrew DVD to Xenia',
+                'install': '',
+                'uninstall': '',
+                'desc': 'Copy a mounted, readable homebrew DVD into local storage and open its XEX/ISO in Xenia.',
+            },
+            {
                 'label': 'Xbox 360 DVD Drive',
                 'play': 'Xbox 360 DVD Info',
                 'install': '',
                 'uninstall': '',
-                'desc': 'Inspect optical drives and read the Xenia disc compatibility note.',
+                'desc': 'Inspect optical drives and read supported homebrew DVD dump details.',
             },
             {
                 'label': 'FNAE',
@@ -13198,7 +13210,7 @@ exit 1
         if dlg is not None and hasattr(dlg, 'finish_error'):
             dlg.finish_error('Installer process error.')
         self._close_install_task_progress()
-        self._msg('Install Failed', f'Installer process error: {err}')
+        self._msg(f'{self._install_task_label or "Install"} Failed', f'Process error: {err}')
 
     def _on_install_task_finished(self, code, status):
         self._on_install_task_output()
@@ -13216,7 +13228,7 @@ exit 1
             launch_cmd = str(self._install_task_launch_cmd or '').strip()
             if launch_cmd:
                 self._run('/bin/sh', ['-c', launch_cmd])
-            self._msg('Install', success_txt)
+            self._msg(str(self._install_task_label or 'Install'), success_txt)
             return
         dlg = self._install_task_progress
         if dlg is not None and hasattr(dlg, 'finish_error'):
@@ -13233,7 +13245,7 @@ exit 1
         if tail:
             if tail not in fail_txt:
                 fail_txt = fail_txt + '\n\n' + tail
-        self._msg('Install Failed', fail_txt)
+        self._msg(f'{self._install_task_label or "Install"} Failed', fail_txt)
 
     def _run_install_task(self, title, shell_cmd, success_msg='', fail_msg='', launch_cmd=''):
         if self._install_task_proc is not None and self._install_task_proc.state() != QtCore.QProcess.NotRunning:
@@ -13613,7 +13625,7 @@ exit 1
                     'Install Lutris', 'Install Heroic', 'Steam', 'RetroArch', 'Lutris', 'Heroic', 'Compat X86',
                 ]},
                 {'label': 'Games', 'description': 'Launch local games and compatible emulators.', 'children': [
-                    'FNAE', 'Gem Match', 'My Games', 'Launch Xbox 360 Game Dump', 'Xbox 360 DVD Info',
+                    'FNAE', 'Gem Match', 'My Games', 'Launch Xbox 360 Game Dump', 'Dump Homebrew DVD to Xenia', 'Xbox 360 DVD Info',
                 ]},
             ],
             'Developer Tools': [
@@ -14309,7 +14321,7 @@ exit 1
         elif action == 'Clean XUI Cache':
             self._clean_xui_cache()
         elif action == 'My Games':
-            self._menu('My Games', ['Runner', 'Casino', 'Gem Match', 'FNAE', 'Xenia Canary', 'Launch Xbox 360 Game Dump', 'Xbox 360 DVD Info', 'Steam', 'RetroArch', 'Games Integrations'])
+            self._menu('My Games', ['Runner', 'Casino', 'Gem Match', 'FNAE', 'Xenia Canary', 'Launch Xbox 360 Game Dump', 'Dump Homebrew DVD to Xenia', 'Xbox 360 DVD Info', 'Steam', 'RetroArch', 'Games Integrations'])
         elif action in ('Browse Games', 'Browse'):
             self._menu('Browse Games', ['Games Marketplace', 'Game Marketplace', 'Indie Channel', 'Steam', 'RetroArch', 'Store'])
         elif action == 'Xbox Home Feed':
@@ -14516,6 +14528,23 @@ exit 1
             if game_path:
                 self._run(str(launcher), [str(Path(game_path).expanduser())])
                 self._unlock_achievement_event('launch', 'xenia_canary')
+        elif action == 'Dump Homebrew DVD to Xenia':
+            launcher = XUI_HOME / 'bin' / 'xui_xenia_canary.sh'
+            dumper = XUI_HOME / 'bin' / 'xui_dump_xenia_homebrew_disc.py'
+            if not self._platform_available(launcher):
+                self._msg('Xenia Canary', 'Install Xenia Canary first, then run this action again.')
+                self._install_platform('xenia-canary')
+                return
+            if not dumper.is_file():
+                self._msg('Homebrew DVD', f'DVD dumper not found:\n{dumper}\n\nRun the XUI installer to create it.')
+                return
+            self._run_install_task(
+                'Xenia Homebrew DVD',
+                f'"{dumper}"',
+                success_msg='Homebrew DVD copied to ~/.xui/games/xenia_dumps and sent to Xenia Canary.',
+                fail_msg='Could not dump the DVD. Insert the homebrew data disc, let Linux mount it, and check the details below.',
+            )
+            self._unlock_achievement_event('launch', 'xenia_canary')
         elif action == 'Xbox 360 DVD Info':
             optical = []
             try:
@@ -14543,9 +14572,8 @@ exit 1
             self._msg(
                 'Xbox 360 DVD / Xenia',
                 f'{drives}\n\n'
-                'Xenia Canary cannot launch an Xbox 360 game directly from a regular PC DVD drive. '
-                'The disc must first be dumped with an Xbox 360 or a compatible dumping drive. '
-                'After that, choose the resulting owned .iso or .xex with “Launch Xbox 360 Game Dump”.\n\n'
+                '“Dump Homebrew DVD to Xenia” copies a mounted, readable homebrew data DVD to ~/.xui/games/xenia_dumps, then opens its default.xex (or a single .xex/.iso) in Xenia. '
+                'Linux must be able to mount and read the disc. Xbox 360-formatted or protected discs that a normal PC drive cannot expose as files are not supported by this file-copy feature.\n\n'
                 'Use only game dumps you are legally entitled to use. Official guide: '
                 'https://github.com/xenia-canary/xenia-canary/wiki/Quickstart#how-to-rip-games',
             )
@@ -32764,6 +32792,134 @@ export APPIMAGE_EXTRACT_AND_RUN=1
 exec "$APPIMAGE" "$@"
 BASH
   chmod +x "$BIN_DIR/xui_xenia_canary.sh"
+
+  cat > "$BIN_DIR/xui_dump_xenia_homebrew_disc.py" <<'PY'
+#!/usr/bin/env python3
+import datetime
+import json
+import os
+from pathlib import Path
+import shutil
+import subprocess
+import sys
+
+
+HOME = Path.home()
+DUMP_ROOT = HOME / '.xui' / 'games' / 'xenia_dumps'
+XENIA = HOME / '.xui' / 'bin' / 'xui_xenia_canary.sh'
+
+
+def optical_mounts():
+    try:
+        result = subprocess.run(
+            ['lsblk', '--json', '--output', 'PATH,TYPE,MOUNTPOINTS'],
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=8,
+        )
+        devices = json.loads(result.stdout).get('blockdevices', [])
+    except (OSError, subprocess.SubprocessError, json.JSONDecodeError) as exc:
+        raise RuntimeError(f'Unable to inspect optical drives with lsblk: {exc}') from exc
+
+    mounts = []
+
+    def visit(rows):
+        for row in rows if isinstance(rows, list) else []:
+            if not isinstance(row, dict):
+                continue
+            if str(row.get('type') or '').lower() == 'rom':
+                points = row.get('mountpoints')
+                if not isinstance(points, list):
+                    points = [row.get('mountpoint')]
+                for point in points:
+                    path = Path(str(point or '')).expanduser()
+                    if path.is_dir() and os.access(path, os.R_OK):
+                        mounts.append(path.resolve())
+            visit(row.get('children', []))
+
+    visit(devices)
+    return list(dict.fromkeys(mounts))
+
+
+def disc_size(source):
+    total = 0
+    for root, dirs, files in os.walk(source, followlinks=False):
+        dirs[:] = [name for name in dirs if not (Path(root) / name).is_symlink()]
+        for name in files:
+            path = Path(root) / name
+            try:
+                if not path.is_symlink():
+                    total += path.stat().st_size
+            except OSError:
+                continue
+    return total
+
+
+def dump_disc(source):
+    DUMP_ROOT.mkdir(parents=True, exist_ok=True)
+    label = ''.join(ch if ch.isalnum() or ch in '-_' else '_' for ch in source.name).strip('_') or 'homebrew_dvd'
+    stamp = datetime.datetime.now().strftime('%Y%m%d-%H%M%S-%f')
+    destination = DUMP_ROOT / f'{label}-{stamp}'
+    staging = DUMP_ROOT / f'.{destination.name}.partial'
+    needed = disc_size(source)
+    free = shutil.disk_usage(DUMP_ROOT).free
+    if needed > free:
+        raise RuntimeError(f'Not enough free space: need {needed} bytes, have {free} bytes.')
+
+    print(f'Copying mounted disc {source} ({needed} bytes)...', flush=True)
+    try:
+        shutil.copytree(source, staging, symlinks=True)
+        staging.rename(destination)
+    except Exception:
+        shutil.rmtree(staging, ignore_errors=True)
+        raise
+
+    executables = sorted(
+        (path for path in destination.rglob('*') if path.is_file() and path.suffix.lower() in ('.xex', '.iso')),
+        key=lambda path: (path.name.lower() != 'default.xex', str(path).lower()),
+    )
+    if not executables:
+        raise RuntimeError(f'Disc copied to {destination}, but it contains no .xex or .iso for Xenia.')
+    if len(executables) > 1 and executables[0].name.lower() != 'default.xex':
+        raise RuntimeError(
+            f'Disc copied to {destination}, but it contains multiple XEX/ISO files. '
+            'Use “Launch Xbox 360 Game Dump” to select the correct one.'
+        )
+    return destination, executables[0]
+
+
+def main():
+    if not XENIA.is_file() or not os.access(XENIA, os.X_OK):
+        raise RuntimeError('Xenia Canary is not installed. Install it from the XUI Games menu first.')
+    mounts = optical_mounts()
+    if not mounts:
+        raise RuntimeError('No mounted optical disc was found. Insert the homebrew DVD and let Linux mount it.')
+    if len(mounts) > 1:
+        details = '\n'.join(str(path) for path in mounts)
+        raise RuntimeError(f'More than one optical disc is mounted; leave only the target DVD mounted.\n{details}')
+
+    destination, game = dump_disc(mounts[0])
+    print(f'Dump complete: {destination}', flush=True)
+    print(f'Launching in Xenia: {game}', flush=True)
+    subprocess.Popen(
+        [str(XENIA), str(game)],
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        start_new_session=True,
+    )
+    return 0
+
+
+if __name__ == '__main__':
+    try:
+        raise SystemExit(main())
+    except Exception as exc:
+        print(f'Homebrew DVD dump failed: {exc}', file=sys.stderr, flush=True)
+        raise SystemExit(1)
+PY
+  chmod +x "$BIN_DIR/xui_dump_xenia_homebrew_disc.py"
 }
 
 main(){
@@ -32797,6 +32953,15 @@ main(){
         info "Updater refreshed at: $HOME/.xui/bin/xui_update_check.sh"
         info "Dashboard progress UI refreshed at: $HOME/.xui/dashboard/pyqt_dashboard_improved.py"
         info "Close and relaunch XUI before retrying Mandatory Update."
+        exit 0
+    fi
+    if [ "${XUI_ONLY_REFRESH_XENIA:-0}" = "1" ]; then
+        info "Refreshing Xenia homebrew DVD dump integration only"
+        ensure_dirs
+        write_dashboard_py
+        write_xenia_canary_tools
+        info "Xenia homebrew DVD dumper refreshed at: $HOME/.xui/bin/xui_dump_xenia_homebrew_disc.py"
+        info "Restart XUI, mount your homebrew DVD, then choose Dump Homebrew DVD to Xenia."
         exit 0
     fi
   if [ "${XUI_ONLY_REFRESH_STORE:-0}" = "1" ]; then
