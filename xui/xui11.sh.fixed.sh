@@ -18089,7 +18089,7 @@ class CasinoWindow(QtWidgets.QMainWindow):
         self.footer_label = QtWidgets.QLabel('Apuestas virtuales · Los resultados son locales y no representan dinero real')
         self.footer_label.setStyleSheet('font-size:12px; color:#718a7a;')
         footer.addWidget(self.footer_label, 1)
-        self.help_button = QtWidgets.QPushButton('Controles')
+        self.help_button = QtWidgets.QPushButton('Guía')
         self.help_button.clicked.connect(self._show_help)
         footer.addWidget(self.help_button)
         layout.addLayout(footer)
@@ -18119,19 +18119,12 @@ class CasinoWindow(QtWidgets.QMainWindow):
         self._result_label.setText('Listo para jugar')
 
     def _show_help(self):
-        dialog = QtWidgets.QMessageBox(self)
-        dialog.setWindowTitle('Controles del casino')
-        dialog.setText('''
-XUI Casino utiliza euros virtuales. No se procesa dinero real.
-
-A: Ir / Enter — jugar
-B: Salir
-Y: Cambiar pestaña
-X: Acción secundaria
-Tab / PageDown: navegar pestañas
-Ctrl+R: actualizar saldo
-''')
-        dialog.exec_()
+        guide = Path.home() / '.xui' / 'bin' / 'xui_global_guide.sh'
+        if guide.is_file():
+            try:
+                QtWidgets.QProcess.startDetached([str(guide)])
+            except Exception:
+                pass
 
     def _refresh_balance(self, message=''):
         self.balance_label.setText(f'Balance: {format_money(get_balance())}')
@@ -18598,6 +18591,12 @@ Ctrl+R: actualizar saldo
             pass
 
     def keyPressEvent(self, event):
+        if event.key() in (QtCore.Qt.Key_F1, QtCore.Qt.Key_G) and event.modifiers() in (QtCore.Qt.ControlModifier, QtCore.Qt.MetaModifier):
+            self._show_help()
+            return
+        if event.key() == QtCore.Qt.Key_F1:
+            self._show_help()
+            return
         if event.key() in (QtCore.Qt.Key_Return,QtCore.Qt.Key_Enter,QtCore.Qt.Key_Space):
             index=self.tabs.currentIndex()
             if index==0:self.play_slots()
@@ -27988,19 +27987,6 @@ PY
 set -euo pipefail
 PYRUN="$HOME/.xui/bin/xui_python.sh"
 APP="$HOME/.xui/bin/xui_global_guide.py"
-if command -v xdotool >/dev/null 2>&1; then
-  wid="$(xdotool getactivewindow 2>/dev/null || true)"
-  if [ -n "${wid:-}" ]; then
-    pid="$(xdotool getwindowpid "$wid" 2>/dev/null || true)"
-    if [ -n "${pid:-}" ] && [ -r "/proc/$pid/cmdline" ]; then
-      cmdline="$(tr '\000' ' ' < "/proc/$pid/cmdline" | tr '[:upper:]' '[:lower:]')"
-      if echo "$cmdline" | grep -Eq 'pyqt_dashboard_improved\.py|xui_startup_and_dashboard|xui-dashboard\.service'; then
-        xdotool key --clearmodifiers F1 >/dev/null 2>&1 || true
-        exit 0
-      fi
-    fi
-  fi
-fi
 if [ -x "$PYRUN" ] && [ -f "$APP" ]; then
   exec "$PYRUN" "$APP" "$@"
 fi
