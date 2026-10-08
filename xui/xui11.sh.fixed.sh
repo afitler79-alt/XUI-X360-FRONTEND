@@ -6732,10 +6732,12 @@ class MandatoryUpdateDialog(QtWidgets.QDialog):
                 font-size:30px;
                 border:1px solid rgba(76,86,96,0.4);
                 outline:none;
+                min-height:180px;
+                max-height:220px;
             }
             QListWidget#upd_choices::item {
-                padding:6px 10px;
-                margin:1px 0px;
+                padding:8px 12px;
+                margin:2px 0px;
             }
             QListWidget#upd_choices::item:selected {
                 background:qlineargradient(x1:0,y1:0,x2:1,y2:0, stop:0 #5abc3e, stop:1 #3e9132);
@@ -6812,8 +6814,8 @@ class MandatoryUpdateDialog(QtWidgets.QDialog):
         super().showEvent(e)
         parent = self.parentWidget()
         if parent is not None:
-            w = min(max(760, int(parent.width() * 0.54)), max(760, parent.width() - 120))
-            h = min(max(440, int(parent.height() * 0.56)), max(440, parent.height() - 120))
+            w = min(max(920, int(parent.width() * 0.64)), max(920, parent.width() - 120))
+            h = min(max(580, int(parent.height() * 0.68)), max(580, parent.height() - 120))
             self.resize(w, h)
             x = parent.x() + (parent.width() - w) // 2
             y = parent.y() + (parent.height() - h) // 2
@@ -7414,7 +7416,7 @@ class UpdateProgressDialog(QtWidgets.QDialog):
 
     def showEvent(self, e):
         super().showEvent(e)
-        self._pulse_timer.start(1200)
+        self._pulse_timer.start(1500)
         QtCore.QTimer.singleShot(0, self._center_dialog)
 
     def hideEvent(self, e):
