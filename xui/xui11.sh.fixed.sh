@@ -6705,7 +6705,7 @@ class MandatoryUpdateDialog(QtWidgets.QDialog):
         self.setWindowFlags(QtCore.Qt.Dialog | QtCore.Qt.FramelessWindowHint)
         self.setAttribute(QtCore.Qt.WA_TranslucentBackground, True)
         self.setModal(True)
-        self.resize(760, 460)
+        self.resize(920, 540)
         self.setStyleSheet('''
             QFrame#upd_panel {
                 background:#cfd4d9;
@@ -7303,10 +7303,12 @@ class UpdateProgressDialog(QtWidgets.QDialog):
     def __init__(self, parent=None):
         super().__init__(parent)
         self._progress_value = 5
+        self._pulse_timer = QtCore.QTimer(self)
+        self._pulse_timer.timeout.connect(self._pulse_progress)
         self.setWindowTitle('Update in Progress')
         self.setWindowFlags(QtCore.Qt.Dialog | QtCore.Qt.FramelessWindowHint)
         self.setModal(True)
-        self.resize(760, 360)
+        self.resize(920, 440)
         self.setStyleSheet('''
             QDialog {
                 background:#e7eaee;
@@ -7371,7 +7373,7 @@ class UpdateProgressDialog(QtWidgets.QDialog):
         v.addWidget(body, 1)
     def set_stage(self, text, percent):
         try:
-            percent = max(self._progress_value, min(99, int(percent)))
+            percent = max(self._progress_value, min(94, int(percent)))
         except (TypeError, ValueError):
             percent = self._progress_value
         self._progress_value = percent
@@ -7382,6 +7384,10 @@ class UpdateProgressDialog(QtWidgets.QDialog):
         t = str(text or '').strip()
         if t:
             self.detail.setText(t[:220])
+
+    def _pulse_progress(self):
+        if self.isVisible() and self._progress_value < 94:
+            self.bar.setValue(min(94, self._progress_value + 1))
 
     def finish_ok(self):
         self._progress_value = 100
@@ -7408,7 +7414,12 @@ class UpdateProgressDialog(QtWidgets.QDialog):
 
     def showEvent(self, e):
         super().showEvent(e)
+        self._pulse_timer.start(1200)
         QtCore.QTimer.singleShot(0, self._center_dialog)
+
+    def hideEvent(self, e):
+        self._pulse_timer.stop()
+        super().hideEvent(e)
 
 
 class InstallTaskProgressDialog(QtWidgets.QDialog):
@@ -18349,6 +18360,10 @@ Ctrl+R: actualizar saldo
     def _update_hilo_card(self):
         self.hilo_card.setText(card_label(self.hilo_value))
 
+    def _hilo_tick(self):
+        if self.hilo_timer.isActive():
+            self.hilo_timer.stop()
+
     def play_hilo(self, guess):
         bet=self._validate_bet(self.hilo_bet.value())
         if bet is None or self.hilo_timer.isActive(): return
@@ -18364,7 +18379,7 @@ Ctrl+R: actualizar saldo
     def _coin_page(self):
         page=QtWidgets.QFrame(); layout=QtWidgets.QVBoxLayout(page); layout.setContentsMargins(28,26,28,26); layout.setSpacing(18)
         title=QtWidgets.QLabel('COIN FLIP'); title.setStyleSheet('font-size:25px; font-weight:900; color:#ffe05a; letter-spacing:2px;'); layout.addWidget(title); layout.addWidget(self._result_label)
-        self.coin_face=QtWidgets.QLabel('HEADS'); self.coin_face.setAlignment(QtCore.Qt.AlignCenter); self.coin_face.setStyleSheet('font-size:130px; font-weight:900; color:#ffe05a; text-shadow:0 0 20px #ffe05a;')
+        self.coin_face=QtWidgets.QLabel('HEADS'); self.coin_face.setAlignment(QtCore.Qt.AlignCenter); self.coin_face.setStyleSheet('font-size:130px; font-weight:900; color:#ffe05a;')
         layout.addWidget(self.coin_face,1); controls=QtWidgets.QHBoxLayout(); self.coin_bet=QtWidgets.QSpinBox(); self.coin_bet.setRange(1,1000); self.coin_bet.setValue(10)
         self.coin_pick=QtWidgets.QComboBox(); self.coin_pick.addItems(['HEADS','TAILS']); self.coin_button=QtWidgets.QPushButton('FLIP COIN'); self.coin_button.setFixedSize(190,48); self.coin_button.clicked.connect(self.play_coin)
         controls.addWidget(QtWidgets.QLabel('APUESTA')); controls.addWidget(self.coin_bet); controls.addWidget(QtWidgets.QLabel('ELECCIÓN')); controls.addWidget(self.coin_pick); controls.addWidget(self.coin_button); layout.addLayout(controls)
