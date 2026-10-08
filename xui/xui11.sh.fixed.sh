@@ -349,7 +349,7 @@ parse_args(){
                     shift
                 fi
                 ;;
-            --refresh-store-ui|--fix-store-ui)
+            --refresh-store-ui|--fix-store-ui|--refresh-casino|--fix-casino)
                 XUI_ONLY_REFRESH_STORE=1
                 shift
                 ;;
@@ -371,7 +371,7 @@ parse_args(){
                 shift
                 ;;
             --help|-h)
-                echo "Usage: $0 [--yes-install|-y] [--no-auto-install] [--skip-xenia] [--use-external-dashboard] [--skip-apt-wait] [--apt-wait-seconds N] [--refresh-store-ui] [--refresh-controllers] [--refresh-updater] [--export-win] [--export-win-only]"; exit 0 ;;
+                echo "Usage: $0 [--yes-install|-y] [--no-auto-install] [--skip-xenia] [--use-external-dashboard] [--skip-apt-wait] [--apt-wait-seconds N] [--refresh-store-ui|--refresh-casino] [--refresh-controllers] [--refresh-updater] [--export-win] [--export-win-only]"; exit 0 ;;
             *)
                 warn "Ignoring unknown argument: $1"
                 shift
@@ -25982,15 +25982,11 @@ apply_update(){
     exit 1
   fi
 
-    echo "step=sudo-auth"
-  if ! require_sudo_ticket; then
-        echo "ERROR: no passwordless sudo or working graphical pkexec authentication is available."
-    exit 1
-  fi
-  if [ "${XUI_AUTH_MODE:-}" = "sudo" ]; then
-    start_sudo_keepalive || true
-    trap stop_sudo_keepalive EXIT
-  fi
+    if [ "$(id -u)" -eq 0 ]; then
+        XUI_AUTH_MODE="root"
+    else
+        XUI_AUTH_MODE="none"
+    fi
 
   fix_src_permissions(){
     local target="$1"
@@ -25999,11 +25995,6 @@ apply_update(){
       return 0
     fi
     echo "Fixing source permissions: $target"
-    if [ "${XUI_AUTH_MODE:-}" = "sudo" ]; then
-      sudo -n chown -R "$(id -u):$(id -g)" "$target" >/dev/null 2>&1 || true
-    elif [ "${XUI_AUTH_MODE:-}" = "pkexec" ]; then
-      pkexec /bin/sh -c 'chown -R "$1:$2" "$3"' sh "$(id -u)" "$(id -g)" "$target" >/dev/null 2>&1 || true
-    fi
   }
 
   remove_path_safe(){
@@ -26012,11 +26003,7 @@ apply_update(){
     rm -rf "$target" >/dev/null 2>&1 && return 0
     fix_src_permissions "$target"
     rm -rf "$target" >/dev/null 2>&1 && return 0
-    if [ "${XUI_AUTH_MODE:-}" = "sudo" ]; then
-      sudo -n rm -rf "$target" >/dev/null 2>&1 && return 0
-    elif [ "${XUI_AUTH_MODE:-}" = "pkexec" ]; then
-      pkexec /bin/sh -c 'rm -rf "$1"' sh "$target" >/dev/null 2>&1 && return 0
-    elif [ "${XUI_AUTH_MODE:-}" = "root" ]; then
+        if [ "${XUI_AUTH_MODE:-}" = "root" ]; then
       rm -rf "$target" >/dev/null 2>&1 && return 0
     fi
     return 1
@@ -26136,29 +26123,15 @@ apply_update(){
   installer_started_epoch="$(date +%s)"
   installer_log="$(mktemp /tmp/xui-installer-log.XXXXXX 2>/dev/null || true)"
   run_installer_once(){
-    if [ "${XUI_AUTH_MODE:-}" = "pkexec" ]; then
-      (
-        cd "$SRC"
-        if command -v timeout >/dev/null 2>&1; then
-          pkexec env AUTO_CONFIRM=1 XUI_SKIP_LAUNCH_PROMPT=1 XUI_NONINTERACTIVE=1 XUI_SYSTEMCTL_TIMEOUT_SEC="${XUI_SYSTEMCTL_TIMEOUT_SEC:-15}" \
-            timeout "${XUI_APPLY_INSTALLER_TIMEOUT_SEC:-300}" bash "$installer" --no-auto-install --skip-apt-wait
-        else
-          pkexec env AUTO_CONFIRM=1 XUI_SKIP_LAUNCH_PROMPT=1 XUI_NONINTERACTIVE=1 XUI_SYSTEMCTL_TIMEOUT_SEC="${XUI_SYSTEMCTL_TIMEOUT_SEC:-15}" \
-            bash "$installer" --no-auto-install --skip-apt-wait
-        fi
-      )
-    else
-      (
-        cd "$SRC"
-        if command -v timeout >/dev/null 2>&1; then
-          AUTO_CONFIRM=1 XUI_SKIP_LAUNCH_PROMPT=1 XUI_NONINTERACTIVE=1 XUI_SYSTEMCTL_TIMEOUT_SEC="${XUI_SYSTEMCTL_TIMEOUT_SEC:-15}" \
-            timeout "${XUI_APPLY_INSTALLER_TIMEOUT_SEC:-300}" bash "$installer" --no-auto-install --skip-apt-wait
-        else
-          AUTO_CONFIRM=1 XUI_SKIP_LAUNCH_PROMPT=1 XUI_NONINTERACTIVE=1 XUI_SYSTEMCTL_TIMEOUT_SEC="${XUI_SYSTEMCTL_TIMEOUT_SEC:-15}" \
-            bash "$installer" --no-auto-install --skip-apt-wait
-        fi
-      )
-    fi
+        (
+            cd "$SRC"
+            if command -v timeout >/dev/null 2>&1; then
+                AUTO_CONFIRM=1 XUI_SKIP_LAUNCH_PROMPT=1 XUI_NONINTERACTIVE=1 XUI_SYSTEMCTL_TIMEOUT_SEC="${XUI_SYSTEMCTL_TIMEOUT_SEC:-15}" \
+                    timeout "${XUI_APPLY_INSTALLER_TIMEOUT_SEC:-300}" bash "$installer" --no-auto-install --skip-apt-wait
+            else
+                AUTO_CONFIRM=1 XUI_SKIP_LAUNCH_PROMPT=1 XUI_NONINTERACTIVE=1 XUI_SYSTEMCTL_TIMEOUT_SEC="${XUI_SYSTEMCTL_TIMEOUT_SEC:-15}" \
+                    bash "$installer" --no-auto-install --skip-apt-wait
+            fi
   }
   set +e
   if [ -n "${installer_log:-}" ] && command -v tee >/dev/null 2>&1; then
@@ -32827,11 +32800,12 @@ main(){
         exit 0
     fi
   if [ "${XUI_ONLY_REFRESH_STORE:-0}" = "1" ]; then
-    info "Refreshing store UI only (fast mode)"
+        info "Refreshing casino and store apps only (fast mode)"
     ensure_dirs
     write_extras
-    info "Store UI refreshed at: $HOME/.xui/games/store.py"
-    info "Now restart dashboard and open Store again."
+        info "Casino poker engine refreshed at: $HOME/.xui/casino/poker_engine_v2.py"
+        info "Store UI refreshed at: $HOME/.xui/games/store.py"
+        info "Restart XUI before opening Casino or Store again."
     exit 0
   fi
   info "Starting XUI Ultra Master installer"
