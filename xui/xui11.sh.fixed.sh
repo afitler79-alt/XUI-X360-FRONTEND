@@ -16959,14 +16959,211 @@ EOF
 write_extras(){
   info "Writing casino, runner, missions, store and helper scripts"
   mkdir -p "$CASINO_DIR" "$GAMES_DIR" "$DATA_DIR" "$XUI_DIR/apps"
-    local installer_dir poker_source
-    installer_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-    poker_source="$installer_dir/poker_engine_v2.py"
-    if [ -f "$poker_source" ]; then
-        install -m 0644 "$poker_source" "$CASINO_DIR/poker_engine_v2.py"
-    else
-        warn "Poker engine source missing beside installer: $poker_source"
-    fi
+  cat > "$CASINO_DIR/poker_engine_v2.py" <<'PY'
+import itertools
+import random
+
+
+class PokerGame:
+    SUITS = ('♠', '♥', '♦', '♣')
+    RANKS = tuple(range(2, 15))
+    RANK_LABELS = {11: 'J', 12: 'Q', 13: 'K', 14: 'A'}
+    PHASES = ('preflop', 'flop', 'turn', 'river')
+
+    def __init__(self, players):
+        self.players = []
+        for index, player in enumerate(players):
+            self.players.append({
+                'id': str(player.get('id', index)),
+                'name': str(player.get('name', f'Player {index + 1}')),
+                'chips': max(0, int(player.get('chips', 0))),
+                'bet': 0,
+                'cards': [],
+                'folded': False,
+            })
+        if len(self.players) != 2:
+            raise ValueError('PokerGame requires exactly two players')
+
+        self.deck = [(rank, suit) for rank in self.RANKS for suit in self.SUITS]
+        random.shuffle(self.deck)
+        self.community = []
+        self.pot = 0
+        self.phase = 'preflop'
+        self.current_index = 0
+        self.active_bet = 5
+        self.last_raise = 5
+        self.acted = set()
+        self.last_action = 'Tu turno: iguala, sube o retírate.'
+        for _ in range(2):
+            for player in self.players:
+                player['cards'].append(self.deck.pop())
+        self._contribute(0, 2)
+        self._contribute(1, 5)
+
+    @classmethod
+    def _card_rank(cls, card):
+        return int(card[0])
+
+    @classmethod
+    def _card_label(cls, card):
+        rank = card[0]
+        return cls.RANK_LABELS.get(rank, str(rank)), card[1]
+
+    @staticmethod
+    def _score_five(cards):
+        ranks = sorted((card[0] for card in cards), reverse=True)
+        counts = {}
+        for rank in ranks:
+            counts[rank] = counts.get(rank, 0) + 1
+        groups = sorted(((count, rank) for rank, count in counts.items()), reverse=True)
+        flush = len({card[1] for card in cards}) == 1
+        unique = sorted(counts, reverse=True)
+        if 14 in unique:
+            unique.append(1)
+        straight_high = next((unique[index] for index in range(len(unique) - 4)
+                              if unique[index] - unique[index + 4] == 4), 0)
+
+        if flush and straight_high:
+            return (8, straight_high)
+        if groups[0][0] == 4:
+            return (7, groups[0][1], groups[1][1])
+        if groups[0][0] == 3 and groups[1][0] == 2:
+            return (6, groups[0][1], groups[1][1])
+        if flush:
+            return (5, *ranks)
+        if straight_high:
+            return (4, straight_high)
+        if groups[0][0] == 3:
+            kickers = sorted((rank for rank in counts if rank != groups[0][1]), reverse=True)
+            return (3, groups[0][1], *kickers)
+        pairs = sorted((rank for rank, count in counts.items() if count == 2), reverse=True)
+        if len(pairs) == 2:
+            kicker = next(rank for rank in counts if rank not in pairs)
+            return (2, pairs[0], pairs[1], kicker)
+        if len(pairs) == 1:
+            kickers = sorted((rank for rank in counts if rank != pairs[0]), reverse=True)
+            return (1, pairs[0], *kickers)
+        return (0, *ranks)
+
+    @classmethod
+    def _best_hand(cls, cards):
+        return max(cls._score_five(combo) for combo in itertools.combinations(cards, 5))
+
+    def _contribute(self, index, amount):
+        player = self.players[index]
+        contribution = min(max(0, amount), player['chips'])
+        player['chips'] -= contribution
+        player['bet'] += contribution
+        self.pot += contribution
+        return contribution
+
+    def _finish_round(self):
+        if all(player['folded'] or player['chips'] == 0 or
+               (player['id'] in self.acted and player['bet'] == self.active_bet)
+               for player in self.players):
+            self._advance_street()
+            return
+        next_index = 1 - self.current_index
+        if not self.players[next_index]['folded'] and self.players[next_index]['chips'] > 0:
+            self.current_index = next_index
+        elif not self.players[self.current_index]['folded'] and self.players[self.current_index]['chips'] > 0:
+            self.current_index = 1 - next_index
+        else:
+            self._advance_street()
+
+    def _advance_street(self):
+        if self.phase == 'preflop':
+            self.community.extend(self.deck.pop() for _ in range(3))
+            self.phase = 'flop'
+        elif self.phase == 'flop':
+            self.community.append(self.deck.pop())
+            self.phase = 'turn'
+        elif self.phase == 'turn':
+            self.community.append(self.deck.pop())
+            self.phase = 'river'
+        else:
+            self.phase = 'showdown'
+            self.last_action = 'Río completo. Se muestran las cartas.'
+            return
+
+        for player in self.players:
+            player['bet'] = 0
+        self.active_bet = 0
+        self.last_raise = 5
+        self.acted.clear()
+        self.current_index = 0
+        if all(player['folded'] or player['chips'] == 0 for player in self.players):
+            self._advance_street()
+        else:
+            self.last_action = f'{self.phase.title()}: tu turno.'
+
+    def apply_action(self, player_id, action, amount=None):
+        player = self.players[self.current_index]
+        if player['id'] != str(player_id) or player['folded'] or player['chips'] == 0:
+            return False
+
+        to_call = self.active_bet - player['bet']
+        if action == 'fold':
+            player['folded'] = True
+            self.phase = 'showdown'
+            self.last_action = f'{player["name"]} se retira. Mano terminada.'
+            return True
+        if action == 'check':
+            if to_call > 0:
+                return False
+            self.last_action = f'{player["name"]} pasa.'
+        elif action == 'call':
+            if to_call <= 0:
+                return False
+            paid = self._contribute(self.current_index, to_call)
+            if paid == 0:
+                return False
+            self.last_action = f'{player["name"]} iguala.'
+        elif action == 'raise':
+            target = int(amount or 0)
+            opponent = self.players[1 - self.current_index]
+            if target < self.active_bet + self.last_raise or target > player['bet'] + player['chips']:
+                return False
+            if target > opponent['bet'] + opponent['chips']:
+                return False
+            raise_by = target - self.active_bet
+            self._contribute(self.current_index, target - player['bet'])
+            self.active_bet = target
+            self.last_raise = raise_by
+            self.last_action = f'{player["name"]} sube a {target}.'
+            self.acted = {player['id']}
+            self.current_index = 1 - self.current_index
+            return True
+        else:
+            return False
+
+        self.acted.add(player['id'])
+        self._finish_round()
+        return True
+
+    def settle(self):
+        if self.phase != 'showdown':
+            return None
+        active = [player for player in self.players if not player['folded']]
+        if len(active) == 1:
+            winners = active
+            result = f'{active[0]["name"]} gana: el rival se retiró.'
+        else:
+            scores = {player['id']: self._best_hand(player['cards'] + self.community)
+                      for player in active}
+            best_score = max(scores.values())
+            winners = [player for player in active if scores[player['id']] == best_score]
+            if len(winners) == 1:
+                result = f'{winners[0]["name"]} gana el pozo.'
+            else:
+                result = 'Empate: el pozo se reparte.'
+        share, remainder = divmod(self.pot, len(winners))
+        for index, player in enumerate(winners):
+            player['chips'] += share + (1 if index < remainder else 0)
+        self.pot = 0
+        self.last_action = result
+        return result
+PY
 
   # Seed core data files so apps work on first boot
   if [ ! -f "$DATA_DIR/saldo.json" ]; then
