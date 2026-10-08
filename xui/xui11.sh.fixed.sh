@@ -19800,6 +19800,7 @@ def _catalog_entries(payload):
                 name = f'Xbox 360 Homebrew {drive_id[-6:]}' if drive_id else 'Xbox 360 Homebrew'
         name = str(name).strip()[:120]
         game_id = 'x360_' + hashlib.sha256(url.encode('utf-8')).hexdigest()[:16]
+        downloader = XUI_BIN / 'xui_download_xbox360_repo.sh'
         clean.append({
             'id': game_id,
             'name': name,
@@ -19809,7 +19810,8 @@ def _catalog_entries(payload):
             'source': 'XUI 360 Homebrew',
             'desc': 'Homebrew package from the XUI 360 catalog. Downloads and extracts locally.',
             'download_url': url,
-            'install': 'xui360repo:' + game_id,
+            'install': str(downloader) + f' --name {shlex.quote(name)} --url {shlex.quote(url)}',
+            'launch': str(downloader) + f' --name {shlex.quote(name)} --url {shlex.quote(url)} --launch',
         })
     return clean
 
@@ -20359,6 +20361,13 @@ def _maybe_background_sync_external():
         pass
 
 
+def _is_legacy_xbox360_repo_item(item):
+    return (
+        str(item.get('id', '')).startswith('xbox360_repo_')
+        or str(item.get('source', '')).strip().casefold() == 'xbox 360 repo'
+    )
+
+
 def ensure_catalog_minimum(min_count=620):
     _maybe_background_sync_external()
     data = load_store()
@@ -20375,6 +20384,8 @@ def ensure_catalog_minimum(min_count=620):
         if item is None:
             continue
         iid = item['id']
+        if _is_legacy_xbox360_repo_item(item):
+            continue
         if item.get('category') == 'Xbox 360 Homebrew':
             xbox360_ids.add(iid)
         if iid.startswith('auto_') or iid.startswith('itch_page_') or iid.startswith('gamejolt_page_'):
@@ -20394,6 +20405,8 @@ def ensure_catalog_minimum(min_count=620):
     for raw in _load_external_items():
         item = _norm_item(raw)
         if item is None:
+            continue
+        if _is_legacy_xbox360_repo_item(item):
             continue
         if item['id'].startswith('itch_page_') or item['id'].startswith('gamejolt_page_'):
             continue
@@ -21304,7 +21317,7 @@ class StoreWindow(QtWidgets.QMainWindow):
         if not Path(script).exists():
             self.info_lbl.setText('Missing source sync script.')
             return
-        self.info_lbl.setText('Syncing Flathub / Itch.io / Game Jolt...')
+        self.info_lbl.setText('Syncing Xbox 360 / Flathub / Itch.io / Game Jolt...')
         self.sync_proc = QtCore.QProcess(self)
         self.sync_proc.setProgram('/bin/sh')
         self.sync_proc.setArguments(['-lc', script])
@@ -22405,7 +22418,12 @@ def itch_collection_items(collection_url, id_prefix='itch_collection'):
 def xbox360_repo_items(repo_urls=None, list_name='xui360repo.txt', limit=60):
     candidates = list(repo_urls or [])
     if not candidates:
-        candidates = [
+        configured_url = ''
+        try:
+            configured_url = (DATA / 'xbox360_repo_url.txt').read_text(encoding='utf-8').strip()
+        except Exception:
+            pass
+        candidates = ([configured_url] if configured_url else []) + [
             'https://raw.githubusercontent.com/afitler79-alt/XUI_360GAMES_REP/main/xui360repo.txt',
             'https://raw.githubusercontent.com/afitler79-alt/XUI_360GAMES_REP/master/xui360repo.txt',
             'https://github.com/afitler79-alt/XUI_360GAMES_REP/raw/main/xui360repo.txt',
@@ -22463,23 +22481,28 @@ def xbox360_repo_items(repo_urls=None, list_name='xui360repo.txt', limit=60):
             break
         parsed = urllib.parse.urlparse(candidate)
         basename = Path(parsed.path).name or 'xbox360_game'
-        if not basename or basename in ('.', '..'):
-            basename = 'xbox360_game'
         if not name:
-            name = os.path.splitext(basename)[0].replace('_', ' ').strip() or 'Xbox 360 Game'
-        rid = f"xbox360_repo_{safe_name(name)}_{safe_name(candidate)}"
+            drive_match = re.search(r'/(?:file/)?d/([A-Za-z0-9_-]{10,})', parsed.path)
+            drive_id = drive_match.group(1) if drive_match else ''
+            if drive_id:
+                name = f'Xbox 360 Homebrew {drive_id[-6:]}'
+            else:
+                stem = os.path.splitext(basename)[0].replace('_', ' ').strip()
+                name = stem if stem and stem.lower() not in ('view', 'download') else 'Xbox 360 Homebrew'
+        rid = 'x360_' + hashlib.sha256(candidate.encode('utf-8')).hexdigest()[:16]
+        downloader = BIN / 'xui_download_xbox360_repo.sh'
         out.append({
             'id': rid,
             'name': name,
             'price': 0.0,
             'pricing': 'free',
-            'category': 'Games',
-            'source': 'Xbox 360 Repo',
+            'category': 'Xbox 360 Homebrew',
+            'source': 'XUI 360 Homebrew',
             'desc': f'Download from the XUI 360 games repository and extract it automatically.',
             'cover': 'https://raw.githubusercontent.com/afitler79-alt/XUI_360GAMES_REP/main/favicon.ico',
             'cover_local': '',
-            'install': str(BIN / 'xui_download_xbox360_repo.sh') + f' --name {shlex.quote(name)} --url {shlex.quote(candidate)}',
-            'launch': str(BIN / 'xui_download_xbox360_repo.sh') + f' --name {shlex.quote(name)} --url {shlex.quote(candidate)} --launch',
+            'install': str(downloader) + f' --name {shlex.quote(name)} --url {shlex.quote(candidate)}',
+            'launch': str(downloader) + f' --name {shlex.quote(name)} --url {shlex.quote(candidate)} --launch',
         })
     return out
 
