@@ -9356,21 +9356,30 @@ class StorageConsoleDialog(QtWidgets.QDialog):
         for device in secondary_disks:
             name = str(device.get('model') or device.get('name') or 'Secondary Disk')
             path = str(device.get('name') or '')
-            formatted = bool(device.get('fstype'))
+            formatted = bool(device.get('fstype') or device.get('partition_fstype'))
             mounted = bool(device.get('mounted'))
+            if formatted and not mounted:
+                mounted, mountpoint = self._attempt_auto_mount(device)
+                device['mounted'] = mounted
+                device['mountpoints'] = [mountpoint] if mounted else []
+                mounted = bool(mountpoint)
             capacity = int(device.get('size') or 0)
             free = capacity if formatted else capacity
-            state = 'Mounted' if mounted else ('Formatted as ' + str(device.get('fstype')) if formatted else 'Unformatted — format with caution')
+            state = 'Mounted' if mounted else ('Formatted as ' + str(device.get('fstype') or device.get('partition_fstype')) if formatted else 'Unformatted — format with caution')
+            detail = f'Secondary disk • {state}'
+            if formatted and not mounted:
+                detail += '\n\nAutomatic mount was unavailable. Use a terminal with sudo, or connect the disk again.'
             memory_units.append({
                 'name': f'{name} — {path}',
                 'capacity': f'{free / (1024 ** 3):.1f} GB free',
-                'detail': f'Secondary disk • {state}',
+                'detail': detail,
                 'used_pct': 0,
                 'device': path,
                 'secondary': True,
                 'formatted': formatted,
-                'fstype': str(device.get('fstype') or ''),
+                'fstype': str(device.get('fstype') or device.get('partition_fstype') or ''),
                 'mounted': mounted,
+                'mountpoint': str(device.get('mountpoints', [None])[0] or ''),
             })
         if not memory_units:
             memory_units.append({
@@ -9405,36 +9414,120 @@ class StorageConsoleDialog(QtWidgets.QDialog):
                 timeout=10,
             ).stdout
             rows = json.loads(raw)
-            root_device = ''
-            root_parent = ''
+            root_devices = set()
             for block in rows.get('blockdevices') or []:
                 mounts = block.get('mountpoints') or []
                 if '/' in mounts:
-                    root_device = str(block.get('name') or '')
-                    root_parent = str(block.get('pkname') or block.get('name') or '')
-                    break
+                    root_devices.add(str(block.get('name') or ''))
+                    root_devices.add(str(block.get('pkname') or ''))
+
             result = []
             for block in rows.get('blockdevices') or []:
                 name = str(block.get('name') or '')
                 kind = str(block.get('type') or '')
-                if kind != 'disk' or not name:
+                if kind != 'disk' or not name or name in root_devices:
                     continue
-                if name == root_device or name == root_parent:
-                    continue
-                mounts = block.get('mountpoints') or []
+                mounts = list(block.get('mountpoints') or [])
+                transport = str(block.get('tran') or '').strip().lower()
+                is_secondary = transport in ('sata', 'usb', 'mmc', 'ieee1394', 'virtio')
+                if not is_secondary and not mounts:
+                    # Some removable disks do not expose TRAN in lsblk. Check udev as fallback.
+                    if not shutil.which('udevadm'):
+                        continue
+                    udev_result = subprocess.run(
+                        ['udevadm', 'info', '--query=property', f'--path=/dev/{name}'],
+                        check=False,
+                        capture_output=True,
+                        text=True,
+                        timeout=5,
+                    )
+                    is_secondary = any(
+                        line.startswith(('ID_BUS=usb', 'ID_BUS=mmc', 'ID_BUS=sata'))
+                        for line in (udev_result.stdout or '').splitlines()
+                    )
+                    if not is_secondary and not mounts:
+                        continue
+                partition_fstype = ''
+                mount_device = ''
+                child_mountpoints = []
+                partition_children = [
+                    child for child in block.get('children') or []
+                    if str(child.get('type') or '') == 'part'
+                ]
+                for child in partition_children:
+                    child_fstype = str(child.get('fstype') or '').strip()
+                    child_mounts = list(child.get('mountpoints') or [])
+                    if child_fstype:
+                        partition_fstype = child_fstype
+                        mount_device = f"/dev/{child.get('name')}"
+                        if child_mounts:
+                            child_mountpoints = child_mounts
+                        if child_mountpoints:
+                            mounts = child_mountpoints
+                        break
+                size_value = str(block.get('size') or '').strip().replace(',', '')
+                size_multiplier = 1
+                size_number = size_value
+                if size_value[-1:].upper() in ('K', 'M', 'G', 'T'):
+                    size_multiplier = {'K': 1024, 'M': 1024 ** 2, 'G': 1024 ** 3, 'T': 1024 ** 4}[size_value[-1:].upper()]
+                    size_number = size_value[:-1]
+                try:
+                    size_bytes = int(size_number) * size_multiplier
+                except (TypeError, ValueError):
+                    size_bytes = 0
                 result.append({
                     'name': f'/dev/{name}',
                     'model': str(block.get('model') or 'Secondary disk'),
-                    'size': int(block.get('size') or 0),
+                    'size': size_bytes,
                     'fstype': str(block.get('fstype') or ''),
-                    'transport': str(block.get('tran') or ''),
+                    'partition_fstype': partition_fstype,
+                    'mount_device': mount_device,
+                    'partition_device': mount_device,
+                    'partition_count': len(partition_children),
+                    'transport': transport,
                     'read_only': bool(block.get('ro')),
                     'mounted': bool(mounts),
-                    'mountpoints': list(mounts),
+                    'mountpoints': mounts,
                 })
             return result
         except Exception:
             return []
+
+    @staticmethod
+    def _attempt_auto_mount(device):
+        device_path = str(device.get('mount_device') or device.get('name') or '')
+        if not device_path or not (device.get('fstype') or device.get('partition_fstype')):
+            return False, ''
+        if device.get('read_only'):
+            return False, ''
+        mount_root = Path.home() / '.xui' / 'mounts'
+        safe_name = re.sub(r'[^A-Za-z0-9._-]+', '_', device_path.rsplit('/', 1)[-1])
+        mountpoint = mount_root / safe_name
+        try:
+            mount_root.mkdir(parents=True, exist_ok=True)
+            mountpoint.mkdir(exist_ok=True)
+        except OSError:
+            return False, ''
+
+        command_prefix = []
+        if os.geteuid() != 0 and shutil.which('sudo'):
+            command_prefix = ['sudo', '-n']
+        elif os.geteuid() != 0:
+            return False, ''
+
+        try:
+            mount_result = subprocess.run(
+                command_prefix + ['mount', device_path, str(mountpoint)],
+                check=False,
+                capture_output=True,
+                text=True,
+                timeout=20,
+            )
+            if mount_result.returncode != 0:
+                return False, ''
+            return True, str(mountpoint)
+        except (OSError, subprocess.SubprocessError):
+            return False, ''
 
     def _show_setting(self, row):
         if row < 0 or row >= len(self.SETTINGS):
@@ -9462,10 +9555,20 @@ class StorageConsoleDialog(QtWidgets.QDialog):
         if row < 0 or row >= len(self._destination_rows):
             return
         device = self._destination_rows[row]
-        if not device.get('secondary') or device.get('mounted'):
-            self._msg('Format unavailable', 'Select an unmounted secondary disk to format it.')
+        if not device.get('secondary'):
+            self._msg('Format unavailable', 'Select a removable storage device.')
             return
-        dialog = SecondaryDiskFormatDialog(device.get('device'), self)
+        if device.get('mounted'):
+            self._msg('Format unavailable', 'Unmount the disk before formatting it.')
+            return
+        if device.get('read_only'):
+            self._msg('Format unavailable', 'The selected disk is read-only.')
+            return
+        dialog = SecondaryDiskFormatDialog(
+            device.get('device'),
+            partition_device=device.get('partition_device'),
+            parent=self,
+        )
         dialog.exec_()
         if dialog.result() == QtWidgets.QDialog.Accepted:
             self._load_destination_devices()
@@ -9494,6 +9597,11 @@ class StorageConsoleDialog(QtWidgets.QDialog):
                 if device.get('mounted'):
                     self.destination_description.setText(
                         str(device.get('detail') or '') + '\n\nUnmount the disk before formatting it.'
+                    )
+                    return
+                if device.get('read_only'):
+                    self.destination_description.setText(
+                        str(device.get('detail') or '') + '\n\nThe disk is read-only and cannot be formatted.'
                     )
                     return
                 dialog = SecondaryDiskFormatDialog(device.get('device'), self)
@@ -9564,9 +9672,10 @@ class SecondaryDiskFormatDialog(QtWidgets.QDialog):
         ('NTFS', 'NTFS', 'Large capacity and Windows compatibility; Linux read/write support is available.'),
     ]
 
-    def __init__(self, device, parent=None):
+    def __init__(self, device, partition_device='', parent=None):
         super().__init__(parent)
         self.device = str(device or '')
+        self.partition_device = str(partition_device or '')
         self.selected_format = 'FAT32'
         self.setWindowTitle('Format secondary disk')
         self.setWindowFlags(QtCore.Qt.Dialog | QtCore.Qt.FramelessWindowHint)
@@ -9590,6 +9699,10 @@ class SecondaryDiskFormatDialog(QtWidgets.QDialog):
         warning.setStyleSheet('color:#8c2020;font-weight:700;')
         root.addWidget(warning)
         root.addWidget(QtWidgets.QLabel(f'Secondary disk: {self.device}'))
+        if self.partition_device:
+            root.addWidget(QtWidgets.QLabel(f'Formatting partition: {self.partition_device}'))
+        else:
+            root.addWidget(QtWidgets.QLabel('No partition detected; a new GPT partition will be created.'))
         self.format_combo = QtWidgets.QComboBox()
         for label, value, description in self.FORMATS:
             self.format_combo.addItem(f'{label} — {description}', value)
@@ -9636,7 +9749,7 @@ class SecondaryDiskFormatDialog(QtWidgets.QDialog):
         self.result_label.setText('Formatting disk...')
         self.result_label.setEnabled(False)
         QtCore.QApplication.processEvents()
-        result = self._format_device(self.device, self.selected_format)
+        result = self._format_device(self.device, self.selected_format, partition_device=self.partition_device)
         self.result_label.setEnabled(True)
         if result[0]:
             QtWidgets.QMessageBox.information(
@@ -9649,7 +9762,7 @@ class SecondaryDiskFormatDialog(QtWidgets.QDialog):
             self.result_label.setText(result[1])
 
     @staticmethod
-    def _format_device(device, file_system):
+    def _format_device(device, file_system, partition_device=None):
         if not device or not file_system:
             return False, 'Invalid disk or filesystem.'
         if os.geteuid() != 0:
@@ -9670,11 +9783,23 @@ class SecondaryDiskFormatDialog(QtWidgets.QDialog):
         executable, arguments = formatter
         if not shutil.which(executable):
             return False, f'The {file_system} filesystem tool is not installed.'
+        target = str(partition_device or device)
         try:
-            subprocess.run(command_prefix + ['wipefs', '-a', device], check=True, capture_output=True, text=True, timeout=30)
-            subprocess.run(command_prefix + [executable, *arguments, device], check=True, capture_output=True, text=True, timeout=60)
+            if not partition_device:
+                if not shutil.which('parted'):
+                    return False, 'The parted utility is required to create an automatic partition.'
+                subprocess.run(
+                    command_prefix + ['parted', '-s', device, 'mklabel', 'gpt', 'mkpart', 'primary', '1MiB', '100%'],
+                    check=True,
+                    capture_output=True,
+                    text=True,
+                    timeout=30,
+                )
+                target = str(device) + '1'
+            subprocess.run(command_prefix + ['wipefs', '-a', target], check=True, capture_output=True, text=True, timeout=30)
+            subprocess.run(command_prefix + [executable, *arguments, target], check=True, capture_output=True, text=True, timeout=60)
             out = subprocess.run(
-                command_prefix + ['blkid', '-s', 'TYPE', '-o', 'value', device],
+                command_prefix + ['blkid', '-s', 'TYPE', '-o', 'value', target],
                 check=True,
                 capture_output=True,
                 text=True,
@@ -9683,7 +9808,7 @@ class SecondaryDiskFormatDialog(QtWidgets.QDialog):
             expected_type = {'FAT32': 'vfat', 'exFAT': 'exfat', 'NTFS': 'ntfs'}[file_system]
             if out.lower() != expected_type:
                 return False, f'Formatting finished, but detected filesystem is {out or "unknown"}.'
-            return True, f'Detected filesystem: {out}. Volume label: {label}.'
+            return True, f'Detected filesystem: {out}. Volume label: {label}. Partition: {target}.'
         except subprocess.CalledProcessError as exc:
             detail = (exc.stderr or exc.stdout or '').strip()
             if 'password' in detail.lower() or 'authentication' in detail.lower():
@@ -12482,6 +12607,35 @@ class Dashboard(QtWidgets.QMainWindow):
         d.exec_()
         self._play_sfx('back')
 
+    def _restart_system_after_update(self):
+        """Restart the host only after the mandatory update has completed successfully."""
+        if self._is_windows_runtime():
+            try:
+                QtCore.QProcess.startDetached('cmd.exe', ['/c', 'shutdown /s /t 0 /f'])
+                return True
+            except Exception:
+                return False
+
+        if shutil.which('systemctl'):
+            try:
+                QtCore.QProcess.startDetached('systemctl', ['reboot'])
+                return True
+            except Exception:
+                return False
+
+        if shutil.which('sudo'):
+            try:
+                QtCore.QProcess.startDetached('sudo', ['-n', 'systemctl', 'reboot'])
+                return True
+            except Exception:
+                return False
+
+        try:
+            QtCore.QProcess.startDetached('pkexec', ['systemctl', 'reboot'])
+            return True
+        except Exception:
+            return False
+
     def _restart_dashboard_after_update(self):
         if self._is_windows_runtime():
             launcher = XUI_HOME / 'bin' / 'xui_start.bat'
@@ -12730,8 +12884,15 @@ exit 1
                 QtCore.QTimer.singleShot(360, self._close_mandatory_update_progress)
             else:
                 self._close_mandatory_update_progress()
-            self._msg('Update', 'Mandatory update installed. Restarting dashboard...')
-            QtCore.QTimer.singleShot(420, self._restart_dashboard_after_update)
+            self._msg('Update', 'Mandatory update installed. Restarting system...')
+            if not self._restart_system_after_update():
+                self._show_update_failed_dialog(
+                    'The update was applied, but this system could not launch a restart.\n\nRestart manually from the system menu.',
+                    self._build_update_status_code('restart-command-unavailable')
+                )
+                self._mandatory_update_in_progress = False
+                return
+            self._mandatory_update_in_progress = False
             return
         self._close_mandatory_update_progress()
         lines = [ln for ln in self._mandatory_update_output.splitlines() if ln.strip()]
