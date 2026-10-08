@@ -18057,6 +18057,10 @@ class CasinoWindow(QtWidgets.QMainWindow):
         header_layout.addWidget(self.status_label)
         layout.addWidget(header)
 
+        self._result_label = QtWidgets.QLabel('Listo para jugar')
+        self._result_label.setObjectName('result')
+        self._result_label.setStyleSheet('font-size:18px; color:#a6e7b8;')
+
         self.tabs = QtWidgets.QTabWidget()
         self.tabs.addTab(self._slots_page(), '◉ Slots')
         self.tabs.addTab(self._roulette_page(), '◌ Roulette')
@@ -18076,10 +18080,6 @@ class CasinoWindow(QtWidgets.QMainWindow):
         self.help_button.clicked.connect(self._show_help)
         footer.addWidget(self.help_button)
         layout.addLayout(footer)
-
-        self._result_label = QtWidgets.QLabel('Listo para jugar')
-        self._result_label.setObjectName('result')
-        self._result_label.setStyleSheet('font-size:18px; color:#a6e7b8;')
 
     def _connect_timers(self):
         self.slots_timer = QtCore.QTimer(self)
