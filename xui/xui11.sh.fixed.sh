@@ -362,7 +362,7 @@ parse_args(){
                 XUI_ONLY_REFRESH_UPDATER=1
                 shift
                 ;;
-            --refresh-xenia|--fix-xenia)
+            --refresh-xenia|--fix-xenia|--refresh-xbox-emulators|--fix-xbox-emulators)
                 XUI_ONLY_REFRESH_XENIA=1
                 shift
                 ;;
@@ -376,7 +376,7 @@ parse_args(){
                 shift
                 ;;
             --help|-h)
-                echo "Usage: $0 [--yes-install|-y] [--no-auto-install] [--skip-xenia] [--use-external-dashboard] [--skip-apt-wait] [--apt-wait-seconds N] [--refresh-store-ui|--refresh-casino] [--refresh-controllers] [--refresh-updater] [--refresh-xenia] [--export-win] [--export-win-only]"; exit 0 ;;
+                echo "Usage: $0 [--yes-install|-y] [--no-auto-install] [--skip-xenia] [--use-external-dashboard] [--skip-apt-wait] [--apt-wait-seconds N] [--refresh-store-ui|--refresh-casino] [--refresh-controllers] [--refresh-updater] [--refresh-xbox-emulators] [--export-win] [--export-win-only]"; exit 0 ;;
             *)
                 warn "Ignoring unknown argument: $1"
                 shift
@@ -12271,6 +12271,34 @@ class Dashboard(QtWidgets.QMainWindow):
                 'desc': 'Launch the official Xenia Canary emulator for local Xbox 360 game dumps.',
             },
             {
+                'label': 'xemu (Original Xbox)',
+                'play': 'xemu (Original Xbox)',
+                'install': 'Install xemu',
+                'uninstall': '',
+                'desc': 'Install and launch the official xemu emulator for original Xbox XISO images.',
+            },
+            {
+                'label': 'Launch Original Xbox XISO',
+                'play': 'Launch Original Xbox XISO',
+                'install': '',
+                'uninstall': '',
+                'desc': 'Choose an original Xbox XISO image and boot it with xemu.',
+            },
+            {
+                'label': 'Dump Homebrew DVD to xemu',
+                'play': 'Dump Homebrew DVD to xemu',
+                'install': '',
+                'uninstall': '',
+                'desc': 'Copy a mounted data DVD containing an XISO image and launch it with xemu.',
+            },
+            {
+                'label': 'Original Xbox Setup Info',
+                'play': 'Original Xbox Setup Info',
+                'install': '',
+                'uninstall': '',
+                'desc': 'Review xemu firmware requirements and supported XISO image format.',
+            },
+            {
                 'label': 'Xbox 360 Game Dump',
                 'play': 'Launch Xbox 360 Game Dump',
                 'install': '',
@@ -13396,6 +13424,11 @@ exit 1
                 'launch': xui_bin / 'xui_xenia_canary.sh',
                 'install': xui_bin / 'xui_install_xenia_canary.sh',
             },
+            'xemu': {
+                'label': 'xemu (Original Xbox)',
+                'launch': xui_bin / 'xui_xemu.sh',
+                'install': xui_bin / 'xui_install_xemu.sh',
+            },
         }
 
     def _platform_available(self, launch_script):
@@ -13625,7 +13658,8 @@ exit 1
                     'Install Lutris', 'Install Heroic', 'Steam', 'RetroArch', 'Lutris', 'Heroic', 'Compat X86',
                 ]},
                 {'label': 'Games', 'description': 'Launch local games and compatible emulators.', 'children': [
-                    'FNAE', 'Gem Match', 'My Games', 'Launch Xbox 360 Game Dump', 'Dump Homebrew DVD to Xenia', 'Xbox 360 DVD Info',
+                    'FNAE', 'Gem Match', 'My Games', 'Xenia Canary', 'Launch Xbox 360 Game Dump', 'Dump Homebrew DVD to Xenia', 'Xbox 360 DVD Info',
+                    'xemu (Original Xbox)', 'Install xemu', 'Launch Original Xbox XISO', 'Dump Homebrew DVD to xemu', 'Original Xbox Setup Info',
                 ]},
             ],
             'Developer Tools': [
@@ -14321,7 +14355,7 @@ exit 1
         elif action == 'Clean XUI Cache':
             self._clean_xui_cache()
         elif action == 'My Games':
-            self._menu('My Games', ['Runner', 'Casino', 'Gem Match', 'FNAE', 'Xenia Canary', 'Launch Xbox 360 Game Dump', 'Dump Homebrew DVD to Xenia', 'Xbox 360 DVD Info', 'Steam', 'RetroArch', 'Games Integrations'])
+            self._menu('My Games', ['Runner', 'Casino', 'Gem Match', 'FNAE', 'Xenia Canary', 'Launch Xbox 360 Game Dump', 'Dump Homebrew DVD to Xenia', 'Xbox 360 DVD Info', 'xemu (Original Xbox)', 'Launch Original Xbox XISO', 'Dump Homebrew DVD to xemu', 'Original Xbox Setup Info', 'Steam', 'RetroArch', 'Games Integrations'])
         elif action in ('Browse Games', 'Browse'):
             self._menu('Browse Games', ['Games Marketplace', 'Game Marketplace', 'Indie Channel', 'Steam', 'RetroArch', 'Store'])
         elif action == 'Xbox Home Feed':
@@ -14545,6 +14579,54 @@ exit 1
                 fail_msg='Could not dump the DVD. Insert the homebrew data disc, let Linux mount it, and check the details below.',
             )
             self._unlock_achievement_event('launch', 'xenia_canary')
+        elif action == 'xemu (Original Xbox)':
+            self._launch_platform('xemu')
+        elif action == 'Install xemu':
+            self._install_platform('xemu')
+        elif action == 'Launch Original Xbox XISO':
+            launcher = XUI_HOME / 'bin' / 'xui_xemu.sh'
+            if not self._platform_available(launcher):
+                self._msg('xemu', 'xemu is not installed yet. Install it first, then choose the XISO again.')
+                self._install_platform('xemu')
+                return
+            game_path, _selected_filter = QtWidgets.QFileDialog.getOpenFileName(
+                self,
+                'Select an original Xbox XISO image',
+                str(Path.home()),
+                'Xbox XISO images (*.iso *.xiso);;All files (*)',
+            )
+            if game_path:
+                self._run(str(launcher), [str(Path(game_path).expanduser())])
+                self._unlock_achievement_event('launch', 'xemu')
+        elif action == 'Dump Homebrew DVD to xemu':
+            launcher = XUI_HOME / 'bin' / 'xui_xemu.sh'
+            dumper = XUI_HOME / 'bin' / 'xui_dump_xemu_homebrew_disc.py'
+            if not self._platform_available(launcher):
+                self._msg('xemu', 'Install xemu first, then run this action again.')
+                self._install_platform('xemu')
+                return
+            if not dumper.is_file():
+                self._msg('Homebrew DVD', f'DVD dumper not found:\n{dumper}\n\nRun the XUI installer to create it.')
+                return
+            self._run_install_task(
+                'xemu Homebrew DVD',
+                f'"{dumper}"',
+                success_msg='DVD contents copied to ~/.xui/games/xemu_dumps and XISO launched in xemu.',
+                fail_msg='Could not dump/launch the DVD. Linux must mount it and it must contain a valid XISO image.',
+            )
+            self._unlock_achievement_event('launch', 'xemu')
+        elif action == 'Original Xbox Setup Info':
+            self._msg(
+                'xemu (Original Xbox)',
+                'xemu boots original Xbox XISO images, not Xbox 360 XEX files or arbitrary data-disc folders.\n\n'
+                'First install xemu and configure the MCPX boot ROM, compatible flash BIOS, and Xbox HDD image in xemu. '
+                'Firmware/BIOS files must be dumped from hardware you own; XUI does not download or include them. '
+                'A retail BIOS may not boot unsigned homebrew.\n\n'
+                'For an optical disc, Linux must mount it as a readable data volume and it must contain an already-created XISO .iso. '
+                'This helper copies files only; it cannot read Xbox security sectors or convert raw/redump images.\n\n'
+                'Official setup: https://xemu.app/docs/required-files/\n'
+                'XISO format: https://xemu.app/docs/disc-images/',
+            )
         elif action == 'Xbox 360 DVD Info':
             optical = []
             try:
@@ -32922,6 +33004,281 @@ PY
   chmod +x "$BIN_DIR/xui_dump_xenia_homebrew_disc.py"
 }
 
+write_xemu_tools(){
+  info "Writing original Xbox xemu installer, launcher and disc dumper"
+  mkdir -p "$BIN_DIR" "$XUI_DIR/emulators/xemu"
+  cat > "$BIN_DIR/xui_install_xemu.sh" <<'BASH'
+#!/usr/bin/env bash
+set -euo pipefail
+DEST="$HOME/.xui/emulators/xemu"
+APPIMAGE="$DEST/xemu.AppImage"
+VERSION_FILE="$DEST/release.json"
+mkdir -p "$DEST"
+exec python3 - "$APPIMAGE" "$VERSION_FILE" <<'PY'
+import hashlib
+import json
+import os
+import pathlib
+import platform
+import sys
+import tempfile
+import urllib.request
+
+app = pathlib.Path(sys.argv[1]).expanduser()
+version_file = pathlib.Path(sys.argv[2]).expanduser()
+machine = platform.machine().lower()
+arch = {'x86_64': 'x86_64', 'amd64': 'x86_64', 'aarch64': 'aarch64', 'arm64': 'aarch64'}.get(machine)
+if arch is None:
+    print(f'Official xemu AppImage is not available for Linux architecture {machine}.', file=sys.stderr)
+    raise SystemExit(2)
+
+request = urllib.request.Request(
+    'https://api.github.com/repos/xemu-project/xemu/releases/latest',
+    headers={'Accept': 'application/vnd.github+json', 'User-Agent': 'XUI-xemu-Installer'},
+)
+try:
+    with urllib.request.urlopen(request, timeout=20) as response:
+        release = json.load(response)
+except Exception as exc:
+    if app.is_file() and os.access(app, os.X_OK):
+        print(f'GitHub is unavailable; keeping installed xemu: {exc}')
+        raise SystemExit(0)
+    print(f'Cannot query official xemu releases: {exc}', file=sys.stderr)
+    raise SystemExit(1)
+
+tag = str(release.get('tag_name') or '').strip()
+version = tag.removeprefix('v')
+asset_name = f'xemu-{version}-{arch}.AppImage'
+asset = next((item for item in release.get('assets', []) if item.get('name') == asset_name), None)
+if not tag or not isinstance(asset, dict):
+    print(f'The official release has no AppImage asset named {asset_name}.', file=sys.stderr)
+    raise SystemExit(1)
+digest = str(asset.get('digest') or '')
+if not digest.startswith('sha256:') or len(digest) != 71:
+    print('GitHub did not provide a valid SHA-256 digest for xemu; refusing to install.', file=sys.stderr)
+    raise SystemExit(1)
+expected_hash = digest.removeprefix('sha256:').lower()
+url = str(asset.get('browser_download_url') or '')
+if not url.startswith('https://github.com/xemu-project/xemu/releases/download/'):
+    print('Unexpected xemu release URL; refusing to install.', file=sys.stderr)
+    raise SystemExit(1)
+try:
+    installed = json.loads(version_file.read_text(encoding='utf-8'))
+except Exception:
+    installed = {}
+if app.is_file() and os.access(app, os.X_OK) and installed.get('tag') == tag:
+    print(f'xemu {tag} is already installed.')
+    raise SystemExit(0)
+
+app.parent.mkdir(parents=True, exist_ok=True)
+fd, temporary_name = tempfile.mkstemp(prefix='.xemu-', suffix='.AppImage', dir=app.parent)
+temporary = pathlib.Path(temporary_name)
+hasher = hashlib.sha256()
+total = 0
+try:
+    request = urllib.request.Request(url, headers={'User-Agent': 'XUI-xemu-Installer'})
+    with os.fdopen(fd, 'wb') as output, urllib.request.urlopen(request, timeout=60) as response:
+        while True:
+            chunk = response.read(1024 * 1024)
+            if not chunk:
+                break
+            total += len(chunk)
+            if total > 256 * 1024 * 1024:
+                raise RuntimeError('AppImage exceeded the 256 MiB safety limit.')
+            hasher.update(chunk)
+            output.write(chunk)
+        output.flush()
+        os.fsync(output.fileno())
+    if total < 1024 * 1024:
+        raise RuntimeError('Downloaded AppImage is unexpectedly small.')
+    actual_hash = hasher.hexdigest().lower()
+    if actual_hash != expected_hash:
+        raise RuntimeError(f'SHA-256 verification failed (expected {expected_hash}, got {actual_hash}).')
+    temporary.chmod(0o755)
+    temporary.replace(app)
+    version_file.write_text(json.dumps({
+        'tag': tag,
+        'asset': asset_name,
+        'sha256': actual_hash,
+        'source': url,
+    }, indent=2) + '\n', encoding='utf-8')
+    print(f'Installed verified xemu {tag} at {app}')
+except Exception as exc:
+    try:
+        temporary.unlink(missing_ok=True)
+    except Exception:
+        pass
+    print(f'xemu installation failed: {exc}', file=sys.stderr)
+    raise SystemExit(1)
+PY
+BASH
+  chmod +x "$BIN_DIR/xui_install_xemu.sh"
+
+  cat > "$BIN_DIR/xui_xemu.sh" <<'BASH'
+#!/usr/bin/env bash
+set -euo pipefail
+APPIMAGE="$HOME/.xui/emulators/xemu/xemu.AppImage"
+INSTALLER="$HOME/.xui/bin/xui_install_xemu.sh"
+case "${1:-}" in
+  --check)
+    [[ -x "$APPIMAGE" ]]
+    exit $?
+    ;;
+  --install)
+    exec "$INSTALLER"
+    ;;
+esac
+if [[ ! -x "$APPIMAGE" ]]; then
+  echo "xemu is not installed. Run: $INSTALLER" >&2
+  exit 1
+fi
+if [[ "$#" -gt 0 && "${1:-}" != -* ]]; then
+  IMAGE="$1"
+  shift
+  if [[ ! -f "$IMAGE" ]]; then
+    echo "XISO image not found: $IMAGE" >&2
+    exit 2
+  fi
+  export APPIMAGE_EXTRACT_AND_RUN=1
+  exec "$APPIMAGE" -dvd_path "$IMAGE" "$@"
+fi
+export APPIMAGE_EXTRACT_AND_RUN=1
+exec "$APPIMAGE" "$@"
+BASH
+  chmod +x "$BIN_DIR/xui_xemu.sh"
+
+  cat > "$BIN_DIR/xui_dump_xemu_homebrew_disc.py" <<'PY'
+#!/usr/bin/env python3
+import datetime
+import json
+import os
+from pathlib import Path
+import shutil
+import subprocess
+import sys
+
+
+HOME = Path.home()
+DUMP_ROOT = HOME / '.xui' / 'games' / 'xemu_dumps'
+XEMU = HOME / '.xui' / 'bin' / 'xui_xemu.sh'
+
+
+def optical_mounts():
+    try:
+        result = subprocess.run(
+            ['lsblk', '--json', '--output', 'PATH,TYPE,MOUNTPOINTS'],
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=8,
+        )
+        devices = json.loads(result.stdout).get('blockdevices', [])
+    except (OSError, subprocess.SubprocessError, json.JSONDecodeError) as exc:
+        raise RuntimeError(f'Unable to inspect optical drives with lsblk: {exc}') from exc
+
+    mounts = []
+
+    def visit(rows):
+        for row in rows if isinstance(rows, list) else []:
+            if not isinstance(row, dict):
+                continue
+            if str(row.get('type') or '').lower() == 'rom':
+                points = row.get('mountpoints')
+                if not isinstance(points, list):
+                    points = [row.get('mountpoint')]
+                for point in points:
+                    path = Path(str(point or '')).expanduser()
+                    if path.is_dir() and os.access(path, os.R_OK):
+                        mounts.append(path.resolve())
+            visit(row.get('children', []))
+
+    visit(devices)
+    return list(dict.fromkeys(mounts))
+
+
+def media_size(source):
+    total = 0
+    for root, dirs, files in os.walk(source, followlinks=False):
+        dirs[:] = [name for name in dirs if not (Path(root) / name).is_symlink()]
+        for name in files:
+            path = Path(root) / name
+            try:
+                if not path.is_symlink():
+                    total += path.stat().st_size
+            except OSError:
+                continue
+    return total
+
+
+def dump_disc(source):
+    DUMP_ROOT.mkdir(parents=True, exist_ok=True)
+    label = ''.join(ch if ch.isalnum() or ch in '-_' else '_' for ch in source.name).strip('_') or 'xbox_homebrew_dvd'
+    stamp = datetime.datetime.now().strftime('%Y%m%d-%H%M%S-%f')
+    destination = DUMP_ROOT / f'{label}-{stamp}'
+    staging = DUMP_ROOT / f'.{destination.name}.partial'
+    needed = media_size(source)
+    free = shutil.disk_usage(DUMP_ROOT).free
+    if needed > free:
+        raise RuntimeError(f'Not enough free space: need {needed} bytes, have {free} bytes.')
+
+    print(f'Copying mounted disc {source} ({needed} bytes)...', flush=True)
+    try:
+        shutil.copytree(source, staging, symlinks=True)
+        staging.rename(destination)
+    except Exception:
+        shutil.rmtree(staging, ignore_errors=True)
+        raise
+
+    images = sorted(
+        (path for path in destination.rglob('*') if path.is_file() and path.suffix.lower() == '.iso'),
+        key=lambda path: str(path).lower(),
+    )
+    if not images:
+        raise RuntimeError(
+            f'Disc copied to {destination}, but contains no .iso image. '
+            'xemu needs an XISO image; a mounted folder or raw/redump ISO is not sufficient.'
+        )
+    if len(images) != 1:
+        raise RuntimeError(
+            f'Disc copied to {destination}, but contains {len(images)} ISO files. '
+            'Use “Launch Original Xbox XISO” to select the correct XISO.'
+        )
+    return destination, images[0]
+
+
+def main():
+    if not XEMU.is_file() or not os.access(XEMU, os.X_OK):
+        raise RuntimeError('xemu is not installed. Install it from the XUI Games menu first.')
+    mounts = optical_mounts()
+    if not mounts:
+        raise RuntimeError('No mounted optical disc was found. Insert the data DVD and let Linux mount it.')
+    if len(mounts) > 1:
+        details = '\n'.join(str(path) for path in mounts)
+        raise RuntimeError(f'More than one optical disc is mounted; leave only the target DVD mounted.\n{details}')
+
+    destination, image = dump_disc(mounts[0])
+    print(f'Dump complete: {destination}', flush=True)
+    print(f'Launching XISO in xemu: {image}', flush=True)
+    subprocess.Popen(
+        [str(XEMU), str(image)],
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        start_new_session=True,
+    )
+    return 0
+
+
+if __name__ == '__main__':
+    try:
+        raise SystemExit(main())
+    except Exception as exc:
+        print(f'Original Xbox DVD dump failed: {exc}', file=sys.stderr, flush=True)
+        raise SystemExit(1)
+PY
+  chmod +x "$BIN_DIR/xui_dump_xemu_homebrew_disc.py"
+}
+
 main(){
   parse_args "$@"
   if [ "${XUI_ONLY_EXPORT_WIN:-0}" = "1" ]; then
@@ -32956,12 +33313,14 @@ main(){
         exit 0
     fi
     if [ "${XUI_ONLY_REFRESH_XENIA:-0}" = "1" ]; then
-        info "Refreshing Xenia homebrew DVD dump integration only"
+        info "Refreshing Xbox emulator integrations only"
         ensure_dirs
         write_dashboard_py
         write_xenia_canary_tools
-        info "Xenia homebrew DVD dumper refreshed at: $HOME/.xui/bin/xui_dump_xenia_homebrew_disc.py"
-        info "Restart XUI, mount your homebrew DVD, then choose Dump Homebrew DVD to Xenia."
+        write_xemu_tools
+        info "Xenia dumper refreshed at: $HOME/.xui/bin/xui_dump_xenia_homebrew_disc.py"
+        info "xemu installer and homebrew DVD dumper refreshed at: $HOME/.xui/bin/xui_install_xemu.sh"
+        info "Restart XUI to use the Xbox 360 and original Xbox actions."
         exit 0
     fi
   if [ "${XUI_ONLY_REFRESH_STORE:-0}" = "1" ]; then
@@ -33002,6 +33361,7 @@ main(){
         write_theme_toggle
         install_compat_layer
         write_xenia_canary_tools
+        write_xemu_tools
         if [ "${XUI_SKIP_XENIA:-0}" != "1" ]; then
             case "$(uname -m)" in
                 x86_64|amd64)
