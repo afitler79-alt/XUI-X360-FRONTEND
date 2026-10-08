@@ -17469,167 +17469,519 @@ def complete_mission(mission_id=None, title_contains=None):
 PY
   chmod +x "$BIN_DIR/xui_game_lib.py"
 
-  cat > "$CASINO_DIR/casino.py" <<'PY'
+  cat > "$CASINO_DIR/casino_multiplayer.py" <<'PY'
 #!/usr/bin/env python3
+import ipaddress
 import json
+import os
 import queue
-import random
-import sys
+import socket
+import struct
 import threading
 import time
-import urllib.parse
-import urllib.error
-import urllib.request
 import uuid
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
-from PyQt5 import QtCore, QtGui, QtWidgets
-try:
-    from PyQt5 import QtGamepad
-except Exception:
-    QtGamepad = None
-try:
-    from PyQt5 import QtGamepad
-except Exception:
-    QtGamepad = None
-
-sys.path.insert(0, str(Path.home() / '.xui' / 'bin'))
-from xui_game_lib import get_balance, change_balance, ensure_wallet, complete_mission, unlock_for_event
 
 
-RED_NUMBERS = {1,3,5,7,9,12,14,16,18,19,21,23,25,27,30,32,34,36}
+PROTOCOL_VERSION = 1
+DEFAULT_CHAT_PORT = 38600
+DEFAULT_DISCOVERY_PORT = 38655
+MAX_PACKETS = 500
 
 
-def _load_gamertag():
-    prof = Path.home() / '.xui' / 'data' / 'profile.json'
+def local_ipv4_addresses():
+    result = set()
     try:
-        data = json.loads(prof.read_text(encoding='utf-8', errors='ignore'))
-        name = str(data.get('gamertag', 'Player1')).strip()
-        return name or 'Player1'
+        for _, _, _, _, sockaddr in socket.getaddrinfo(socket.gethostname(), None, socket.AF_INET, socket.SOCK_STREAM):
+            result.add(sockaddr[0])
     except Exception:
-        return 'Player1'
+        pass
+    try:
+        for interface in __import__('fcntl').ioctl:
+            pass
+    except Exception:
+        pass
+    return sorted(result)
 
 
-class CasinoOnlineRelay:
-    def __init__(self, nickname):
+def broadcast_addresses():
+    result = []
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as probe:
+            probe.connect(('8.8.8.8', 80))
+            local = probe.getsockname()[0]
+            if local:
+                result.append((local, DEFAULT_DISCOVERY_PORT))
+                result.append(('255.255.255.255', DEFAULT_DISCOVERY_PORT))
+    except Exception:
+        pass
+    return sorted(set(result))
+
+
+def sanitize_room(value):
+    text = ''.join(ch if ch.isalnum() or ch in '-_.' else '-' for ch in str(value or '').strip().lower())
+    return text.strip('-_.') or 'global'
+
+
+class MultiplayerEngine:
+    def __init__(self, nickname, room='global', discovery_port=DEFAULT_DISCOVERY_PORT):
         self.nickname = str(nickname or 'Player1')
+        self.user_id = uuid.uuid4().hex[:16]
         self.node_id = uuid.uuid4().hex[:12]
-        self.relay = str(
-            Path.home().joinpath('.xui').joinpath('data').as_posix()
-        )  # placeholder; replaced below
-        self.relay = str(
-            __import__('os').environ.get('XUI_WORLD_RELAY_URL', 'https://ntfy.sh')
-        ).strip().rstrip('/')
-        self.topic = self._sanitize_topic(
-            __import__('os').environ.get('XUI_CASINO_TOPIC', 'xui-casino-global')
-        )
-        self.enabled = True
+        self.room = sanitize_room(room)
+        self.discovery_port = int(discovery_port)
+        self.chat_port = 0
         self.events = queue.Queue()
         self.running = False
-        self._thread = None
-        self._seen_ids = set()
+        self.server = None
+        self.discovery_socket = None
+        self.accept_thread = None
+        self.discovery_thread = None
+        self.threads = []
+        self.peers = {}
+        self.friends = []
+        self.messages = []
+        self.party_id = None
+        self.party_members = []
+        self._lock = threading.RLock()
+        self._seen = set()
+        self._last_discovery = 0
+        self._local_addresses = set(local_ipv4_addresses())
+        self._load_friends()
 
-    def _sanitize_topic(self, text):
-        raw = ''.join(ch.lower() if ch.isalnum() or ch in ('-', '_', '.') else '-' for ch in str(text or '').strip())
-        while '--' in raw:
-            raw = raw.replace('--', '-')
-        raw = raw.strip('-._')
-        return raw or 'xui-casino-global'
+    @staticmethod
+    def _find_free_port(base, span):
+        for port in range(base, base + span):
+            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+                sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+                try:
+                    sock.bind(('', port))
+                    return port
+                except OSError:
+                    continue
+        return 0
 
-    def _topic_url(self, suffix=''):
-        topic = urllib.parse.quote(self.topic, safe='')
-        return f'{self.relay}/{topic}{suffix}'
+    def _load_friends(self):
+        path = Path.home() / '.xui' / 'data' / 'friends.json'
+        try:
+            entries = json.loads(path.read_text(encoding='utf-8'))
+            self.friends = [entry for entry in entries if isinstance(entry, dict)]
+        except Exception:
+            self.friends = []
+
+    def _save_friends(self):
+        path = Path.home() / '.xui' / 'data' / 'friends.json'
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(self.friends, indent=2, ensure_ascii=False), encoding='utf-8')
 
     def start(self):
         if self.running:
             return
         self.running = True
-        self._thread = threading.Thread(target=self._recv_loop, daemon=True)
-        self._thread.start()
+        self.server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        self.server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        for port in range(DEFAULT_CHAT_PORT, DEFAULT_CHAT_PORT + 32):
+            try:
+                self.server.bind(('', port))
+                self.chat_port = port
+                break
+            except OSError:
+                continue
+        if self.chat_port:
+            self.server.listen(32)
+            self.server.settimeout(0.5)
+        self.accept_thread = threading.Thread(target=self._accept_loop, daemon=True)
+        self.discovery_thread = threading.Thread(target=self._discovery_loop, daemon=True)
+        self.threads = [self.accept_thread, self.discovery_thread]
+        self.accept_thread.start()
+        self.discovery_thread.start()
+        self.events.put(('status', f'LAN ready on port {self.chat_port}' if self.chat_port else 'LAN unavailable'))
+
+    def stop(self):
+        self.running = False
+        if self.server:
+            try:
+                self.server.close()
+            except Exception:
+                pass
+        if self.discovery_socket:
+            try:
+                self.discovery_socket.close()
+            except Exception:
+                pass
+        for thread in self.threads:
+            thread.join(timeout=0.5)
+
+    def set_room(self, room):
+        self.room = sanitize_room(room)
+        self._broadcast({'type': 'presence', 'room': self.room, 'name': self.nickname, 'user_id': self.user_id, 'node_id': self.node_id, 'chat_port': self.chat_port, 'ts': time.time()})
+        self.events.put(('room', self.room))
+
+    def _encode(self, payload):
+        return (json.dumps(payload, ensure_ascii=False, separators=(',', ':')) + '\n').encode('utf-8')
+
+    def _send(self, host, port, payload, timeout=4.0):
+        if not host or not port:
+            return False
+        try:
+            with socket.create_connection((host, int(port)), timeout=timeout) as sock:
+                sock.settimeout(timeout)
+                sock.sendall(self._encode(payload))
+                sock.shutdown(socket.SHUT_WR)
+                data = bytearray()
+                while b'\n' not in data:
+                    chunk = sock.recv(4096)
+                    if not chunk:
+                        break
+                    data.extend(chunk)
+                return bool(data) and self._decode_ack(data, payload.get('message_id', ''))
+        except Exception:
+            return False
+
+    def _decode_ack(self, data, message_id):
+        try:
+            packet = json.loads(bytes(data).split(b'\n', 1)[0].decode('utf-8'))
+        except Exception:
+            return False
+        return packet.get('ok') is True and packet.get('message_id') == message_id
+
+    def _handle_packet(self, payload, peer):
+        kind = payload.get('type')
+        if kind == 'announce' or kind == 'presence':
+            self._upsert_peer(payload, peer)
+            if payload.get('room') == self.room:
+                self.events.put(('peer', dict(payload)))
+            return
+        if kind == 'chat':
+            self._emit('chat', payload)
+            return
+        if kind == 'private_message':
+            self._emit('private', payload)
+            return
+        if kind == 'friend_request':
+            self._emit('friend_request', payload)
+            return
+        if kind == 'friend_accept':
+            self._emit('friend_accept', payload)
+            return
+        if kind == 'party_invite':
+            self._emit('party_invite', payload)
+            return
+        if kind == 'party_state':
+            self._emit('party_state', payload)
+            return
+        if kind == 'game_state':
+            self._emit('game_state', payload)
+            return
+        if kind == 'ping':
+            self._send(peer[0], peer[1], {'type': 'pong', 'node_id': self.node_id, 'user_id': self.user_id, 'message_id': payload.get('message_id'), 'ts': time.time()}, timeout=2)
+
+    def _accept_loop(self):
+        while self.running and self.server:
+            try:
+                sock, address = self.server.accept()
+                with sock:
+                    sock.settimeout(4.0)
+                    data = bytearray()
+                    while b'\n' not in data:
+                        chunk = sock.recv(4096)
+                        if not chunk:
+                            break
+                        data.extend(chunk)
+                    if not data:
+                        continue
+                    try:
+                        payload = json.loads(bytes(data).split(b'\n', 1)[0].decode('utf-8'))
+                    except Exception:
+                        continue
+                    if not isinstance(payload, dict):
+                        continue
+                    payload.setdefault('message_id', uuid.uuid4().hex)
+                    self._handle_packet(payload, (address[0], address[1]))
+                    response = {'ok': True, 'message_id': payload.get('message_id'), 'protocol': PROTOCOL_VERSION}
+                    sock.sendall(self._encode(response))
+            except socket.timeout:
+                continue
+            except (OSError, ValueError):
+                if self.running:
+                    time.sleep(0.05)
+
+    def _broadcast(self, packet):
+        packet = dict(packet)
+        packet.setdefault('message_id', uuid.uuid4().hex)
+        payload = self._encode(packet)
+        for host, port in broadcast_addresses():
+            try:
+                with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
+                    sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+                    sock.sendto(payload, (host, port))
+            except Exception:
+                pass
+        for peer in list(self.peers.values()):
+            if peer.get('host') and peer.get('port'):
+                self._send(peer['host'], peer['port'], packet, timeout=1.0)
+
+    def _scan_local_subnet(self):
+        candidates = []
+        for address in self._local_addresses:
+            try:
+                network = ipaddress.ip_network(f'{address}/24', strict=False)
+            except ValueError:
+                continue
+            if network.prefixlen == 24:
+                candidates.extend(str(ip) for ip in network.hosts() if str(ip) != address)
+        candidates = list(dict.fromkeys(candidates))
+        packet = {'type': 'announce', 'room': self.room, 'name': self.nickname, 'user_id': self.user_id,
+                  'node_id': self.node_id, 'chat_port': self.chat_port, 'ts': time.time(),
+                  'message_id': uuid.uuid4().hex}
+        def probe(host):
+            for port in range(DEFAULT_CHAT_PORT, DEFAULT_CHAT_PORT + 32):
+                if self._send(host, port, packet, timeout=0.35):
+                    return True
+            return False
+        with ThreadPoolExecutor(max_workers=8) as executor:
+            list(executor.map(probe, candidates[:128]))
+
+    def _discovery_loop(self):
+        try:
+            with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
+                sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+                sock.bind(('', self.discovery_port))
+                sock.settimeout(0.5)
+                self.discovery_socket = sock
+                while self.running:
+                    try:
+                        data, address = sock.recvfrom(65536)
+                        try:
+                            payload = json.loads(data.decode('utf-8'))
+                        except Exception:
+                            continue
+                        if not isinstance(payload, dict) or payload.get('node_id') == self.node_id:
+                            continue
+                        self._handle_packet(payload, address)
+                    except socket.timeout:
+                        self._scan_local_subnet()
+                        continue
+                    except OSError:
+                        if self.running:
+                            time.sleep(0.05)
+        except Exception:
+            self.events.put(('status', f'UDP discovery unavailable on port {self.discovery_port}'))
+
+    def _upsert_peer(self, payload, peer):
+        host = str(peer[0])
+        port = int(payload.get('chat_port') or peer[1])
+        key = f'{host}:{port}'
+        with self._lock:
+            self.peers[key] = {'name': str(payload.get('name') or host), 'host': host, 'port': port, 'user_id': str(payload.get('user_id') or ''), 'node_id': str(payload.get('node_id') or ''), 'room': str(payload.get('room') or ''), 'last_seen': time.time(), 'source': 'LAN'}
+        self.events.put(('peer_up', key, self.peers[key]))
+
+    def _emit(self, kind, payload):
+        self.events.put((kind, dict(payload)))
+        self.messages.append((kind, dict(payload), time.time()))
+        if len(self.messages) > MAX_PACKETS:
+            self.messages = self.messages[-MAX_PACKETS:]
+
+    def discover(self):
+        self._broadcast({'type': 'probe', 'room': self.room, 'name': self.nickname, 'user_id': self.user_id, 'node_id': self.node_id, 'chat_port': self.chat_port, 'ts': time.time()})
+        peers = list(self.peers.values())
+        return peers
+
+    def send_chat(self, host, port, text):
+        return self._send(host, port, {'type': 'chat', 'node_id': self.node_id, 'user_id': self.user_id, 'from': self.nickname, 'text': str(text), 'room': self.room, 'ts': time.time(), 'message_id': uuid.uuid4().hex}, timeout=4.0)
+
+    def send_private(self, host, port, text):
+        return self._send(host, port, {'type': 'private_message', 'node_id': self.node_id, 'user_id': self.user_id, 'from': self.nickname, 'text': str(text), 'room': self.room, 'ts': time.time(), 'message_id': uuid.uuid4().hex}, timeout=4.0)
+
+    def send_friend_request(self, host, port, note=''):
+        return self._send(host, port, {'type': 'friend_request', 'node_id': self.node_id, 'user_id': self.user_id, 'from': self.nickname, 'note': str(note), 'ts': time.time(), 'message_id': uuid.uuid4().hex}, timeout=4.0)
+
+    def send_friend_accept(self, host, port):
+        return self._send(host, port, {'type': 'friend_accept', 'node_id': self.node_id, 'user_id': self.user_id, 'from': self.nickname, 'ts': time.time(), 'message_id': uuid.uuid4().hex}, timeout=4.0)
+
+    def add_friend(self, friend):
+        entry = friend if isinstance(friend, dict) else {'name': str(friend), 'host': '', 'port': 0, 'user_id': '', 'status': 'pending'}
+        if entry not in self.friends:
+            self.friends.append(entry)
+            self._save_friends()
+        return entry
+
+    def remove_friend(self, friend_id):
+        self.friends = [entry for entry in self.friends if str(entry.get('user_id') or entry.get('name')) != str(friend_id)]
+        self._save_friends()
+
+    def send_party_invite(self, host, port, player_name):
+        return self._send(host, port, {'type': 'party_invite', 'node_id': self.node_id, 'user_id': self.user_id, 'from': self.nickname, 'party_id': self.party_id, 'player_name': str(player_name), 'ts': time.time(), 'message_id': uuid.uuid4().hex}, timeout=4.0)
+
+    def create_party(self):
+        self.party_id = uuid.uuid4().hex[:12]
+        self.party_members = [self.user_id]
+        self._broadcast({'type': 'party_state', 'party_id': self.party_id, 'state': 'created', 'members': self.party_members, 'from': self.nickname, 'ts': time.time()})
+        self.events.put(('party', self.party_id, 'created'))
+        return self.party_id
+
+    def invite_party(self, host, port, player_name):
+        if not self.party_id:
+            self.create_party()
+        return self.send_party_invite(host, port, player_name)
+
+    def send_game_state(self, host, port, game, state):
+        return self._send(host, port, {'type': 'game_state', 'node_id': self.node_id, 'user_id': self.user_id, 'from': self.nickname, 'game': str(game), 'state': str(state), 'room': self.room, 'ts': time.time(), 'message_id': uuid.uuid4().hex}, timeout=4.0)
+
+    def get_peer(self, host, port):
+        return self.peers.get(f'{host}:{port}')
+
+    def get_friends(self):
+        return list(self.friends)
+PY
+  cat > "$CASINO_DIR/casino.py" <<'PY'
+#!/usr/bin/env python3
+import json
+import os
+import queue
+import random
+import sys
+import threading
+import time
+import urllib.error
+import urllib.parse
+import urllib.request
+import uuid
+from datetime import datetime
+from pathlib import Path
+
+from PyQt5 import QtCore, QtGui, QtWidgets
+
+try:
+    from PyQt5 import QtGamepad
+except Exception:
+    QtGamepad = None
+
+from casino_multiplayer import MultiplayerEngine
+
+sys.path.insert(0, str(Path.home() / '.xui' / 'bin'))
+from xui_game_lib import change_balance, complete_mission, get_balance, ensure_wallet, unlock_for_event
+
+DATA_HOME = Path.home() / '.xui' / 'data'
+PROFILE_FILE = DATA_HOME / 'profile.json'
+RED_NUMBERS = {1, 3, 5, 7, 9, 12, 14, 16, 18, 19, 21, 23, 25, 27, 30, 32, 34, 36}
+SYMBOLS = ['7', 'BAR', 'CHERRY', 'BELL', 'X', '♠', '♥']
+CARD_NAMES = {1: 'A', 11: 'J', 12: 'Q', 13: 'K'}
+
+
+def load_nickname():
+    try:
+        data = json.loads(PROFILE_FILE.read_text(encoding='utf-8', errors='ignore'))
+        return str(data.get('gamertag') or 'Player1').strip() or 'Player1'
+    except Exception:
+        return 'Player1'
+
+
+def format_money(value):
+    return f'€ {float(value):.2f}'
+
+
+def card_label(value):
+    return CARD_NAMES.get(value, str(value))
+
+
+def safe_int(value, default=0):
+    try:
+        return int(value)
+    except Exception:
+        return default
+
+
+class CasinoRelay:
+    def __init__(self, nickname, room='global'):
+        self.nickname = nickname
+        self.room = room
+        self.node_id = uuid.uuid4().hex[:12]
+        self.relay = os.environ.get('XUI_WORLD_RELAY_URL', 'https://ntfy.sh').rstrip('/')
+        self.topic = self._sanitize_topic(os.environ.get('XUI_CASINO_TOPIC', 'xui-casino-global'))
+        self.enabled = True
+        self.running = False
+        self.events = queue.Queue()
+        self.thread = None
+        self.seen = set()
+
+    @staticmethod
+    def _sanitize_topic(value):
+        value = ''.join(ch.lower() if ch.isalnum() or ch in '-_.' else '-' for ch in str(value or '').strip())
+        value = value.strip('-_.')
+        return value or 'xui-casino-global'
+
+    def start(self):
+        if self.running:
+            return
+        self.running = True
+        self.thread = threading.Thread(target=self._receive, daemon=True)
+        self.thread.start()
         self.events.put(('status', f'Online relay connected: {self.topic}'))
 
     def stop(self):
         self.running = False
-        if self._thread is not None:
-            self._thread.join(timeout=0.2)
+        if self.thread:
+            self.thread.join(timeout=0.5)
 
     def set_enabled(self, enabled):
         self.enabled = bool(enabled)
-        if self.enabled:
-            self.events.put(('status', f'Online relay enabled: {self.topic}'))
-        else:
-            self.events.put(('status', 'Online relay disabled'))
+        self.events.put(('status', 'Online relay enabled' if enabled else 'Online relay disabled'))
 
-    def send_roll(self, room, game, roll, stake):
+    def send_roll(self, room, roll, stake):
         payload = {
-            'kind': 'xui_casino_roll',
-            'node_id': self.node_id,
-            'from': self.nickname,
-            'room': str(room or 'global'),
-            'game': str(game or 'dice_duel'),
-            'roll': int(roll),
-            'stake': int(stake),
-            'ts': float(time.time()),
+            'kind': 'xui_casino_roll', 'node_id': self.node_id, 'from': self.nickname,
+            'room': str(room or 'global'), 'game': 'dice_duel', 'roll': int(roll),
+            'stake': int(stake), 'ts': time.time(),
         }
-        req = urllib.request.Request(
-            self._topic_url(''),
-            data=json.dumps(payload, ensure_ascii=False).encode('utf-8', errors='ignore'),
-            method='POST',
-            headers={
+        request = urllib.request.Request(
+            f'{self.relay}/{urllib.parse.quote(self.topic, safe="")}',
+            data=json.dumps(payload, ensure_ascii=False).encode('utf-8'),
+            method='POST', headers={
                 'Content-Type': 'text/plain; charset=utf-8',
                 'User-Agent': 'xui-casino-online',
                 'X-Title': f'XUI-Casino:{self.nickname}',
             },
         )
-        with urllib.request.urlopen(req, timeout=8) as r:
-            _ = r.read(128)
+        with urllib.request.urlopen(request, timeout=8) as response:
+            response.read(128)
 
-    def _recv_loop(self):
-        backoff = 1.2
+    def _receive(self):
+        backoff = 1.0
         while self.running:
             if not self.enabled:
-                time.sleep(0.4)
+                time.sleep(0.5)
                 continue
-            req = urllib.request.Request(
-                self._topic_url('/json'),
-                headers={
-                    'User-Agent': 'xui-casino-online',
-                    'Cache-Control': 'no-cache',
-                    'Connection': 'keep-alive',
-                },
+            request = urllib.request.Request(
+                f'{self.relay}/{urllib.parse.quote(self.topic, safe="")}/json',
+                headers={'User-Agent': 'xui-casino-online', 'Cache-Control': 'no-cache'},
             )
             try:
-                with urllib.request.urlopen(req, timeout=30) as resp:
-                    backoff = 1.2
+                with urllib.request.urlopen(request, timeout=25) as response:
+                    backoff = 1.0
                     while self.running and self.enabled:
-                        raw = resp.readline()
+                        raw = response.readline()
                         if not raw:
                             break
-                        line = raw.decode('utf-8', errors='ignore').strip()
-                        if not line:
-                            continue
                         try:
-                            evt = json.loads(line)
+                            event = json.loads(raw.decode('utf-8', errors='ignore').strip())
                         except Exception:
                             continue
-                        if str(evt.get('event') or '') != 'message':
+                        if event.get('event') != 'message':
                             continue
-                        msg_id = str(evt.get('id') or '')
-                        if msg_id:
-                            if msg_id in self._seen_ids:
-                                continue
-                            self._seen_ids.add(msg_id)
-                            if len(self._seen_ids) > 1200:
-                                self._seen_ids = set(list(self._seen_ids)[-600:])
-                        body = str(evt.get('message') or '').strip()
-                        if not body:
+                        message_id = str(event.get('id') or '')
+                        if message_id and message_id in self.seen:
                             continue
+                        if message_id:
+                            self.seen.add(message_id)
+                            if len(self.seen) > 1200:
+                                self.seen = set(list(self.seen)[-600:])
                         try:
-                            payload = json.loads(body)
+                            payload = json.loads(str(event.get('message') or ''))
                         except Exception:
                             continue
-                        if str(payload.get('kind') or '') != 'xui_casino_roll':
-                            continue
-                        if str(payload.get('node_id') or '') == self.node_id:
+                        if payload.get('kind') != 'xui_casino_roll' or payload.get('node_id') == self.node_id:
                             continue
                         self.events.put(('roll', payload))
             except Exception as exc:
@@ -17641,747 +17993,618 @@ class CasinoOnlineRelay:
 class CasinoWindow(QtWidgets.QMainWindow):
     def __init__(self):
         super().__init__()
-        self.nickname = _load_gamertag()
+        self.nickname = load_nickname()
         ensure_wallet()
         unlock_for_event('launch', 'casino', limit=2)
-        self.start_msg = f'Bienvenido al casino, {self.nickname}.'
-        m = complete_mission(mission_id='m1')
-        if m.get('completed'):
-            self.start_msg = f"Bienvenido al casino. Mission +EUR {m.get('reward', 0):.2f}"
-        self._slots_timer = QtCore.QTimer(self)
-        self._slots_timer.timeout.connect(self._slots_tick)
-        self._slots_pending = None
-        self._slots_ticks = 0
-        self._slots_target = ['7', 'BAR', 'CHERRY']
-        self._roulette_timer = QtCore.QTimer(self)
-        self._roulette_timer.timeout.connect(self._roulette_tick)
-        self._roulette_pending = None
-        self._roulette_ticks = 0
-        self._roulette_target = 0
-        self._coin_timer = QtCore.QTimer(self)
-        self._coin_timer.timeout.connect(self._coin_tick)
-        self._coin_pending = None
-        self._coin_ticks = 0
-        self._coin_target = 'HEADS'
-        self._bj_timer = QtCore.QTimer(self)
-        self._bj_timer.timeout.connect(self._blackjack_tick)
-        self._bj_steps = []
-        self._bj_step_idx = 0
-        self.hilo_card = random.randint(1, 13)
-        self.online_room = 'global'
+        self.mission = complete_mission(mission_id='m1')
         self.online_rolls = []
-        self.online_points = {}
-        self.relay = CasinoOnlineRelay(self.nickname)
+        self.online_room = 'global'
+        self.relay = CasinoRelay(self.nickname, self.online_room)
         self.relay.start()
-        self.online_timer = QtCore.QTimer(self)
-        self.online_timer.timeout.connect(self._poll_online_events)
-        self.online_timer.start(160)
-        self.setWindowTitle('XUI Casino')
-        self.resize(1220, 760)
-        self._build()
-        self.refresh_balance(self.start_msg)
+        self.multiplayer = MultiplayerEngine(self.nickname, self.online_room)
+        self.multiplayer.start()
+        self.multiplayer.events.put(('status', 'LAN discovery active'))
+        self._build_ui()
+        self._connect_timers()
+        self._refresh_balance(self._welcome_message())
         self._update_hilo_card()
+        self._connect_multiplayer_events()
 
-    def _build(self):
-        root = QtWidgets.QWidget()
-        self.setCentralWidget(root)
-        v = QtWidgets.QVBoxLayout(root)
-        v.setContentsMargins(16, 16, 16, 16)
-        v.setSpacing(12)
+    def _welcome_message(self):
+        if self.mission.get('completed'):
+            return f'Bienvenido, {self.nickname}. Misión completada: +{self.mission.get("reward", 0):.2f} €'
+        return f'Bienvenido, {self.nickname}. Tu saldo está listo.'
 
-        self.balance_lbl = QtWidgets.QLabel()
-        self.balance_lbl.setStyleSheet('font-size:28px; font-weight:700; color:#d8ffd8;')
-        self.info_lbl = QtWidgets.QLabel()
-        self.info_lbl.setStyleSheet('font-size:20px; color:#f0f7f0;')
-        v.addWidget(self.balance_lbl)
-        v.addWidget(self.info_lbl)
+    def _build_ui(self):
+        self.setWindowTitle('XUI Casino — Virtual Play')
+        self.resize(1240, 780)
+        self.setMinimumSize(900, 620)
+        self.setStyleSheet('''
+            QMainWindow { background: qlineargradient(x1:0,y1:0,x2:1,y2:1, stop:0 #08110d, stop:1 #101a14); color:#f2fff5; }
+            QWidget { font-family: "Segoe UI", Arial, sans-serif; }
+            QTabWidget::pane { border:1px solid #244536; background:#0b1711; border-radius:16px; }
+            QTabBar::tab { background:#13251c; color:#91b6a0; padding:12px 20px; border:1px solid #244536; border-bottom:0; border-radius:12px 12px 0 0; }
+            QTabBar::tab:selected { background:#18a85b; color:white; font-weight:700; }
+            QFrame { background:#0d1a14; border:1px solid #244536; border-radius:16px; }
+            QAbstractButton { font-size:14px; }
+            QPushButton { background:#18a85b; color:white; border:0; padding:10px 16px; border-radius:10px; font-weight:700; }
+            QPushButton:hover { background:#31c46f; }
+            QPushButton:pressed { background:#0f7c45; }
+            QPushButton:disabled { background:#294236; color:#6e8d79; }
+            QSpinBox, QComboBox, QLineEdit, QListWidget { background:#101f18; color:#effff3; border:1px solid #28503a; border-radius:9px; padding:8px 10px; }
+            QSpinBox::up-button, QSpinBox::down-button { background:#1d3b2b; border:0; width:24px; }
+            QLabel { color:#dbeee2; }
+            QVBoxLayout { margin:0; }
+        ''')
+        central = QtWidgets.QWidget()
+        self.setCentralWidget(central)
+        layout = QtWidgets.QVBoxLayout(central)
+        layout.setContentsMargins(18, 18, 18, 18)
+        layout.setSpacing(12)
+
+        header = QtWidgets.QFrame()
+        header.setObjectName('header')
+        header_layout = QtWidgets.QHBoxLayout(header)
+        header_layout.setContentsMargins(18, 14, 18, 14)
+        logo = QtWidgets.QLabel('XUI CASINO')
+        logo.setStyleSheet('font-size:28px; font-weight:900; color:#42d77c; letter-spacing:3px;')
+        self.balance_label = QtWidgets.QLabel('Balance: € 250.00')
+        self.balance_label.setStyleSheet('font-size:20px; font-weight:800; color:#effff3;')
+        self.status_label = QtWidgets.QLabel('Cargando servicios...')
+        self.status_label.setStyleSheet('font-size:14px; color:#8eb09b;')
+        header_layout.addWidget(logo, 1)
+        header_layout.addWidget(self.balance_label)
+        header_layout.addWidget(self.status_label)
+        layout.addWidget(header)
 
         self.tabs = QtWidgets.QTabWidget()
-        self.tabs.addTab(self._slots_tab(), 'Slots')
-        self.tabs.addTab(self._roulette_tab(), 'Roulette')
-        self.tabs.addTab(self._blackjack_tab(), 'Blackjack')
-        self.tabs.addTab(self._hilo_tab(), 'Hi-Lo')
-        self.tabs.addTab(self._coin_tab(), 'Coin Flip')
-        self.tabs.addTab(self._online_tab(), 'Dice Duel Online')
-        v.addWidget(self.tabs, 1)
+        self.tabs.addTab(self._slots_page(), '◉ Slots')
+        self.tabs.addTab(self._roulette_page(), '◌ Roulette')
+        self.tabs.addTab(self._blackjack_page(), '♠ Blackjack')
+        self.tabs.addTab(self._hilo_page(), '♣ Hi-Lo')
+        self.tabs.addTab(self._coin_page(), '● Coin Flip')
+        self.tabs.addTab(self._online_page(), '✦ Dice Duel')
+        self.tabs.addTab(self._multiplayer_page(), '◈ Friends & LAN')
+        self.tabs.currentChanged.connect(self._tab_changed)
+        layout.addWidget(self.tabs, 1)
 
-        self.setStyleSheet('''
-            QMainWindow {
-                background:qlineargradient(x1:0,y1:0,x2:1,y2:1, stop:0 #122318, stop:1 #0a1510);
-                color:#eef7ee;
-            }
-            QTabWidget::pane { border:1px solid #2a4738; background:#0f1a15; }
-            QTabBar::tab { background:#1e3529; color:#e9f5e9; padding:10px 18px; font-size:16px; }
-            QTabBar::tab:selected { background:#2f9f49; color:#ffffff; font-weight:700; }
-            QPushButton { background:#2ea84a; color:white; border:none; padding:8px 14px; border-radius:4px; }
-            QPushButton:hover { background:#37bc55; }
-            QSpinBox, QComboBox { background:#1d2a23; color:white; border:1px solid #3b5244; padding:4px; }
-            QLabel#result { font-size:30px; font-weight:700; color:#f8fff8; }
-            QListWidget {
-                background:#09130f;
-                border:1px solid #2d4e3d;
-                color:#e8f6e8;
-                font-size:15px;
-            }
-            QLineEdit {
-                background:#142119;
-                border:1px solid #355b46;
-                color:#f2fbf2;
-                padding:6px;
-                font-size:15px;
-                font-weight:700;
-            }
-        ''')
+        footer = QtWidgets.QHBoxLayout()
+        self.footer_label = QtWidgets.QLabel('Apuestas virtuales · Los resultados son locales y no representan dinero real')
+        self.footer_label.setStyleSheet('font-size:12px; color:#718a7a;')
+        footer.addWidget(self.footer_label, 1)
+        self.help_button = QtWidgets.QPushButton('Controles')
+        self.help_button.clicked.connect(self._show_help)
+        footer.addWidget(self.help_button)
+        layout.addLayout(footer)
 
-    def refresh_balance(self, text=''):
-        self.balance_lbl.setText(f'Balance: EUR {get_balance():.2f}')
-        self.info_lbl.setText(text)
+        self._result_label = QtWidgets.QLabel('Listo para jugar')
+        self._result_label.setObjectName('result')
+        self._result_label.setStyleSheet('font-size:18px; color:#a6e7b8;')
 
-    def _slots_tab(self):
-        w = QtWidgets.QWidget()
-        v = QtWidgets.QVBoxLayout(w)
-        v.setContentsMargins(16, 16, 16, 16)
-        v.setSpacing(12)
+    def _connect_timers(self):
+        self.slots_timer = QtCore.QTimer(self)
+        self.slots_timer.timeout.connect(self._slots_tick)
+        self.roulette_timer = QtCore.QTimer(self)
+        self.roulette_timer.timeout.connect(self._roulette_tick)
+        self.blackjack_timer = QtCore.QTimer(self)
+        self.blackjack_timer.timeout.connect(self._blackjack_tick)
+        self.hilo_timer = QtCore.QTimer(self)
+        self.hilo_timer.timeout.connect(self._hilo_tick)
+        self.coin_timer = QtCore.QTimer(self)
+        self.coin_timer.timeout.connect(self._coin_tick)
+        self.online_timer = QtCore.QTimer(self)
+        self.online_timer.timeout.connect(self._poll_online)
+        self.online_timer.start(250)
 
-        self.slots_result = QtWidgets.QLabel('7 | BAR | CHERRY')
-        self.slots_result.setObjectName('result')
-        self.slots_result.setAlignment(QtCore.Qt.AlignCenter)
+    def _connect_multiplayer_events(self):
+        self.multiplayer_timer = QtCore.QTimer(self)
+        self.multiplayer_timer.timeout.connect(self._poll_multiplayer)
+        self.multiplayer_timer.start(100)
 
-        row = QtWidgets.QHBoxLayout()
+    def _tab_changed(self, index):
+        self.status_label.setText(self.tabs.tabBar().tabText(index))
+        self._result_label.setText('Listo para jugar')
+
+    def _show_help(self):
+        dialog = QtWidgets.QMessageBox(self)
+        dialog.setWindowTitle('Controles del casino')
+        dialog.setText('''
+XUI Casino utiliza euros virtuales. No se procesa dinero real.
+
+A: Ir / Enter — jugar
+B: Salir
+Y: Cambiar pestaña
+X: Acción secundaria
+Tab / PageDown: navegar pestañas
+Ctrl+R: actualizar saldo
+''')
+        dialog.exec_()
+
+    def _refresh_balance(self, message=''):
+        self.balance_label.setText(f'Balance: {format_money(get_balance())}')
+        self.status_label.setText(message)
+        for control in self.findChildren(QtWidgets.QPushButton):
+            control.setEnabled(get_balance() > 0)
+
+    def _set_result(self, text, color='#dfffe7'):
+        self._result_label.setText(text)
+        self._result_label.setStyleSheet(f'font-size:20px; font-weight:800; color:{color}')
+
+    def _validate_bet(self, value):
+        bet = safe_int(value)
+        if bet <= 0 or bet > get_balance():
+            self._set_result('Apuesta inválida. El saldo es insuficiente.', '#ff8b8b')
+            return None
+        return bet
+
+    def _slots_page(self):
+        page = QtWidgets.QFrame()
+        layout = QtWidgets.QVBoxLayout(page)
+        layout.setContentsMargins(28, 26, 28, 26)
+        layout.setSpacing(18)
+        title = QtWidgets.QLabel('SLOTS — NEON ROYALS')
+        title.setStyleSheet('font-size:25px; font-weight:900; color:#43d87d; letter-spacing:2px;')
+        layout.addWidget(title)
+        layout.addWidget(self._result_label)
+
+        machine = QtWidgets.QFrame()
+        machine.setStyleSheet('background:#07110c; border:2px solid #204d35; border-radius:18px; padding:20px;')
+        machine_layout = QtWidgets.QHBoxLayout(machine)
+        machine_layout.setSpacing(14)
+        self.slots_reels = [self._reel_label() for _ in range(3)]
+        for reel in self.slots_reels:
+            machine_layout.addWidget(reel, 1)
+        layout.addWidget(machine, 1)
+
+        controls = QtWidgets.QHBoxLayout()
         self.slots_bet = QtWidgets.QSpinBox()
         self.slots_bet.setRange(1, 1000)
         self.slots_bet.setValue(10)
-        spin_btn = QtWidgets.QPushButton('Spin (Animated)')
-        spin_btn.clicked.connect(self.play_slots)
-        row.addWidget(QtWidgets.QLabel('Bet:'))
-        row.addWidget(self.slots_bet)
-        row.addWidget(spin_btn)
-        row.addStretch(1)
+        self.slots_bet.setStyleSheet('font-size:16px; min-width:110px;')
+        self.slots_button = QtWidgets.QPushButton('SPIN')
+        self.slots_button.setFixedSize(160, 48)
+        self.slots_button.clicked.connect(self.play_slots)
+        controls.addWidget(QtWidgets.QLabel('APUESTA'), 1)
+        controls.addWidget(self.slots_bet)
+        controls.addWidget(self.slots_button)
+        layout.addLayout(controls)
+        rules = QtWidgets.QLabel('3 iguales: ×6 · 7: ×12 · 2 iguales: ×2')
+        rules.setStyleSheet('font-size:13px; color:#829b8c;')
+        layout.addWidget(rules)
+        return page
 
-        rules = QtWidgets.QLabel('3 iguales: x6 (x12 si es 7) | 2 iguales: x2')
-        rules.setStyleSheet('font-size:16px; color:#d4e9d4;')
-
-        v.addWidget(self.slots_result)
-        v.addLayout(row)
-        v.addWidget(rules)
-        v.addStretch(1)
-        return w
+    def _reel_label(self):
+        label = QtWidgets.QLabel('7')
+        label.setAlignment(QtCore.Qt.AlignCenter)
+        label.setStyleSheet('font-size:46px; font-weight:900; color:#ffdf65; background:#101e18; border:1px solid #315a43; border-radius:12px; min-height:120px;')
+        return label
 
     def play_slots(self):
-        if self._slots_timer.isActive():
-            self.refresh_balance('Slots animation in progress...')
+        bet = self._validate_bet(self.slots_bet.value())
+        if bet is None or self.slots_timer.isActive():
             return
-        bet = int(self.slots_bet.value())
-        bal = get_balance()
-        if bet <= 0 or bet > bal:
-            self.refresh_balance('Apuesta inválida para el balance actual.')
-            return
-        symbols = ['7', 'BAR', 'CHERRY', 'BELL', 'X']
-        self._slots_pending = bet
-        self._slots_target = [random.choice(symbols) for _ in range(3)]
-        self._slots_ticks = 0
-        self._slots_timer.start(75)
-        self.refresh_balance('Slots spinning...')
+        self.slots_target = [random.choice(SYMBOLS) for _ in range(3)]
+        self.slots_pending = bet
+        self.slots_tick = 0
+        self.slots_button.setEnabled(False)
+        self._set_result('SPINNING...', '#ffdf65')
+        self.slots_timer.start(75)
 
     def _slots_tick(self):
-        symbols = ['7', 'BAR', 'CHERRY', 'BELL', 'X']
-        self._slots_ticks += 1
-        reels = [random.choice(symbols), random.choice(symbols), random.choice(symbols)]
-        self.slots_result.setText(' | '.join(reels))
-        if self._slots_ticks % 2 == 0:
-            self.slots_result.setStyleSheet('font-size:34px; font-weight:800; color:#e8ffe8;')
-        else:
-            self.slots_result.setStyleSheet('font-size:34px; font-weight:800; color:#8cffaf;')
-        if self._slots_ticks < 18:
+        self.slots_tick += 1
+        for reel in self.slots_reels:
+            reel.setText(random.choice(SYMBOLS))
+        if self.slots_tick < 18:
             return
-        self._slots_timer.stop()
-        bet = int(self._slots_pending or 0)
-        reels = list(self._slots_target)
-        self.slots_result.setText(' | '.join(reels))
-        self.slots_result.setStyleSheet('font-size:36px; font-weight:900; color:#ffffff;')
+        self.slots_timer.stop()
+        for reel, symbol in zip(self.slots_reels, self.slots_target):
+            reel.setText(symbol)
+        bet = self.slots_pending
         payout = 0
-        if reels[0] == reels[1] == reels[2]:
-            payout = bet * (12 if reels[0] == '7' else 6)
-        elif len(set(reels)) == 2:
+        if self.slots_target[0] == self.slots_target[1] == self.slots_target[2]:
+            payout = bet * (12 if self.slots_target[0] == '7' else 6)
+        elif len(set(self.slots_target)) == 2:
             payout = bet * 2
         delta = -bet + payout
-        new_bal = change_balance(delta)
-        if payout > 0:
-            self.refresh_balance(f'Slots: +EUR {payout:.2f} (neto {delta:+.2f})')
+        new_balance = change_balance(delta)
+        self.slots_button.setEnabled(True)
+        if payout:
+            self._set_result(f'GANADO: +{payout:.2f} € · {self.slots_target}', '#62e58b')
             unlock_for_event('win', 'casino_slots', limit=2)
         else:
-            self.refresh_balance(f'Slots: -EUR {bet:.2f}')
-        self.balance_lbl.setText(f'Balance: EUR {new_bal:.2f}')
+            self._set_result(f'PERDIDA: -{bet:.2f} € · {self.slots_target}', '#ff8888')
+        self._refresh_balance(f'Slots neto {delta:+.2f} €')
+        self.balance_label.setText(f'Balance: {format_money(new_balance)}')
 
-    def _roulette_tab(self):
-        w = QtWidgets.QWidget()
-        g = QtWidgets.QGridLayout(w)
-        g.setContentsMargins(16, 16, 16, 16)
-        g.setHorizontalSpacing(10)
-        g.setVerticalSpacing(12)
-
-        self.roulette_bet = QtWidgets.QSpinBox()
-        self.roulette_bet.setRange(1, 1000)
-        self.roulette_bet.setValue(10)
+    def _roulette_page(self):
+        page = QtWidgets.QFrame()
+        layout = QtWidgets.QVBoxLayout(page)
+        layout.setContentsMargins(28, 26, 28, 26)
+        layout.setSpacing(18)
+        title = QtWidgets.QLabel('ROULETTE — 0 TO 36')
+        title.setStyleSheet('font-size:25px; font-weight:900; color:#4bc6f6; letter-spacing:2px;')
+        layout.addWidget(title)
+        layout.addWidget(self._result_label)
+        wheel_layout = QtWidgets.QHBoxLayout()
+        wheel_layout.setSpacing(24)
+        self.roulette_wheel = QtWidgets.QLabel('♦')
+        self.roulette_wheel.setAlignment(QtCore.Qt.AlignCenter)
+        self.roulette_wheel.setStyleSheet('font-size:170px; color:#1e9dbf; background:radial-gradient(circle, #173b31 0%, #0b1712 70%); border:2px solid #1e8cae; border-radius:50%; min-width:360px; min-height:360px;')
+        wheel_layout.addWidget(self.roulette_wheel, 1)
+        self.roulette_number = QtWidgets.QLabel('—')
+        self.roulette_number.setAlignment(QtCore.Qt.AlignCenter)
+        self.roulette_number.setStyleSheet('font-size:100px; font-weight:900; color:#f8ffff;')
+        wheel_layout.addWidget(self.roulette_number, 1)
+        layout.addLayout(wheel_layout, 1)
+        controls = QtWidgets.QHBoxLayout()
+        self.roulette_bet = QtWidgets.QSpinBox(); self.roulette_bet.setRange(1, 1000); self.roulette_bet.setValue(10)
         self.roulette_mode = QtWidgets.QComboBox()
-        self.roulette_mode.addItems(['Red', 'Black', 'Even', 'Odd', 'Exact'])
-        self.roulette_number = QtWidgets.QSpinBox()
-        self.roulette_number.setRange(0, 36)
-        self.roulette_number.setValue(7)
-        self.roulette_result = QtWidgets.QLabel('Resultado: -')
-        self.roulette_result.setStyleSheet('font-size:24px; font-weight:700;')
-        play_btn = QtWidgets.QPushButton('Spin Roulette (Animated)')
-        play_btn.clicked.connect(self.play_roulette)
-
-        g.addWidget(QtWidgets.QLabel('Bet:'), 0, 0)
-        g.addWidget(self.roulette_bet, 0, 1)
-        g.addWidget(QtWidgets.QLabel('Mode:'), 1, 0)
-        g.addWidget(self.roulette_mode, 1, 1)
-        g.addWidget(QtWidgets.QLabel('Exact number:'), 2, 0)
-        g.addWidget(self.roulette_number, 2, 1)
-        g.addWidget(play_btn, 3, 0, 1, 2)
-        g.addWidget(self.roulette_result, 4, 0, 1, 2)
-        g.setRowStretch(5, 1)
-        return w
+        self.roulette_mode.addItems(['Rojo', 'Negro', 'Par', 'Impar', 'Número exacto'])
+        self.roulette_exact = QtWidgets.QSpinBox(); self.roulette_exact.setRange(0, 36); self.roulette_exact.setValue(7)
+        self.roulette_button = QtWidgets.QPushButton('GIRAR RULETTE'); self.roulette_button.setFixedSize(190, 48); self.roulette_button.clicked.connect(self.play_roulette)
+        controls.addWidget(QtWidgets.QLabel('APUESTA')); controls.addWidget(self.roulette_bet)
+        controls.addWidget(QtWidgets.QLabel('MODO')); controls.addWidget(self.roulette_mode)
+        controls.addWidget(QtWidgets.QLabel('NÚMERO')); controls.addWidget(self.roulette_exact)
+        controls.addWidget(self.roulette_button)
+        layout.addLayout(controls)
+        return page
 
     def play_roulette(self):
-        if self._roulette_timer.isActive():
-            self.refresh_balance('Roulette spin in progress...')
+        bet = self._validate_bet(self.roulette_bet.value())
+        if bet is None or self.roulette_timer.isActive():
             return
-        bet = int(self.roulette_bet.value())
-        bal = get_balance()
-        if bet <= 0 or bet > bal:
-            self.refresh_balance('Apuesta inválida para roulette.')
-            return
-        self._roulette_pending = {
-            'bet': bet,
-            'mode': self.roulette_mode.currentText(),
-            'exact': int(self.roulette_number.value()),
-        }
-        self._roulette_target = random.randint(0, 36)
-        self._roulette_ticks = 0
-        self._roulette_timer.start(70)
-        self.refresh_balance('Roulette spinning...')
+        self.roulette_pending = {'bet': bet, 'mode': self.roulette_mode.currentText(), 'exact': self.roulette_exact.value()}
+        self.roulette_target = random.randint(0, 36)
+        self.roulette_tick = 0
+        self.roulette_button.setEnabled(False)
+        self._set_result('LA RULETTE ESTÁ GIRO...', '#4bc6f6')
+        self.roulette_timer.start(65)
 
     def _roulette_tick(self):
-        self._roulette_ticks += 1
-        n = random.randint(0, 36)
-        color = 'Green' if n == 0 else ('Red' if n in RED_NUMBERS else 'Black')
-        tone = '#96ff8e' if self._roulette_ticks % 2 else '#f0fff0'
-        self.roulette_result.setStyleSheet(f'font-size:30px; font-weight:900; color:{tone};')
-        self.roulette_result.setText(f'Spinning: {n} ({color})')
-        if self._roulette_ticks < 22:
+        self.roulette_tick += 1
+        number = random.randint(0, 36)
+        color = 'Verde' if number == 0 else ('Rojo' if number in RED_NUMBERS else 'Negro')
+        self.roulette_number.setText(str(number))
+        self.roulette_number.setStyleSheet(f'font-size:100px; font-weight:900; color:{"#56df7e" if color == "Verde" else "#ff596b" if color == "Rojo" else "#7d8992"}')
+        if self.roulette_tick < 20:
             return
-        self._roulette_timer.stop()
-        pend = dict(self._roulette_pending or {})
-        bet = int(pend.get('bet') or 0)
-        mode = str(pend.get('mode') or 'Red')
-        exact = int(pend.get('exact') or 0)
-        result = int(self._roulette_target)
-        color = 'Green' if result == 0 else ('Red' if result in RED_NUMBERS else 'Black')
+        self.roulette_timer.stop()
+        result = self.roulette_target
+        mode = self.roulette_pending['mode']
+        bet = self.roulette_pending['bet']
+        payload = self.roulette_pending
         payout = 0
-        mode = self.roulette_mode.currentText()
-
-        if mode == 'Exact':
-            if result == exact:
-                payout = bet * 36
-        elif mode == 'Red':
-            if color == 'Red':
-                payout = bet * 2
-        elif mode == 'Black':
-            if color == 'Black':
-                payout = bet * 2
-        elif mode == 'Even':
-            if result != 0 and result % 2 == 0:
-                payout = bet * 2
-        elif mode == 'Odd':
-            if result % 2 == 1:
-                payout = bet * 2
-
+        if mode == 'Número exacto' and result == payload['exact']:
+            payout = bet * 36
+        elif mode == 'Rojo' and result in RED_NUMBERS:
+            payout = bet * 2
+        elif mode == 'Negro' and result not in RED_NUMBERS and result != 0:
+            payout = bet * 2
+        elif mode == 'Par' and result != 0 and result % 2 == 0:
+            payout = bet * 2
+        elif mode == 'Impar' and result != 0 and result % 2 == 1:
+            payout = bet * 2
         delta = -bet + payout
-        new_bal = change_balance(delta)
-        self.roulette_result.setStyleSheet('font-size:32px; font-weight:900; color:#ffffff;')
-        self.roulette_result.setText(f'Resultado: {result} ({color})')
-        if payout > 0:
-            self.refresh_balance(f'Roulette: +EUR {payout:.2f} (neto {delta:+.2f})')
+        new_balance = change_balance(delta)
+        self.roulette_button.setEnabled(True)
+        color = 'Verde' if result == 0 else ('Rojo' if result in RED_NUMBERS else 'Negro')
+        self._set_result(f'REULTADO: {result} · {color.upper()}', '#4bc6f6')
+        if payout:
             unlock_for_event('win', 'casino_roulette', limit=2)
-        else:
-            self.refresh_balance(f'Roulette: -EUR {bet:.2f}')
-        self.balance_lbl.setText(f'Balance: EUR {new_bal:.2f}')
+        self._refresh_balance(f'Roulette neto {delta:+.2f} €')
+        self.balance_label.setText(f'Balance: {format_money(new_balance)}')
 
-    def _blackjack_tab(self):
-        w = QtWidgets.QWidget()
-        v = QtWidgets.QVBoxLayout(w)
-        v.setContentsMargins(16, 16, 16, 16)
-        v.setSpacing(10)
-
-        row = QtWidgets.QHBoxLayout()
-        self.bj_bet = QtWidgets.QSpinBox()
-        self.bj_bet.setRange(1, 1000)
-        self.bj_bet.setValue(15)
-        btn = QtWidgets.QPushButton('Play Hand (Animated Deal)')
-        btn.clicked.connect(self.play_blackjack)
-        row.addWidget(QtWidgets.QLabel('Bet:'))
-        row.addWidget(self.bj_bet)
-        row.addWidget(btn)
-        row.addStretch(1)
-
-        self.bj_result = QtWidgets.QLabel('Player: - | Dealer: -')
-        self.bj_result.setStyleSheet('font-size:24px; font-weight:700;')
-        rules = QtWidgets.QLabel('Win x2, Push devuelve apuesta, Bust pierde.')
-        rules.setStyleSheet('font-size:16px; color:#d4e9d4;')
-        v.addLayout(row)
-        v.addWidget(self.bj_result)
-        v.addWidget(rules)
-        v.addStretch(1)
-        return w
+    def _blackjack_page(self):
+        page = QtWidgets.QFrame(); layout = QtWidgets.QVBoxLayout(page); layout.setContentsMargins(28,26,28,26); layout.setSpacing(18)
+        title = QtWidgets.QLabel('BLACKJACK — 21'); title.setStyleSheet('font-size:25px; font-weight:900; color:#f2b94b; letter-spacing:2px;'); layout.addWidget(title)
+        layout.addWidget(self._result_label)
+        table = QtWidgets.QFrame(); table.setStyleSheet('background:radial-gradient(circle at 50% 40%, #1f6c43, #0b2518 70%); border:2px solid #397c57; border-radius:18px; min-height:360px;')
+        table_layout = QtWidgets.QVBoxLayout(table)
+        self.bj_player = QtWidgets.QLabel('JUGADOR: —'); self.bj_player.setAlignment(QtCore.Qt.AlignCenter); self.bj_player.setStyleSheet('font-size:28px; font-weight:800;')
+        self.bj_dealer = QtWidgets.QLabel('BANCA: —'); self.bj_dealer.setAlignment(QtCore.Qt.AlignCenter); self.bj_dealer.setStyleSheet('font-size:28px; font-weight:800;')
+        self.bj_cards = QtWidgets.QLabel('CARTAS: —'); self.bj_cards.setAlignment(QtCore.Qt.AlignCenter); self.bj_cards.setStyleSheet('font-size:22px;')
+        table_layout.addStretch(); table_layout.addWidget(self.bj_dealer); table_layout.addWidget(self.bj_cards); table_layout.addWidget(self.bj_player); table_layout.addStretch()
+        layout.addWidget(table,1)
+        controls=QtWidgets.QHBoxLayout(); self.bj_bet=QtWidgets.QSpinBox(); self.bj_bet.setRange(1,1000); self.bj_bet.setValue(15)
+        self.bj_button=QtWidgets.QPushButton('REPARTIR CARTAS'); self.bj_button.setFixedSize(190,48); self.bj_button.clicked.connect(self.play_blackjack)
+        controls.addWidget(QtWidgets.QLabel('APUESTA')); controls.addWidget(self.bj_bet); controls.addWidget(self.bj_button); layout.addLayout(controls)
+        return page
 
     def play_blackjack(self):
-        if self._bj_timer.isActive():
-            self.refresh_balance('Blackjack deal in progress...')
-            return
-        bet = int(self.bj_bet.value())
-        bal = get_balance()
-        if bet <= 0 or bet > bal:
-            self.refresh_balance('Apuesta inválida para blackjack.')
-            return
-        p1 = random.randint(2, 11)
-        p2 = random.randint(2, 11)
-        d1 = random.randint(2, 11)
-        d2 = random.randint(2, 11)
-        player = p1 + p2 + random.randint(0, 9)
-        dealer = d1 + d2 + random.randint(0, 9)
-        self._bj_steps = [
-            f'Player deals {p1}, Dealer deals {d1}',
-            f'Player draws {p2}, Dealer draws hidden',
-            f'Player total now ~ {p1 + p2}, Dealer showing {d1}',
-            f'Final hand -> Player {player} | Dealer {dealer}',
-        ]
-        self._bj_step_idx = 0
-        self._bj_pending = {'bet': bet, 'player': player, 'dealer': dealer}
-        self._bj_timer.start(260)
-        self.refresh_balance('Blackjack dealing...')
+        bet=self._validate_bet(self.bj_bet.value())
+        if bet is None or self.blackjack_timer.isActive(): return
+        player=random.randint(2,11)+random.randint(2,11); dealer=random.randint(2,11)+random.randint(2,11)
+        self.bj_pending={'bet':bet,'player':player,'dealer':dealer}; self.bj_step=0; self.bj_button.setEnabled(False)
+        self.bj_player.setText(f'JUGADOR: {player}'); self.bj_dealer.setText(f'BANCA: {dealer}'); self.bj_cards.setText('REPARTIENDO...')
+        self._set_result('BLACKJACK: CARTAS REPARTIDAS', '#f2b94b'); self.blackjack_timer.start(180)
 
     def _blackjack_tick(self):
-        if self._bj_step_idx < len(self._bj_steps):
-            self.bj_result.setText(self._bj_steps[self._bj_step_idx])
-            self._bj_step_idx += 1
-            return
-        self._bj_timer.stop()
-        bet = int(self._bj_pending.get('bet') or 0)
-        player = int(self._bj_pending.get('player') or 0)
-        dealer = int(self._bj_pending.get('dealer') or 0)
-        payout = 0
-        msg = 'Push'
-        if player > 21:
-            msg = 'Te pasaste'
-        elif dealer > 21 or player > dealer:
-            msg = 'Ganaste'
-            payout = bet * 2
-        elif dealer == player:
-            msg = 'Push'
-            payout = bet
+        self.bj_step += 1
+        if self.bj_step == 1:
+            self.bj_cards.setText(f'CARTAS: {self.bj_pending["player"]} · {self.bj_pending["dealer"]}')
+        elif self.bj_step == 2:
+            self.bj_cards.setText(f'JUGADOR: {self.bj_pending["player"]} · BANCA: {self.bj_pending["dealer"]} · GIRANDO...')
         else:
-            msg = 'Perdiste'
-        delta = -bet + payout
-        new_bal = change_balance(delta)
-        self.bj_result.setText(f'Player: {player} | Dealer: {dealer} -> {msg}')
-        self.refresh_balance(f'Blackjack neto: {delta:+.2f}')
-        if payout > bet:
-            unlock_for_event('win', 'casino_blackjack', limit=2)
-        self.balance_lbl.setText(f'Balance: EUR {new_bal:.2f}')
+            self.blackjack_timer.stop(); self.bj_button.setEnabled(True)
+            player=self.bj_pending['player']; dealer=self.bj_pending['dealer']; bet=self.bj_pending['bet']
+            if player>21: result='TE PASTASTE'; payout=0
+            elif dealer>21 or player>dealer: result='GANASTE'; payout=bet*2
+            elif player==dealer: result='EMPATE'; payout=bet
+            else: result='PERDIS'; payout=0
+            delta=-bet+payout; new_balance=change_balance(delta)
+            self.bj_player.setText(f'JUGADOR: {player}'); self.bj_dealer.setText(f'BANCA: {dealer}'); self.bj_cards.setText(result)
+            self._set_result(f'BLACKJACK: {result}', '#f2b94b' if result!='PERDIS' else '#ff8888')
+            if payout: unlock_for_event('win','casino_blackjack',limit=2)
+            self._refresh_balance(f'Blackjack neto {delta:+.2f} €'); self.balance_label.setText(f'Balance: {format_money(new_balance)}')
 
-    def _hilo_tab(self):
-        w = QtWidgets.QWidget()
-        v = QtWidgets.QVBoxLayout(w)
-        v.setContentsMargins(16, 16, 16, 16)
-        v.setSpacing(10)
-        self.hilo_card_lbl = QtWidgets.QLabel('Current card: ?')
-        self.hilo_card_lbl.setObjectName('result')
-        self.hilo_card_lbl.setAlignment(QtCore.Qt.AlignCenter)
-        row = QtWidgets.QHBoxLayout()
-        self.hilo_bet = QtWidgets.QSpinBox()
-        self.hilo_bet.setRange(1, 1000)
-        self.hilo_bet.setValue(12)
-        self.hilo_high = QtWidgets.QPushButton('Higher')
-        self.hilo_low = QtWidgets.QPushButton('Lower')
-        self.hilo_high.clicked.connect(lambda: self.play_hilo('high'))
-        self.hilo_low.clicked.connect(lambda: self.play_hilo('low'))
-        row.addWidget(QtWidgets.QLabel('Bet:'))
-        row.addWidget(self.hilo_bet)
-        row.addWidget(self.hilo_high)
-        row.addWidget(self.hilo_low)
-        row.addStretch(1)
-        hint = QtWidgets.QLabel('Adivina si la siguiente carta sera mayor o menor. Acierto x2, empate push.')
-        hint.setStyleSheet('font-size:16px; color:#d4e9d4;')
-        v.addWidget(self.hilo_card_lbl)
-        v.addLayout(row)
-        v.addWidget(hint)
-        v.addStretch(1)
-        return w
+    def _hilo_page(self):
+        page=QtWidgets.QFrame(); layout=QtWidgets.QVBoxLayout(page); layout.setContentsMargins(28,26,28,26); layout.setSpacing(18)
+        title=QtWidgets.QLabel('HI-LO — CARD GAME'); title.setStyleSheet('font-size:25px; font-weight:900; color:#d16cff; letter-spacing:2px;'); layout.addWidget(title); layout.addWidget(self._result_label)
+        card=QtWidgets.QLabel('A'); card.setAlignment(QtCore.Qt.AlignCenter); card.setStyleSheet('font-size:150px; font-weight:900; color:#f8f8f8; background:linear-gradient(135deg,#3b244f,#15131c); border:2px solid #a46bbd; border-radius:20px; min-height:280px;')
+        layout.addWidget(card,1); controls=QtWidgets.QHBoxLayout(); self.hilo_bet=QtWidgets.QSpinBox(); self.hilo_bet.setRange(1,1000); self.hilo_bet.setValue(12)
+        self.hilo_high=QtWidgets.QPushButton('MAYOR'); self.hilo_high.clicked.connect(lambda:self.play_hilo('high')); self.hilo_low=QtWidgets.QPushButton('MENOR'); self.hilo_low.clicked.connect(lambda:self.play_hilo('low'))
+        controls.addWidget(QtWidgets.QLabel('APUESTA')); controls.addWidget(self.hilo_bet); controls.addWidget(self.hilo_high); controls.addWidget(self.hilo_low); layout.addLayout(controls)
+        self.hilo_card=card; return page
 
     def _update_hilo_card(self):
-        names = {1: 'A', 11: 'J', 12: 'Q', 13: 'K'}
-        text = names.get(int(self.hilo_card), str(int(self.hilo_card)))
-        self.hilo_card_lbl.setText(f'Current card: {text}')
+        self.hilo_card.setText(card_label(self.hilo_value))
 
     def play_hilo(self, guess):
-        bet = int(self.hilo_bet.value())
-        bal = get_balance()
-        if bet <= 0 or bet > bal:
-            self.refresh_balance('Apuesta inválida para Hi-Lo.')
-            return
-        prev = int(self.hilo_card)
-        nxt = random.randint(1, 13)
-        self.hilo_card = nxt
-        self._update_hilo_card()
-        payout = 0
-        if nxt == prev:
-            payout = bet
-            msg = f'Empate ({prev}->{nxt}), push.'
-        elif (guess == 'high' and nxt > prev) or (guess == 'low' and nxt < prev):
-            payout = bet * 2
-            msg = f'Acierto ({prev}->{nxt}), ganaste.'
-        else:
-            msg = f'Fallaste ({prev}->{nxt}).'
-        delta = -bet + payout
-        new_bal = change_balance(delta)
-        self.refresh_balance(f'Hi-Lo: {msg} Neto {delta:+.2f}')
-        if payout > bet:
-            unlock_for_event('win', 'casino_hilo', limit=2)
-        self.balance_lbl.setText(f'Balance: EUR {new_bal:.2f}')
+        bet=self._validate_bet(self.hilo_bet.value())
+        if bet is None or self.hilo_timer.isActive(): return
+        previous=self.hilo_value; self.hilo_value=random.randint(1,13); self._update_hilo_card(); self.hilo_button=guess
+        if self.hilo_value==previous: payout=bet; result='EMPATE'
+        elif (guess=='high' and self.hilo_value>previous) or (guess=='low' and self.hilo_value<previous): payout=bet*2; result='ACIERTO'
+        else: payout=0; result='FALLO'
+        delta=-bet+payout; new_balance=change_balance(delta)
+        self._set_result(f'HI-LO: {result} · {previous} → {self.hilo_value}', '#d16cff' if result!='FALLO' else '#ff8888')
+        if payout: unlock_for_event('win','casino_hilo',limit=2)
+        self._refresh_balance(f'Hi-Lo neto {delta:+.2f} €'); self.balance_label.setText(f'Balance: {format_money(new_balance)}')
 
-    def _coin_tab(self):
-        w = QtWidgets.QWidget()
-        v = QtWidgets.QVBoxLayout(w)
-        v.setContentsMargins(16, 16, 16, 16)
-        v.setSpacing(10)
-        self.coin_face_lbl = QtWidgets.QLabel('Coin: HEADS')
-        self.coin_face_lbl.setObjectName('result')
-        self.coin_face_lbl.setAlignment(QtCore.Qt.AlignCenter)
-        row = QtWidgets.QHBoxLayout()
-        self.coin_bet = QtWidgets.QSpinBox()
-        self.coin_bet.setRange(1, 1000)
-        self.coin_bet.setValue(10)
-        self.coin_pick = QtWidgets.QComboBox()
-        self.coin_pick.addItems(['HEADS', 'TAILS'])
-        self.coin_btn = QtWidgets.QPushButton('Flip Coin (Animated)')
-        self.coin_btn.clicked.connect(self.play_coin)
-        row.addWidget(QtWidgets.QLabel('Bet:'))
-        row.addWidget(self.coin_bet)
-        row.addWidget(QtWidgets.QLabel('Pick:'))
-        row.addWidget(self.coin_pick)
-        row.addWidget(self.coin_btn)
-        row.addStretch(1)
-        hint = QtWidgets.QLabel('Acierto x2, fallo pierde apuesta.')
-        hint.setStyleSheet('font-size:16px; color:#d4e9d4;')
-        v.addWidget(self.coin_face_lbl)
-        v.addLayout(row)
-        v.addWidget(hint)
-        v.addStretch(1)
-        return w
+    def _coin_page(self):
+        page=QtWidgets.QFrame(); layout=QtWidgets.QVBoxLayout(page); layout.setContentsMargins(28,26,28,26); layout.setSpacing(18)
+        title=QtWidgets.QLabel('COIN FLIP'); title.setStyleSheet('font-size:25px; font-weight:900; color:#ffe05a; letter-spacing:2px;'); layout.addWidget(title); layout.addWidget(self._result_label)
+        self.coin_face=QtWidgets.QLabel('HEADS'); self.coin_face.setAlignment(QtCore.Qt.AlignCenter); self.coin_face.setStyleSheet('font-size:130px; font-weight:900; color:#ffe05a; text-shadow:0 0 20px #ffe05a;')
+        layout.addWidget(self.coin_face,1); controls=QtWidgets.QHBoxLayout(); self.coin_bet=QtWidgets.QSpinBox(); self.coin_bet.setRange(1,1000); self.coin_bet.setValue(10)
+        self.coin_pick=QtWidgets.QComboBox(); self.coin_pick.addItems(['HEADS','TAILS']); self.coin_button=QtWidgets.QPushButton('FLIP COIN'); self.coin_button.setFixedSize(190,48); self.coin_button.clicked.connect(self.play_coin)
+        controls.addWidget(QtWidgets.QLabel('APUESTA')); controls.addWidget(self.coin_bet); controls.addWidget(QtWidgets.QLabel('ELECCIÓN')); controls.addWidget(self.coin_pick); controls.addWidget(self.coin_button); layout.addLayout(controls)
+        return page
 
     def play_coin(self):
-        if self._coin_timer.isActive():
-            self.refresh_balance('Coin animation in progress...')
-            return
-        bet = int(self.coin_bet.value())
-        bal = get_balance()
-        if bet <= 0 or bet > bal:
-            self.refresh_balance('Apuesta inválida para Coin Flip.')
-            return
-        self._coin_pending = {'bet': bet, 'pick': str(self.coin_pick.currentText()).strip().upper()}
-        self._coin_target = random.choice(['HEADS', 'TAILS'])
-        self._coin_ticks = 0
-        self._coin_timer.start(90)
-        self.refresh_balance('Coin flipping...')
+        bet=self._validate_bet(self.coin_bet.value())
+        if bet is None or self.coin_timer.isActive(): return
+        self.coin_pending={'bet':bet,'pick':self.coin_pick.currentText()}; self.coin_target=random.choice(['HEADS','TAILS']); self.coin_tick=0; self.coin_button.setEnabled(False); self.coin_face.setText('FLIPPING...'); self.coin_timer.start(70)
 
     def _coin_tick(self):
-        self._coin_ticks += 1
-        side = 'HEADS' if self._coin_ticks % 2 == 0 else 'TAILS'
-        self.coin_face_lbl.setText(f'Coin: {side}')
-        if self._coin_ticks < 16:
-            return
-        self._coin_timer.stop()
-        self.coin_face_lbl.setText(f'Coin: {self._coin_target}')
-        bet = int(self._coin_pending.get('bet') or 0)
-        pick = str(self._coin_pending.get('pick') or 'HEADS')
-        payout = bet * 2 if pick == self._coin_target else 0
-        delta = -bet + payout
-        new_bal = change_balance(delta)
-        if payout > 0:
-            self.refresh_balance(f'Coin Flip win: +EUR {payout:.2f} (neto {delta:+.2f})')
-            unlock_for_event('win', 'casino_coin', limit=2)
-        else:
-            self.refresh_balance(f'Coin Flip lose: -EUR {bet:.2f}')
-        self.balance_lbl.setText(f'Balance: EUR {new_bal:.2f}')
+        self.coin_tick+=1; self.coin_face.setText('TAILS' if self.coin_tick%2 else 'HEADS')
+        if self.coin_tick<16:return
+        self.coin_timer.stop(); self.coin_button.setEnabled(True); bet=self.coin_pending['bet']; pick=self.coin_pending['pick']; result=self.coin_target; payout=bet*2 if pick==result else 0; delta=-bet+payout; new_balance=change_balance(delta)
+        self.coin_face.setText(result); self._set_result(f'COIN: {result} · {"GANADO" if payout else "PERDIDA"}', '#ffe05a' if payout else '#ff8888')
+        if payout: unlock_for_event('win','casino_coin',limit=2)
+        self._refresh_balance(f'Coin neto {delta:+.2f} €'); self.balance_label.setText(f'Balance: {format_money(new_balance)}')
 
-    def _online_tab(self):
-        w = QtWidgets.QWidget()
-        root = QtWidgets.QVBoxLayout(w)
-        root.setContentsMargins(16, 16, 16, 16)
-        root.setSpacing(10)
+    def _online_page(self):
+        page=QtWidgets.QFrame(); layout=QtWidgets.QVBoxLayout(page); layout.setContentsMargins(28,26,28,26); layout.setSpacing(14)
+        title=QtWidgets.QLabel('DICE DUEL — ONLINE'); title.setStyleSheet('font-size:25px; font-weight:900; color:#66e5ff; letter-spacing:2px;'); layout.addWidget(title)
+        controls=QtWidgets.QHBoxLayout(); self.online_room=QtWidgets.QLineEdit('global'); self.online_room.setPlaceholderText('Sala'); self.online_room.setMaxLength(60)
+        self.online_toggle=QtWidgets.QPushButton('ONLINE: ON'); self.online_toggle.clicked.connect(self._toggle_online); self.online_set=QtWidgets.QPushButton('ESTABLECER SALA'); self.online_set.clicked.connect(self._set_room)
+        controls.addWidget(QtWidgets.QLabel('SALA')); controls.addWidget(self.online_room,1); controls.addWidget(self.online_set); controls.addWidget(self.online_toggle); layout.addLayout(controls)
+        actions=QtWidgets.QHBoxLayout(); self.online_bet=QtWidgets.QSpinBox(); self.online_bet.setRange(1,1000); self.online_bet.setValue(20); self.online_roll=QtWidgets.QPushButton('ROLL'); self.online_roll.setFixedSize(150,48); self.online_roll.clicked.connect(self.play_online_dice)
+        actions.addWidget(QtWidgets.QLabel('APUESTA')); actions.addWidget(self.online_bet); actions.addWidget(self.online_roll); actions.addStretch(); self.online_result=QtWidgets.QLabel('Tu tirada: —'); self.online_result.setStyleSheet('font-size:24px; font-weight:800; color:#66e5ff;'); actions.addWidget(self.online_result); layout.addLayout(actions)
+        board=QtWidgets.QHBoxLayout(); self.online_feed=QtWidgets.QListWidget(); self.online_feed.setStyleSheet('background:#0d1b16; border:1px solid #244536;'); self.online_ranking=QtWidgets.QListWidget(); self.online_ranking.setStyleSheet('background:#0d1b16; border:1px solid #244536;')
+        board.addWidget(self.online_feed,2); board.addWidget(self.online_ranking,1); layout.addLayout(board,1)
+        self.online_status=QtWidgets.QLabel('Conectando al relay...'); self.online_status.setStyleSheet('font-size:13px; color:#78a28c;'); layout.addWidget(self.online_status)
+        return page
 
-        row1 = QtWidgets.QHBoxLayout()
-        self.online_room_edit = QtWidgets.QLineEdit(self.online_room)
-        self.online_room_edit.setPlaceholderText('Room name')
-        btn_set_room = QtWidgets.QPushButton('Set Room')
-        self.online_toggle = QtWidgets.QPushButton('Online: ON')
-        btn_set_room.clicked.connect(self._set_online_room)
-        self.online_toggle.clicked.connect(self._toggle_online)
-        row1.addWidget(QtWidgets.QLabel('Room:'))
-        row1.addWidget(self.online_room_edit, 1)
-        row1.addWidget(btn_set_room)
-        row1.addWidget(self.online_toggle)
-
-        row2 = QtWidgets.QHBoxLayout()
-        self.online_bet = QtWidgets.QSpinBox()
-        self.online_bet.setRange(1, 1000)
-        self.online_bet.setValue(20)
-        self.online_roll_btn = QtWidgets.QPushButton('Roll Online')
-        self.online_roll_btn.clicked.connect(self.play_online_dice)
-        self.online_last_lbl = QtWidgets.QLabel('Your roll: -')
-        self.online_last_lbl.setStyleSheet('font-size:20px; font-weight:800; color:#d5ffd5;')
-        row2.addWidget(QtWidgets.QLabel('Stake:'))
-        row2.addWidget(self.online_bet)
-        row2.addWidget(self.online_roll_btn)
-        row2.addStretch(1)
-        row2.addWidget(self.online_last_lbl)
-
-        body = QtWidgets.QHBoxLayout()
-        self.online_feed = QtWidgets.QListWidget()
-        self.online_board = QtWidgets.QListWidget()
-        self.online_feed.setMinimumWidth(640)
-        self.online_board.setMinimumWidth(300)
-        body.addWidget(self.online_feed, 2)
-        body.addWidget(self.online_board, 1)
-
-        self.online_status = QtWidgets.QLabel('Online duel compares your roll against room median from real players.')
-        self.online_status.setStyleSheet('font-size:16px; color:#d4e9d4;')
-
-        root.addLayout(row1)
-        root.addLayout(row2)
-        root.addLayout(body, 1)
-        root.addWidget(self.online_status)
-        return w
-
-    def _set_online_room(self):
-        room = str(self.online_room_edit.text() or '').strip().lower()
-        if not room:
-            room = 'global'
-        if len(room) > 60:
-            room = room[:60]
-        self.online_room = ''.join(ch if ch.isalnum() or ch in ('-', '_', '.') else '-' for ch in room)
-        self.online_room_edit.setText(self.online_room)
-        self.online_status.setText(f'Online room set: {self.online_room}')
-        self._refresh_online_board()
+    def _set_room(self):
+        room=''.join(ch if ch.isalnum() or ch in '-_.' else '-' for ch in self.online_room.text().strip().lower()) or 'global'
+        self.online_room.setText(room); self.relay.room=room; self.relay.topic=self.relay._sanitize_topic(f'xui-casino-{room}'); self.online_status.setText(f'Sala activa: {room}'); self._refresh_online()
 
     def _toggle_online(self):
-        self.relay.set_enabled(not self.relay.enabled)
-        if self.relay.enabled:
-            self.online_toggle.setText('Online: ON')
-            self.online_status.setText(f'Online enabled on topic {self.relay.topic}')
-        else:
-            self.online_toggle.setText('Online: OFF')
-            self.online_status.setText('Online disabled')
-
-    def _record_roll(self, payload, local=False):
-        item = {
-            'from': str(payload.get('from') or 'Unknown'),
-            'room': str(payload.get('room') or 'global'),
-            'roll': int(payload.get('roll') or 0),
-            'stake': int(payload.get('stake') or 0),
-            'game': str(payload.get('game') or 'dice_duel'),
-            'ts': float(payload.get('ts') or time.time()),
-            'local': bool(local),
-        }
-        self.online_rolls.append(item)
-        if len(self.online_rolls) > 700:
-            self.online_rolls = self.online_rolls[-500:]
-        if item['room'] == self.online_room:
-            stamp = time.strftime('%H:%M:%S', time.localtime(item['ts']))
-            prefix = 'YOU' if local else item['from']
-            self.online_feed.insertItem(0, f"[{stamp}] {prefix} rolled {item['roll']} (stake {item['stake']})")
-            while self.online_feed.count() > 90:
-                self.online_feed.takeItem(self.online_feed.count() - 1)
-        self._refresh_online_board()
-
-    def _refresh_online_board(self):
-        now = time.time()
-        room_events = [
-            e for e in self.online_rolls
-            if str(e.get('room')) == self.online_room and (now - float(e.get('ts', 0))) <= 1800.0
-        ]
-        stats = {}
-        for e in room_events:
-            who = str(e.get('from') or 'Unknown')
-            data = stats.setdefault(who, {'sum': 0.0, 'n': 0, 'high': 0})
-            roll = int(e.get('roll') or 0)
-            data['sum'] += float(roll)
-            data['n'] += 1
-            data['high'] = max(int(data['high']), roll)
-        ranking = []
-        for who, d in stats.items():
-            avg = float(d['sum']) / max(1, int(d['n']))
-            ranking.append((avg, int(d['high']), int(d['n']), who))
-        ranking.sort(key=lambda x: (-x[0], -x[1], -x[2], x[3].lower()))
-        self.online_board.clear()
-        if not ranking:
-            self.online_board.addItem('No online players yet in this room.')
-            return
-        for i, (avg, high, n, who) in enumerate(ranking[:14], 1):
-            self.online_board.addItem(f'{i:02d}. {who} | AVG {avg:.1f} | HIGH {high} | ROUNDS {n}')
+        self.relay.set_enabled(not self.relay.enabled); self.online_toggle.setText('ONLINE: ON' if self.relay.enabled else 'ONLINE: OFF'); self.online_status.setText('Relay activado' if self.relay.enabled else 'Relay desactivado')
 
     def play_online_dice(self):
-        if not self.relay.enabled:
-            self.refresh_balance('Online mode is disabled.')
-            return
-        stake = int(self.online_bet.value())
-        bal = get_balance()
-        if stake <= 0 or stake > bal:
-            self.refresh_balance('Stake invalid for online duel.')
-            return
-        room = str(self.online_room or 'global')
-        now = time.time()
-        opponent_rolls = [
-            int(e.get('roll') or 0)
-            for e in self.online_rolls
-            if str(e.get('room')) == room
-            and str(e.get('from')) != self.nickname
-            and (now - float(e.get('ts', 0))) <= 900.0
-        ]
-        roll = random.randint(1, 100)
-        payout = 0
-        if len(opponent_rolls) < 2:
-            # Not enough opponents: no loss, no gain.
-            delta = 0
-            self.online_status.setText('Not enough online opponents yet. Stake refunded.')
+        bet=self._validate_bet(self.online_bet.value())
+        if bet is None or not self.relay.enabled: return
+        room=self.online_room.text().strip() or 'global'; roll=random.randint(1,100); recent=[int(e.get('roll',0)) for e in self.online_rolls if e.get('room')==room and e.get('from')!=self.nickname and time.time()-float(e.get('ts',0))<900]
+        if len(recent)<2: delta=0; self.online_status.setText('No hay suficientes jugadores en esta sala. Apuesta devuelta.')
         else:
-            med = sorted(opponent_rolls)[len(opponent_rolls) // 2]
-            if roll > med:
-                payout = int(round(stake * 2.2))
-            elif roll == med:
-                payout = stake
-            delta = -stake + payout
-            self.online_status.setText(f'Opponent median: {med} | Your roll: {roll}')
-        new_bal = change_balance(delta)
-        self.balance_lbl.setText(f'Balance: EUR {new_bal:.2f}')
-        self.online_last_lbl.setText(f'Your roll: {roll}')
-        if delta > 0:
-            self.refresh_balance(f'Online duel win! Neto {delta:+.2f}')
-            unlock_for_event('social', 'casino_online_win', limit=2)
-        elif delta < 0:
-            self.refresh_balance(f'Online duel lose. Neto {delta:+.2f}')
-        else:
-            self.refresh_balance('Online duel push/refund.')
-        payload = {
-            'from': self.nickname,
-            'room': room,
-            'game': 'dice_duel',
-            'roll': int(roll),
-            'stake': int(stake),
-            'ts': float(now),
-        }
-        self._record_roll(payload, local=True)
-        try:
-            self.relay.send_roll(room, 'dice_duel', int(roll), int(stake))
-        except Exception as exc:
-            self.online_status.setText(f'Online send failed: {exc}')
+            median=sorted(recent)[len(recent)//2]; payout=round(bet*2.2) if roll>median else bet if roll==median else 0; delta=-bet+payout; self.online_status.setText(f'Mediana: {median} · Tu tirada: {roll}')
+        new_balance=change_balance(delta); self.online_result.setText(f'{roll}'); self.online_rolls.append({'from':self.nickname,'room':room,'roll':roll,'stake':bet,'ts':time.time()}); self._refresh_online()
+        self._set_result(f'DICE DUEL: {"GANADO" if delta>0 else "PERDIDA" if delta<0 else "DEVUELTA"}', '#66e5ff' if delta>=0 else '#ff8888')
+        if delta>0: unlock_for_event('social','casino_online_win',limit=2)
+        self._refresh_balance(f'Dice Duel neto {delta:+.2f} €'); self.balance_label.setText(f'Balance: {format_money(new_balance)}')
+        try: self.relay.send_roll(room,roll,bet)
+        except Exception as exc: self.online_status.setText(f'No se pudo enviar el resultado: {exc}')
 
-    def _poll_online_events(self):
+    def _poll_online(self):
         while True:
-            try:
-                evt = self.relay.events.get_nowait()
-            except queue.Empty:
-                break
-            kind = evt[0]
-            if kind == 'status':
-                self.online_status.setText(str(evt[1]))
+            try: event=self.relay.events.get_nowait()
+            except queue.Empty: break
+            if event[0]=='status': self.online_status.setText(str(event[1])); continue
+            payload=event[1]; self.online_rolls.append(payload); self.online_rolls=self.online_rolls[-500:]; self._refresh_online()
+
+    def _refresh_online(self):
+        self.online_feed.clear(); self.online_ranking.clear()
+        room=self.online_room.text().strip() or 'global'; now=time.time(); events=[e for e in self.online_rolls if e.get('room')==room and now-float(e.get('ts',0))<1800]
+        for event in reversed(events[:90]):
+            stamp=datetime.fromtimestamp(float(event.get('ts',time.time()))).strftime('%H:%M:%S'); owner='TU' if event.get('from')==self.nickname else str(event.get('from','Jugador'))
+            self.online_feed.addItem(f'[{stamp}] {owner}: {event.get("roll")} · apuesta {event.get("stake")}')
+        stats={}
+        for event in events:
+            player=str(event.get('from','Jugador')); stats.setdefault(player,[]).append(int(event.get('roll',0)))
+        rows=sorted(((sum(values)/len(values),max(values),len(values),player) for player,values in stats.items()),key=lambda x:(-x[0],-x[1],-x[2],x[3].lower()))
+        if not rows: self.online_ranking.addItem('Aún no hay resultados en esta sala.'); return
+        for rank,(avg,high,count,player) in enumerate(rows[:12],1): self.online_ranking.addItem(f'{rank:02d}. {player} · {avg:.1f} avg · {high} max · {count} tiros')
+
+    def _multiplayer_page(self):
+        page = QtWidgets.QFrame()
+        layout = QtWidgets.QVBoxLayout(page)
+        layout.setContentsMargins(28, 26, 28, 26)
+        layout.setSpacing(14)
+        title = QtWidgets.QLabel('FRIENDS · LOBBY · P2P')
+        title.setStyleSheet('font-size:25px; font-weight:900; color:#8c7dff; letter-spacing:2px;')
+        layout.addWidget(title)
+        layout.addWidget(self._result_label)
+        controls = QtWidgets.QHBoxLayout()
+        self.multiplayer_room = QtWidgets.QLineEdit(self.online_room.text() or 'global')
+        self.multiplayer_room.setPlaceholderText('Sala privada')
+        self.multiplayer_room.setMaxLength(60)
+        self.multiplayer_join = QtWidgets.QPushButton('UNIR')
+        self.multiplayer_join.clicked.connect(self._join_multiplayer_room)
+        self.multiplayer_create = QtWidgets.QPushButton('CREAR SALA')
+        self.multiplayer_create.clicked.connect(self._create_multiplayer_room)
+        controls.addWidget(QtWidgets.QLabel('SALA')); controls.addWidget(self.multiplayer_room, 1)
+        controls.addWidget(self.multiplayer_create); controls.addWidget(self.multiplayer_join)
+        layout.addLayout(controls)
+        self.multiplayer_status = QtWidgets.QLabel('Buscando pares LAN...')
+        self.multiplayer_status.setStyleSheet('font-size:13px; color:#9ba9c8;')
+        layout.addWidget(self.multiplayer_status)
+        fields = QtWidgets.QHBoxLayout()
+        self.multiplayer_peers = QtWidgets.QListWidget()
+        self.multiplayer_friends = QtWidgets.QListWidget()
+        self.multiplayer_chat = QtWidgets.QPlainTextEdit()
+        self.multiplayer_chat.setMaximumHeight(180)
+        self.multiplayer_chat.setPlaceholderText('Chat de sala')
+        self.multiplayer_chat_message = QtWidgets.QLineEdit()
+        self.multiplayer_chat_message.setPlaceholderText('Escribir mensaje')
+        self.multiplayer_chat_send = QtWidgets.QPushButton('ENVIAR')
+        self.multiplayer_chat_send.clicked.connect(self._send_multiplayer_chat)
+        self.multiplayer_chat_message.returnPressed.connect(self._send_multiplayer_chat)
+        self.multiplayer_invite = QtWidgets.QPushButton('INVITAR')
+        self.multiplayer_invite.clicked.connect(self._invite_multiplayer_peer)
+        self.multiplayer_party = QtWidgets.QPushButton('CREAR PARTY')
+        self.multiplayer_party.clicked.connect(self._start_party)
+        fields.addWidget(self.multiplayer_peers, 1)
+        fields.addWidget(self.multiplayer_friends, 1)
+        fields.addWidget(self.multiplayer_chat, 2)
+        layout.addLayout(fields, 1)
+        chat_layout = QtWidgets.QHBoxLayout()
+        chat_layout.addWidget(self.multiplayer_chat_message, 1)
+        chat_layout.addWidget(self.multiplayer_chat_send)
+        layout.addLayout(chat_layout)
+        action_layout = QtWidgets.QHBoxLayout()
+        action_layout.addWidget(self.multiplayer_invite, 1)
+        action_layout.addWidget(self.multiplayer_party, 1)
+        action_layout.addStretch()
+        layout.addLayout(action_layout)
+        return page
+
+    def _join_multiplayer_room(self):
+        room = self.multiplayer_room.text().strip() or 'global'
+        self._set_room(room)
+        self.multiplayer.set_room(room)
+        self.multiplayer._broadcast({'type': 'presence', 'room': room, 'name': self.nickname, 'user_id': self.multiplayer.user_id, 'node_id': self.multiplayer.node_id, 'chat_port': self.multiplayer.chat_port, 'ts': time.time()})
+        self.multiplayer_status.setText(f'Unido a la sala {room}. Buscando pares P2P...')
+        self._refresh_multiplayer_lists()
+
+    def _create_multiplayer_room(self):
+        room = self.multiplayer_room.text().strip() or f'xui-{uuid.uuid4().hex[:8]}'
+        self.multiplayer_room.setText(room)
+        self._join_multiplayer_room()
+
+    def _set_room(self, room):
+        room = ''.join(ch if ch.isalnum() or ch in '-_.' else '-' for ch in str(room).strip().lower()) or 'global'
+        self.online_room.setText(room)
+        self.relay.room = room
+        self.relay.topic = self.relay._sanitize_topic(f'xui-casino-{room}')
+        self.online_status.setText(f'Sala activa: {room}')
+        self._refresh_online()
+
+    def _start_party(self):
+        party_id = self.multiplayer.create_party()
+        self.multiplayer_status.setText(f'Party creado: {party_id}. Invita a un amigo o a un jugador LAN.')
+        self.multiplayer_party.setText('PARTY ACTIVO')
+
+    def _refresh_multiplayer_lists(self):
+        self.multiplayer_peers.clear()
+        self.multiplayer_friends.clear()
+        for peer in sorted(self.multiplayer.peers.values(), key=lambda item: item.get('name', '').lower()):
+            if peer.get('user_id') == self.multiplayer.user_id:
                 continue
-            if kind == 'roll':
-                payload = dict(evt[1] or {})
-                self._record_roll(payload, local=False)
+            if peer.get('room') == self.multiplayer.room:
+                self.multiplayer_peers.addItem(f'{peer.get("name")} · {peer.get("host")}:{peer.get("port")} · {peer.get("source", "LAN")}')
+        for friend in self.multiplayer.get_friends():
+            self.multiplayer_friends.addItem(f'{friend.get("name")} · {friend.get("status", "pending")}')
 
-    def _casino_action_primary(self):
-        idx = int(self.tabs.currentIndex()) if hasattr(self, 'tabs') else 0
-        if idx == 0:
-            self.play_slots()
-        elif idx == 1:
-            self.play_roulette()
-        elif idx == 2:
-            self.play_blackjack()
-        elif idx == 3:
-            self.play_hilo('high')
-        elif idx == 4:
-            self.play_coin()
-        elif idx == 5:
-            self.play_online_dice()
+    def _send_multiplayer_chat(self):
+        text = self.multiplayer_chat_message.text().strip()
+        if not text:
+            return
+        self.multiplayer_chat.appendPlainText(f'TU: {text}')
+        self.multiplayer_chat_message.clear()
+        for peer in self.multiplayer.peers.values():
+            if peer.get('host') and peer.get('port'):
+                self.multiplayer.send_chat(peer['host'], peer['port'], text)
 
-    def _casino_action_secondary(self):
-        idx = int(self.tabs.currentIndex()) if hasattr(self, 'tabs') else 0
-        if idx == 3:
-            self.play_hilo('low')
-            return True
-        if idx == 4:
-            cur = str(self.coin_pick.currentText()).strip().upper()
-            self.coin_pick.setCurrentText('TAILS' if cur == 'HEADS' else 'HEADS')
-            self.refresh_balance(f'Coin pick: {self.coin_pick.currentText()}')
-            return True
-        return False
+    def _invite_multiplayer_peer(self):
+        selected = self.multiplayer_peers.currentItem()
+        if not selected:
+            self.multiplayer_status.setText('Selecciona un jugador para invitar.')
+            return
+        peer = selected.text().split(' · ')[0]
+        for item in self.multiplayer.peers.values():
+            if item.get('name') == peer:
+                if self.multiplayer.invite_party(item['host'], item['port'], self.nickname):
+                    self.multiplayer_status.setText(f'Invitación enviada a {peer}.')
+                    return
+        self.multiplayer_status.setText('No se pudo enviar la invitación.')
 
-    def keyPressEvent(self, e):
-        k = e.key()
-        if k == QtCore.Qt.Key_A:
-            k = QtCore.Qt.Key_Return
-        elif k == QtCore.Qt.Key_B:
-            k = QtCore.Qt.Key_Escape
-        elif k == QtCore.Qt.Key_X:
-            if self._casino_action_secondary():
-                return
-            k = QtCore.Qt.Key_Space
-        elif k == QtCore.Qt.Key_Y:
-            k = QtCore.Qt.Key_Tab
-        if k in (QtCore.Qt.Key_Escape, QtCore.Qt.Key_Back):
-            self.close()
-            return
-        if k in (QtCore.Qt.Key_PageUp, QtCore.Qt.Key_Backtab):
-            self.tabs.setCurrentIndex((self.tabs.currentIndex() - 1) % max(1, self.tabs.count()))
-            return
-        if k in (QtCore.Qt.Key_PageDown, QtCore.Qt.Key_Tab):
-            self.tabs.setCurrentIndex((self.tabs.currentIndex() + 1) % max(1, self.tabs.count()))
-            return
-        if k in (QtCore.Qt.Key_Return, QtCore.Qt.Key_Enter, QtCore.Qt.Key_Space):
-            self._casino_action_primary()
-            return
-        super().keyPressEvent(e)
-
-    def closeEvent(self, e):
-        for t in (self._slots_timer, self._roulette_timer, self._coin_timer, self._bj_timer, self.online_timer):
-            try:
-                t.stop()
-            except Exception:
-                pass
+    def _poll_multiplayer(self):
         try:
-            self.relay.stop()
-        except Exception:
+            while True:
+                event = self.multiplayer.events.get_nowait()
+                kind = event[0]
+                if kind == 'status':
+                    self.multiplayer_status.setText(str(event[1]))
+                elif kind in ('peer_up', 'peer'):
+                    self._refresh_multiplayer_lists()
+                elif kind == 'chat':
+                    payload = event[1]
+                    self.multiplayer_chat.appendPlainText(f'{payload.get("from")}: {payload.get("text")}')
+                elif kind == 'friend_request':
+                    payload = event[1]
+                    self.multiplayer_status.setText(f'Solicitud de amistad de {payload.get("from")}')
+                elif kind == 'friend_accept':
+                    self.multiplayer_status.setText(f'{event[1].get("from")} ya es tu amigo.')
+                elif kind == 'party_invite':
+                    self.multiplayer_status.setText(f'{event[1].get("from")} te invitó al party {event[1].get("party_id")}')
+                elif kind == 'party':
+                    self.multiplayer_party.setText('PARTY ACTIVO')
+                    self.multiplayer_status.setText(f'Party {event[1]} activo')
+                elif kind == 'game_state':
+                    self.multiplayer_status.setText(f'{event[1].get("from")} envió estado para {event[1].get("game")}')
+        except queue.Empty:
             pass
-        super().closeEvent(e)
+        if event.key() in (QtCore.Qt.Key_Return,QtCore.Qt.Key_Enter,QtCore.Qt.Key_Space):
+            index=self.tabs.currentIndex()
+            if index==0:self.play_slots()
+            elif index==1:self.play_roulette()
+            elif index==2:self.play_blackjack()
+            elif index==3:self.play_hilo('high')
+            elif index==4:self.play_coin()
+            elif index==5:self.play_online_dice()
+            elif index==6:self._start_party()
+            return
+        if event.key()==QtCore.Qt.Key_X and self.tabs.currentIndex()==3: self.play_hilo('low'); return
+        if event.key()==QtCore.Qt.Key_X and self.tabs.currentIndex()==4: self.coin_pick.setCurrentText('TAILS' if self.coin_pick.currentText()=='HEADS' else 'HEADS'); return
+        super().keyPressEvent(event)
+
+    def closeEvent(self, event):
+        for timer in (self.slots_timer,self.roulette_timer,self.blackjack_timer,self.hilo_timer,self.coin_timer,self.online_timer,self.multiplayer_timer): timer.stop()
+        self.relay.stop(); self.multiplayer.stop(); super().closeEvent(event)
 
 
 def main():
-    app = QtWidgets.QApplication(sys.argv)
-    w = CasinoWindow()
-    try:
-        w.showFullScreen()
-    except Exception:
-        w.show()
+    app=QtWidgets.QApplication(sys.argv); window=CasinoWindow()
+    try: window.showFullScreen()
+    except Exception: window.show()
     sys.exit(app.exec_())
 
 
-if __name__ == '__main__':
-    main()
+if __name__=='__main__': main()
 PY
-  chmod +x "$CASINO_DIR/casino.py"
+
 
   cat > "$GAMES_DIR/runner.py" <<'PY'
 #!/usr/bin/env python3
