@@ -16884,6 +16884,9 @@ JSON
   cat > "$BIN_DIR/xui_game_lib.py" <<'PY'
 #!/usr/bin/env python3
 import json
+import os
+import shutil
+import subprocess
 import time
 from pathlib import Path
 
@@ -16907,6 +16910,64 @@ def _safe_write(path, data):
     p = Path(path)
     p.parent.mkdir(parents=True, exist_ok=True)
     p.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding='utf-8')
+
+
+def _select_largest_secondary_disk():
+    """Return the mounted secondary disk with the most free space."""
+    try:
+        payload = json.loads(subprocess.run(
+            ['lsblk', '-J', '-o', 'NAME,TYPE,PKNAME,MOUNTPOINTS,FSTYPE,TRAN,SIZE,MODEL,RO'],
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=10,
+        ).stdout)
+    except (OSError, subprocess.SubprocessError, json.JSONDecodeError, ValueError):
+        return None
+
+    candidates = []
+    for block in payload.get('blockdevices') or []:
+        name = str(block.get('name') or '')
+        if str(block.get('type') or '') != 'disk' or not name:
+            continue
+        partitions = [child for child in block.get('children') or [] if str(child.get('type') or '') == 'part']
+        partition = next((child for child in partitions if str(child.get('fstype') or '').strip()), None)
+        if partition is None:
+            continue
+        mountpoints = [str(path) for path in partition.get('mountpoints') or [] if str(path).strip()]
+        if '/' in mountpoints:
+            continue
+        if not mountpoints:
+            device_path = f'/dev/{partition.get("name")}'
+            mountpoint = Path.home() / '.xui' / 'mounts' / Path(device_path).name
+            if os.geteuid() != 0 and shutil.which('sudo'):
+                result = subprocess.run(
+                    ['sudo', '-n', 'mount', device_path, str(mountpoint)],
+                    check=False, capture_output=True, text=True, timeout=20,
+                )
+                if result.returncode != 0:
+                    continue
+            elif os.geteuid() == 0:
+                mountpoint.mkdir(parents=True, exist_ok=True)
+                result = subprocess.run(
+                    ['mount', device_path, str(mountpoint)],
+                    check=False, capture_output=True, text=True, timeout=20,
+                )
+                if result.returncode != 0:
+                    continue
+            else:
+                continue
+            mountpoints = [str(mountpoint)]
+        for mountpoint in mountpoints:
+            try:
+                free = int(shutil.disk_usage(mountpoint).free)
+            except (OSError, ValueError):
+                continue
+            if free > 0:
+                candidates.append((free, str(mountpoint)))
+    if not candidates:
+        return None
+    return max(candidates, key=lambda item: item[0])[1]
 
 
 def ensure_wallet():
@@ -18687,7 +18748,7 @@ except Exception:
 sys.path.insert(0, str(Path.home() / '.xui' / 'bin'))
 from xui_game_lib import (
     load_store, load_inventory, save_inventory, get_balance, change_balance, complete_mission,
-    unlock_for_event, ensure_achievements,
+    unlock_for_event, ensure_achievements, _select_largest_secondary_disk,
 )
 
 DATA_HOME = Path.home() / '.xui' / 'data'
@@ -18981,7 +19042,9 @@ def _install_xbox360_game(game_id):
     if not url:
         raise ValueError('El enlace de descarga del juego no es válido.')
     slug = re.sub(r'[^A-Za-z0-9._-]+', '_', str(item.get('name', game_id))).strip('._')[:80] or str(game_id)
-    root = Path.home() / '.xui' / 'GAMES' / 'Xbox360'
+    root = Path(_select_largest_secondary_disk() or str(Path.home() / '.xui' / 'GAMES' / 'Xbox360'))
+    if root == Path.home() / '.xui' / 'GAMES' / 'Xbox360':
+        root.mkdir(parents=True, exist_ok=True)
     destination = root / slug
     if destination.exists():
         print(f'Ya está descargado: {destination}')
