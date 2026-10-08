@@ -16866,6 +16866,14 @@ EOF
 write_extras(){
   info "Writing casino, runner, missions, store and helper scripts"
   mkdir -p "$CASINO_DIR" "$GAMES_DIR" "$DATA_DIR" "$XUI_DIR/apps"
+    local installer_dir poker_source
+    installer_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+    poker_source="$installer_dir/poker_engine_v2.py"
+    if [ -f "$poker_source" ]; then
+        install -m 0644 "$poker_source" "$CASINO_DIR/poker_engine_v2.py"
+    else
+        warn "Poker engine source missing beside installer: $poker_source"
+    fi
 
   # Seed core data files so apps work on first boot
   if [ ! -f "$DATA_DIR/saldo.json" ]; then
@@ -17880,6 +17888,7 @@ except Exception:
     QtGamepad = None
 
 from casino_multiplayer import MultiplayerEngine
+from poker_engine_v2 import PokerGame
 
 sys.path.insert(0, str(Path.home() / '.xui' / 'bin'))
 from xui_game_lib import change_balance, complete_mission, get_balance, ensure_wallet, unlock_for_event
@@ -18030,6 +18039,7 @@ class CasinoWindow(QtWidgets.QMainWindow):
         self._refresh_balance(self._welcome_message())
         self._update_hilo_card()
         self._connect_multiplayer_events()
+        self._new_poker_hand()
 
     def _welcome_message(self):
         if self.mission.get('completed'):
@@ -18038,23 +18048,24 @@ class CasinoWindow(QtWidgets.QMainWindow):
 
     def _build_ui(self):
         self.setWindowTitle('XUI Casino — Virtual Play')
-        self.resize(1240, 780)
-        self.setMinimumSize(900, 620)
+        self.resize(1480, 900)
+        self.setMinimumSize(1120, 700)
         self.setStyleSheet('''
-            QMainWindow { background: qlineargradient(x1:0,y1:0,x2:1,y2:1, stop:0 #08110d, stop:1 #101a14); color:#f2fff5; }
-            QWidget { font-family: "Segoe UI", Arial, sans-serif; }
-            QTabWidget::pane { border:1px solid #244536; background:#0b1711; border-radius:16px; }
-            QTabBar::tab { background:#13251c; color:#91b6a0; padding:12px 20px; border:1px solid #244536; border-bottom:0; border-radius:12px 12px 0 0; }
-            QTabBar::tab:selected { background:#18a85b; color:white; font-weight:700; }
-            QFrame { background:#0d1a14; border:1px solid #244536; border-radius:16px; }
+            QMainWindow { background:qlineargradient(x1:0,y1:0,x2:1,y2:1, stop:0 #101a20, stop:0.55 #18252b, stop:1 #26373a); color:#f2fff5; }
+            QWidget { font-family:"Segoe UI",Arial,sans-serif; }
+            QFrame { background:#233137; border:1px solid #536165; border-radius:12px; }
             QAbstractButton { font-size:14px; }
-            QPushButton { background:#18a85b; color:white; border:0; padding:10px 16px; border-radius:10px; font-weight:700; }
-            QPushButton:hover { background:#31c46f; }
-            QPushButton:pressed { background:#0f7c45; }
-            QPushButton:disabled { background:#294236; color:#6e8d79; }
-            QSpinBox, QComboBox, QLineEdit, QListWidget { background:#101f18; color:#effff3; border:1px solid #28503a; border-radius:9px; padding:8px 10px; }
-            QSpinBox::up-button, QSpinBox::down-button { background:#1d3b2b; border:0; width:24px; }
-            QLabel { color:#dbeee2; }
+            QPushButton { background:qlineargradient(x1:0,y1:0,x2:1,y2:0, stop:0 #0b9219, stop:1 #16b72f); color:white; border:1px solid #68d672; padding:10px 16px; border-radius:8px; font-weight:800; }
+            QPushButton:hover { background:#20cb3b; border-color:#b2f0b6; }
+            QPushButton:pressed { background:#087514; }
+            QPushButton:disabled { background:#56635f; color:#a6b2ae; border-color:#697572; }
+            QSpinBox, QComboBox, QLineEdit, QListWidget { background:#dfe5e6; color:#263238; border:1px solid #9ca7aa; border-radius:6px; padding:8px 10px; }
+            QSpinBox::up-button, QSpinBox::down-button { background:#b5c1c3; border:0; width:24px; }
+            QLabel { color:#edf4f2; }
+            QListWidget#casino_nav { background:#dfe5e6; color:#263238; border:1px solid #9ca7aa; border-radius:10px; outline:none; font-size:18px; font-weight:700; }
+            QListWidget#casino_nav::item { min-height:50px; padding:8px 12px; border-bottom:1px solid #b8c2c4; }
+            QListWidget#casino_nav::item:selected { background:#078d13; color:white; border-left:5px solid #79ed77; }
+            QStackedWidget#casino_pages { background:transparent; border:0; }
             QVBoxLayout { margin:0; }
         ''')
         central = QtWidgets.QWidget()
@@ -18067,8 +18078,8 @@ class CasinoWindow(QtWidgets.QMainWindow):
         header.setObjectName('header')
         header_layout = QtWidgets.QHBoxLayout(header)
         header_layout.setContentsMargins(18, 14, 18, 14)
-        logo = QtWidgets.QLabel('XUI CASINO')
-        logo.setStyleSheet('font-size:28px; font-weight:900; color:#42d77c; letter-spacing:3px;')
+        logo = QtWidgets.QLabel('♠  XUI CASINO')
+        logo.setStyleSheet('font-size:31px; font-weight:900; color:#65e878; letter-spacing:3px;')
         self.balance_label = QtWidgets.QLabel('Balance: € 250.00')
         self.balance_label.setStyleSheet('font-size:20px; font-weight:800; color:#effff3;')
         self.status_label = QtWidgets.QLabel('Cargando servicios...')
@@ -18081,17 +18092,35 @@ class CasinoWindow(QtWidgets.QMainWindow):
         self._result_label = QtWidgets.QLabel('Listo para jugar')
         self._result_label.setObjectName('result')
         self._result_label.setStyleSheet('font-size:18px; color:#a6e7b8;')
+        layout.addWidget(self._result_label)
 
-        self.tabs = QtWidgets.QTabWidget()
-        self.tabs.addTab(self._slots_page(), '◉ Slots')
-        self.tabs.addTab(self._roulette_page(), '◌ Roulette')
-        self.tabs.addTab(self._blackjack_page(), '♠ Blackjack')
-        self.tabs.addTab(self._hilo_page(), '♣ Hi-Lo')
-        self.tabs.addTab(self._coin_page(), '● Coin Flip')
-        self.tabs.addTab(self._online_page(), '✦ Dice Duel')
-        self.tabs.addTab(self._multiplayer_page(), '◈ Friends & LAN')
-        self.tabs.currentChanged.connect(self._tab_changed)
-        layout.addWidget(self.tabs, 1)
+        body = QtWidgets.QHBoxLayout()
+        body.setSpacing(12)
+        self.game_nav = QtWidgets.QListWidget()
+        self.game_nav.setObjectName('casino_nav')
+        self.game_pages = QtWidgets.QStackedWidget()
+        self.game_pages.setObjectName('casino_pages')
+        games = [
+            ('🎰  Slots', self._slots_page),
+            ('🎡  Roulette', self._roulette_page),
+            ('♠  Blackjack', self._blackjack_page),
+            ('♣  Hi-Lo', self._hilo_page),
+            ('🪙  Coin Flip', self._coin_page),
+            ('⚄  Dice Duel', self._online_page),
+            ('🂡  Texas Hold’em', self._poker_page),
+            ('◈  Friends & LAN', self._multiplayer_page),
+        ]
+        for label, page_factory in games:
+            self.game_nav.addItem(label)
+            self.game_pages.addWidget(page_factory())
+        self.game_nav.setFixedWidth(250)
+        self.game_nav.setFocusPolicy(QtCore.Qt.NoFocus)
+        self.game_nav.setCurrentRow(0)
+        self.game_nav.currentRowChanged.connect(self.game_pages.setCurrentIndex)
+        self.game_nav.currentRowChanged.connect(self._tab_changed)
+        body.addWidget(self.game_nav)
+        body.addWidget(self.game_pages, 1)
+        layout.addLayout(body, 1)
 
         footer = QtWidgets.QHBoxLayout()
         self.footer_label = QtWidgets.QLabel('Apuestas virtuales · Los resultados son locales y no representan dinero real')
@@ -18123,8 +18152,186 @@ class CasinoWindow(QtWidgets.QMainWindow):
         self.multiplayer_timer.start(100)
 
     def _tab_changed(self, index):
-        self.status_label.setText(self.tabs.tabBar().tabText(index))
+        item = self.game_nav.item(index)
+        self.status_label.setText(item.text() if item else 'Casino')
         self._result_label.setText('Listo para jugar')
+
+    def _poker_page(self):
+        page = QtWidgets.QWidget()
+        layout = QtWidgets.QVBoxLayout(page)
+        layout.setContentsMargins(8, 8, 8, 8)
+        layout.setSpacing(12)
+        title_row = QtWidgets.QHBoxLayout()
+        title = QtWidgets.QLabel('TEXAS HOLD’EM')
+        title.setStyleSheet('font-size:27px; font-weight:900; color:#75ee82; letter-spacing:2px;')
+        subtitle = QtWidgets.QLabel('MESA LOCAL · CRÉDITOS DE JUEGO')
+        subtitle.setStyleSheet('font-size:12px; font-weight:800; color:#b7c3c0; letter-spacing:1px;')
+        title_row.addWidget(title)
+        title_row.addStretch(1)
+        title_row.addWidget(subtitle)
+        layout.addLayout(title_row)
+
+        self.poker_table = QtWidgets.QFrame()
+        self.poker_table.setObjectName('poker_table')
+        self.poker_table.setStyleSheet('''
+            QFrame#poker_table { background:qradialgradient(cx:0.5,cy:0.45,radius:0.8, fx:0.5,fy:0.45, stop:0 #167446, stop:0.72 #07512f, stop:1 #073b25); border:8px solid #596467; border-radius:28px; }
+            QLabel#poker_card { background:qlineargradient(x1:0,y1:0,x2:0,y2:1, stop:0 #ffffff, stop:1 #dce3e3); border:2px solid #f8ffff; border-radius:8px; color:#17252a; font-size:22px; font-weight:900; min-width:52px; max-width:52px; min-height:74px; max-height:74px; }
+            QLabel#poker_card_red { color:#c42b37; }
+            QLabel#poker_card_back { background:qlineargradient(x1:0,y1:0,x2:1,y2:1, stop:0 #173a72, stop:1 #2869a9); border:2px solid #d4e4ed; border-radius:8px; color:white; font-size:25px; font-weight:900; min-width:52px; max-width:52px; min-height:74px; max-height:74px; }
+        ''')
+        table = QtWidgets.QVBoxLayout(self.poker_table)
+        table.setContentsMargins(20, 18, 20, 18)
+        table.setSpacing(12)
+        self.poker_opponent_title = QtWidgets.QLabel('◇  CPU DEALER  ·  250 CHIPS')
+        self.poker_opponent_title.setAlignment(QtCore.Qt.AlignCenter)
+        self.poker_opponent_title.setStyleSheet('font-size:14px; font-weight:800; color:#e6f2ed;')
+        table.addWidget(self.poker_opponent_title)
+        self.poker_opponent_cards = QtWidgets.QHBoxLayout()
+        self.poker_opponent_cards.setAlignment(QtCore.Qt.AlignCenter)
+        table.addLayout(self.poker_opponent_cards)
+        table.addStretch(1)
+        center = QtWidgets.QFrame()
+        center.setStyleSheet('background:rgba(4,28,19,150); border:1px solid rgba(178,230,196,100); border-radius:18px;')
+        center_layout = QtWidgets.QVBoxLayout(center)
+        self.poker_pot_label = QtWidgets.QLabel('POT · 7 CHIPS')
+        self.poker_pot_label.setAlignment(QtCore.Qt.AlignCenter)
+        self.poker_pot_label.setStyleSheet('font-size:18px; font-weight:900; color:#ffe77a; letter-spacing:1px;')
+        center_layout.addWidget(self.poker_pot_label)
+        self.poker_board_cards = QtWidgets.QHBoxLayout()
+        self.poker_board_cards.setSpacing(8)
+        self.poker_board_cards.setAlignment(QtCore.Qt.AlignCenter)
+        center_layout.addLayout(self.poker_board_cards)
+        table.addWidget(center)
+        table.addStretch(1)
+        self.poker_player_cards = QtWidgets.QHBoxLayout()
+        self.poker_player_cards.setSpacing(8)
+        self.poker_player_cards.setAlignment(QtCore.Qt.AlignCenter)
+        table.addLayout(self.poker_player_cards)
+        self.poker_player_title = QtWidgets.QLabel(f'♙  {self.nickname.upper()} · 250 CHIPS')
+        self.poker_player_title.setAlignment(QtCore.Qt.AlignCenter)
+        self.poker_player_title.setStyleSheet('font-size:14px; font-weight:900; color:#ffffff;')
+        table.addWidget(self.poker_player_title)
+        layout.addWidget(self.poker_table, 1)
+
+        self.poker_action_label = QtWidgets.QLabel('Tu turno')
+        self.poker_action_label.setAlignment(QtCore.Qt.AlignCenter)
+        self.poker_action_label.setStyleSheet('font-size:15px; font-weight:700; color:#dce7e3;')
+        layout.addWidget(self.poker_action_label)
+        actions = QtWidgets.QHBoxLayout()
+        self.poker_raise_amount = QtWidgets.QSpinBox()
+        self.poker_raise_amount.setRange(6, 250)
+        self.poker_raise_amount.setValue(20)
+        self.poker_raise_amount.setPrefix('SUBIR A  ')
+        self.poker_fold_button = QtWidgets.QPushButton('RETIRAR · X')
+        self.poker_check_button = QtWidgets.QPushButton('PASAR · B')
+        self.poker_call_button = QtWidgets.QPushButton('IGUALAR · A')
+        self.poker_raise_button = QtWidgets.QPushButton('SUBIR · Y')
+        self.poker_new_button = QtWidgets.QPushButton('NUEVA MANO')
+        self.poker_fold_button.clicked.connect(lambda: self._poker_action('fold'))
+        self.poker_check_button.clicked.connect(lambda: self._poker_action('check'))
+        self.poker_call_button.clicked.connect(lambda: self._poker_action('call'))
+        self.poker_raise_button.clicked.connect(lambda: self._poker_action('raise'))
+        self.poker_new_button.clicked.connect(self._next_poker_hand)
+        for control in (self.poker_fold_button, self.poker_check_button, self.poker_call_button, self.poker_raise_amount, self.poker_raise_button, self.poker_new_button):
+            actions.addWidget(control)
+        layout.addLayout(actions)
+        hint = QtWidgets.QLabel('Partida local contra CPU · créditos virtuales')
+        hint.setStyleSheet('font-size:12px; color:#bcc8c4;')
+        layout.addWidget(hint)
+        return page
+
+    def _new_poker_hand(self):
+        if not hasattr(self, 'poker_table'):
+            return
+        if hasattr(self, 'poker_game'):
+            self.poker_stacks = [player['chips'] for player in self.poker_game.players]
+        else:
+            self.poker_stacks = [250, 250]
+        if min(self.poker_stacks) < 7:
+            self.poker_action_label.setText('Un jugador se quedó sin fichas. Mesa reiniciada a 250 chips.')
+            self.poker_stacks = [250, 250]
+        self.poker_game = PokerGame([
+            {'id': 'local-player', 'name': self.nickname, 'chips': self.poker_stacks[0]},
+            {'id': 'local-cpu', 'name': 'CPU Dealer', 'chips': self.poker_stacks[1]},
+        ])
+        self.poker_hand_settled = False
+        self._refresh_poker_table()
+
+    def _next_poker_hand(self):
+        if not getattr(self, 'poker_hand_settled', False):
+            self.poker_action_label.setText('Termina esta mano antes de repartir otra.')
+            return
+        self._new_poker_hand()
+
+    @staticmethod
+    def _clear_layout(layout):
+        while layout.count():
+            item = layout.takeAt(0)
+            widget = item.widget()
+            if widget is not None:
+                widget.deleteLater()
+
+    def _poker_add_card(self, layout, card=None, face_down=False):
+        label = QtWidgets.QLabel('✦' if face_down else f'{card[0]}\n{card[1]}')
+        name = 'poker_card_back' if face_down else ('poker_card_red' if card and card[1] in ('♥', '♦') else 'poker_card')
+        label.setObjectName(name)
+        label.setAlignment(QtCore.Qt.AlignCenter)
+        layout.addWidget(label)
+
+    def _refresh_poker_table(self):
+        if not hasattr(self, 'poker_game'):
+            return
+        game = self.poker_game
+        player, opponent = game.players
+        for card_layout in (self.poker_board_cards, self.poker_player_cards, self.poker_opponent_cards):
+            self._clear_layout(card_layout)
+        for card in game.community:
+            self._poker_add_card(self.poker_board_cards, card)
+        for _ in range(5 - len(game.community)):
+            self._poker_add_card(self.poker_board_cards, face_down=True)
+        for card in player['cards']:
+            self._poker_add_card(self.poker_player_cards, card)
+        reveal_hole_cards = game.phase == 'showdown'
+        reveal_hole_cards = game.phase == 'showdown' and all(not player['folded'] for player in game.players)
+        reveal_hole_cards = game.phase == 'showdown' and all(not player['folded'] for player in game.players)
+        for card in opponent['cards']:
+            self._poker_add_card(self.poker_opponent_cards, card if reveal_hole_cards else None, not reveal_hole_cards)
+        self.poker_pot_label.setText(f'POT · {game.pot} CHIPS · {game.phase.upper()}')
+        self.poker_player_title.setText(f'♙  {player["name"].upper()} · {player["chips"]} CHIPS · APUESTA {player["bet"]}')
+        self.poker_opponent_title.setText(f'◇  {opponent["name"].upper()} · {opponent["chips"]} CHIPS')
+        self.poker_action_label.setText(game.last_action)
+        player_turn = game.phase != 'showdown' and game.current_index == 0
+        for control in (self.poker_fold_button, self.poker_check_button, self.poker_call_button, self.poker_raise_button, self.poker_raise_amount):
+            control.setEnabled(player_turn)
+        self.poker_new_button.setEnabled(game.phase == 'showdown')
+        if game.phase == 'showdown' and not self.poker_hand_settled:
+            game.settle()
+            self.poker_hand_settled = True
+            self._clear_layout(self.poker_board_cards)
+            for card in game.community:
+                self._poker_add_card(self.poker_board_cards, card)
+            self.poker_action_label.setText(game.last_action)
+            self.poker_player_title.setText(f'♙  {player["name"].upper()} · {player["chips"]} CHIPS')
+            self.poker_opponent_title.setText(f'◇  {opponent["name"].upper()} · {opponent["chips"]} CHIPS')
+
+    def _poker_action(self, action):
+        game = getattr(self, 'poker_game', None)
+        if game is None or game.phase == 'showdown' or game.current_index != 0:
+            return
+        if action == 'raise':
+            accepted = game.apply_action('local-player', action, self.poker_raise_amount.value())
+        else:
+            accepted = game.apply_action('local-player', action)
+        if not accepted:
+            self.poker_action_label.setText('Acción no válida en este turno.')
+            return
+        while game.phase != 'showdown' and game.current_index == 1:
+            opponent = game.players[1]
+            required = game.active_bet - opponent['bet']
+            cpu_action = 'fold' if required > opponent['chips'] else ('call' if required > 0 else 'check')
+            if not game.apply_action('local-cpu', cpu_action):
+                break
+        self._refresh_poker_table()
 
     def _show_help(self):
         guide = Path.home() / '.xui' / 'bin' / 'xui_global_guide.sh'
@@ -18159,7 +18366,6 @@ class CasinoWindow(QtWidgets.QMainWindow):
         title = QtWidgets.QLabel('SLOTS — NEON ROYALS')
         title.setStyleSheet('font-size:25px; font-weight:900; color:#43d87d; letter-spacing:2px;')
         layout.addWidget(title)
-        layout.addWidget(self._result_label)
 
         machine = QtWidgets.QFrame()
         machine.setStyleSheet('background:#07110c; border:2px solid #204d35; border-radius:18px; padding:20px;')
@@ -18238,7 +18444,6 @@ class CasinoWindow(QtWidgets.QMainWindow):
         title = QtWidgets.QLabel('ROULETTE — 0 TO 36')
         title.setStyleSheet('font-size:25px; font-weight:900; color:#4bc6f6; letter-spacing:2px;')
         layout.addWidget(title)
-        layout.addWidget(self._result_label)
         wheel_layout = QtWidgets.QHBoxLayout()
         wheel_layout.setSpacing(24)
         self.roulette_wheel = QtWidgets.QLabel('♦')
@@ -18605,20 +18810,36 @@ class CasinoWindow(QtWidgets.QMainWindow):
         if event.key() == QtCore.Qt.Key_F1:
             self._show_help()
             return
+        if event.key() == QtCore.Qt.Key_Left:
+            self.game_nav.setCurrentRow(max(0, self.game_nav.currentRow() - 1))
+            return
+        if event.key() == QtCore.Qt.Key_Right:
+            self.game_nav.setCurrentRow(min(self.game_nav.count() - 1, self.game_nav.currentRow() + 1))
+            return
         if event.key() in (QtCore.Qt.Key_Return,QtCore.Qt.Key_Enter,QtCore.Qt.Key_Space):
-            index=self.tabs.currentIndex()
+            index=self.game_nav.currentRow()
             if index==0:self.play_slots()
             elif index==1:self.play_roulette()
             elif index==2:self.play_blackjack()
             elif index==3:self.play_hilo('high')
             elif index==4:self.play_coin()
             elif index==5:self.play_online_dice()
-            elif index==6:self._start_party()
+            elif index==6:self._poker_action('check')
+            elif index==7:self._start_party()
             return
-        if event.key()==QtCore.Qt.Key_X and self.tabs.currentIndex()==3:
+        if event.key() == QtCore.Qt.Key_X and self.game_nav.currentRow() == 6:
+            self._poker_action('fold')
+            return
+        if event.key() == QtCore.Qt.Key_A and self.game_nav.currentRow() == 6:
+            self._poker_action('call')
+            return
+        if event.key() == QtCore.Qt.Key_Y and self.game_nav.currentRow() == 6:
+            self._poker_action('raise')
+            return
+        if event.key()==QtCore.Qt.Key_X and self.game_nav.currentRow()==3:
             self.play_hilo('low')
             return
-        if event.key()==QtCore.Qt.Key_X and self.tabs.currentIndex()==4:
+        if event.key()==QtCore.Qt.Key_X and self.game_nav.currentRow()==4:
             self.coin_pick.setCurrentText('TAILS' if self.coin_pick.currentText()=='HEADS' else 'HEADS')
             return
         super().keyPressEvent(event)
