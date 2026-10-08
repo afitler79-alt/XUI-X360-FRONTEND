@@ -12331,7 +12331,7 @@ class Dashboard(QtWidgets.QMainWindow):
                 'play': 'Dump Homebrew DVD to xemu',
                 'install': '',
                 'uninstall': '',
-                'desc': 'Copy a mounted data DVD containing an XISO image and launch it with xemu.',
+                'desc': 'Select a readable disc or dump folder containing an original Xbox XISO image, then launch it with xemu.',
             },
             {
                 'label': 'Original Xbox Setup Info',
@@ -12352,7 +12352,7 @@ class Dashboard(QtWidgets.QMainWindow):
                 'play': 'Dump Homebrew DVD to Xenia',
                 'install': '',
                 'uninstall': '',
-                'desc': 'Copy a mounted, readable homebrew DVD into local storage and open its XEX/ISO in Xenia.',
+                'desc': 'Select a readable disc or dump folder; Xenia launches its default.xex or a supported ISO.',
             },
             {
                 'label': 'Xbox 360 DVD Drive',
@@ -14625,11 +14625,18 @@ exit 1
             if not dumper.is_file():
                 self._msg('Homebrew DVD', f'DVD dumper not found:\n{dumper}\n\nRun the XUI installer to create it.')
                 return
+            source = QtWidgets.QFileDialog.getExistingDirectory(
+                self,
+                'Select the mounted Xbox 360 disc or extracted game folder',
+                str(Path.home()),
+            )
+            if not source:
+                return
             self._run_install_task(
                 'Xenia Homebrew DVD',
-                f'"{dumper}"',
-                success_msg='Homebrew DVD copied to ~/.xui/games/xenia_dumps and sent to Xenia Canary.',
-                fail_msg='Could not dump the DVD. Insert the homebrew data disc, let Linux mount it, and check the details below.',
+                f'{shlex.quote(str(dumper))} {shlex.quote(source)}',
+                success_msg='Disc files copied to ~/.xui/games/xenia_dumps and the default.xex (or selected game image) was sent to Xenia Canary.',
+                fail_msg='Could not find or launch a readable .xex/.iso. Retail Xbox 360 DVDs may not mount as ordinary files; use a legally obtained Xenia-compatible dump.',
             )
             self._unlock_achievement_event('launch', 'xenia_canary')
         elif action == 'xemu (Original Xbox)':
@@ -14661,11 +14668,18 @@ exit 1
             if not dumper.is_file():
                 self._msg('Homebrew DVD', f'DVD dumper not found:\n{dumper}\n\nRun the XUI installer to create it.')
                 return
+            source = QtWidgets.QFileDialog.getExistingDirectory(
+                self,
+                'Select the mounted disc folder containing an original Xbox XISO',
+                str(Path.home()),
+            )
+            if not source:
+                return
             self._run_install_task(
                 'xemu Homebrew DVD',
-                f'"{dumper}"',
-                success_msg='DVD contents copied to ~/.xui/games/xemu_dumps and XISO launched in xemu.',
-                fail_msg='Could not dump/launch the DVD. Linux must mount it and it must contain a valid XISO image.',
+                f'{shlex.quote(str(dumper))} {shlex.quote(source)}',
+                success_msg='Disc files copied to ~/.xui/games/xemu_dumps and the XISO image was launched in xemu.',
+                fail_msg='Could not find a valid XISO .iso image. xemu cannot boot a mounted folder or default.xbe directly; select a folder containing an XISO image.',
             )
             self._unlock_achievement_event('launch', 'xemu')
         elif action == 'Original Xbox Setup Info':
@@ -32988,14 +33002,22 @@ def dump_disc(source):
 def main():
     if not XENIA.is_file() or not os.access(XENIA, os.X_OK):
         raise RuntimeError('Xenia Canary is not installed. Install it from the XUI Games menu first.')
-    mounts = optical_mounts()
-    if not mounts:
-        raise RuntimeError('No mounted optical disc was found. Insert the homebrew DVD and let Linux mount it.')
-    if len(mounts) > 1:
-        details = '\n'.join(str(path) for path in mounts)
-        raise RuntimeError(f'More than one optical disc is mounted; leave only the target DVD mounted.\n{details}')
+    if len(sys.argv) > 2:
+        raise RuntimeError(f'Usage: {Path(sys.argv[0]).name} [mounted-disc-or-game-folder]')
+    if len(sys.argv) == 2:
+        source = Path(sys.argv[1]).expanduser().resolve()
+        if not source.is_dir() or not os.access(source, os.R_OK):
+            raise RuntimeError(f'Selected source is not a readable folder: {source}')
+    else:
+        mounts = optical_mounts()
+        if not mounts:
+            raise RuntimeError('No mounted optical disc was found. Mount the disc or pass its folder path.')
+        if len(mounts) > 1:
+            details = '\n'.join(str(path) for path in mounts)
+            raise RuntimeError(f'More than one optical disc is mounted; specify the target folder.\n{details}')
+        source = mounts[0]
 
-    destination, game = dump_disc(mounts[0])
+    destination, game = dump_disc(source)
     print(f'Dump complete: {destination}', flush=True)
     print(f'Launching in Xenia: {game}', flush=True)
     subprocess.Popen(
@@ -33245,12 +33267,12 @@ def dump_disc(source):
         raise
 
     images = sorted(
-        (path for path in destination.rglob('*') if path.is_file() and path.suffix.lower() == '.iso'),
+        (path for path in destination.rglob('*') if path.is_file() and path.suffix.lower() in ('.iso', '.xiso')),
         key=lambda path: str(path).lower(),
     )
     if not images:
         raise RuntimeError(
-            f'Disc copied to {destination}, but contains no .iso image. '
+            f'Disc copied to {destination}, but contains no .iso/.xiso image. '
             'xemu needs an XISO image; a mounted folder or raw/redump ISO is not sufficient.'
         )
     if len(images) != 1:
@@ -33264,14 +33286,22 @@ def dump_disc(source):
 def main():
     if not XEMU.is_file() or not os.access(XEMU, os.X_OK):
         raise RuntimeError('xemu is not installed. Install it from the XUI Games menu first.')
-    mounts = optical_mounts()
-    if not mounts:
-        raise RuntimeError('No mounted optical disc was found. Insert the data DVD and let Linux mount it.')
-    if len(mounts) > 1:
-        details = '\n'.join(str(path) for path in mounts)
-        raise RuntimeError(f'More than one optical disc is mounted; leave only the target DVD mounted.\n{details}')
+    if len(sys.argv) > 2:
+        raise RuntimeError(f'Usage: {Path(sys.argv[0]).name} [mounted-disc-or-game-folder]')
+    if len(sys.argv) == 2:
+        source = Path(sys.argv[1]).expanduser().resolve()
+        if not source.is_dir() or not os.access(source, os.R_OK):
+            raise RuntimeError(f'Selected source is not a readable folder: {source}')
+    else:
+        mounts = optical_mounts()
+        if not mounts:
+            raise RuntimeError('No mounted optical disc was found. Mount the disc or pass its folder path.')
+        if len(mounts) > 1:
+            details = '\n'.join(str(path) for path in mounts)
+            raise RuntimeError(f'More than one optical disc is mounted; specify the target folder.\n{details}')
+        source = mounts[0]
 
-    destination, image = dump_disc(mounts[0])
+    destination, image = dump_disc(source)
     print(f'Dump complete: {destination}', flush=True)
     print(f'Launching XISO in xemu: {image}', flush=True)
     subprocess.Popen(
