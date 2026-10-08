@@ -115,6 +115,16 @@ wait_for_apt_lock(){
     done
 }
 
+apt_binary(){
+    if check_cmd apt-get; then
+        command -v apt-get
+    elif check_cmd apt; then
+        command -v apt
+    else
+        return 1
+    fi
+}
+
 apt_safe_update(){
     wait_for_apt_lock
     local apt_cmd
@@ -284,22 +294,25 @@ PY
 
     warn "PyQt5/Pillow missing in system Python; creating local venv fallback"
     VENV_DIR="$XUI_DIR/.venv"
-    python3 -m venv "$VENV_DIR" >/dev/null 2>&1 || warn "Failed to create venv at $VENV_DIR"
-    if [ -x "$VENV_DIR/bin/pip" ]; then
-        "$VENV_DIR/bin/pip" install --upgrade pip >/dev/null 2>&1 || true
-        "$VENV_DIR/bin/pip" install PyQt5 PyQtWebEngine Pillow pygame evdev >/dev/null 2>&1 || warn "venv pip install failed"
+    if ! python3 -m venv "$VENV_DIR"; then
+        warn "Failed to create venv at $VENV_DIR; install python3-venv and retry"
+        return 0
     fi
+    if ! "$VENV_DIR/bin/python" -m pip install PyQt5 Pillow; then
+        warn "Could not install required PyQt5/Pillow dependencies into $VENV_DIR"
+        return 0
+    fi
+    "$VENV_DIR/bin/python" -m pip install PyQtWebEngine pygame evdev >/dev/null 2>&1 || \
+        info "Some optional Python modules are unavailable; core dashboard dependencies are installed"
 
     # Validate fallback runtime
-    if [ -x "$XUI_DIR/.venv/bin/python" ]; then
-        if "$XUI_DIR/.venv/bin/python" - <<'PY' >/dev/null 2>&1
+    if "$VENV_DIR/bin/python" - <<'PY' >/dev/null 2>&1
 import PyQt5, PIL
 PY
-        then
-            info "venv runtime ready (PyQt5/Pillow)"
-        else
-            warn "venv created but PyQt5/Pillow still unavailable"
-        fi
+    then
+        info "venv runtime ready (PyQt5/Pillow)"
+    else
+        warn "PyQt5/Pillow are still unavailable in $VENV_DIR"
     fi
 }
 
