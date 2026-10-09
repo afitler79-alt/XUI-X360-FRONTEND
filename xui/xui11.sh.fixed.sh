@@ -11517,7 +11517,6 @@ class Dashboard(QtWidgets.QMainWindow):
         self._achievement_toast = None
         self._startup_update_checked = False
         self._allow_exit = False
-        self._mandatory_update_declined_until = 0.0
         self._mandatory_update_timer = None
         self._mandatory_update_dialog_open = False
         self._mandatory_update_in_progress = False
@@ -12993,8 +12992,6 @@ exit 1
             return
         if not bool(payload.get('update_required', False)):
             return
-        if time.monotonic() < self._mandatory_update_declined_until:
-            return
         self._play_sfx('open')
         self._mandatory_update_dialog_open = True
         d = MandatoryUpdateDialog(payload, self)
@@ -13005,8 +13002,8 @@ exit 1
         if str(selected).strip().lower() == 'yes':
             self._launch_mandatory_updater_and_quit()
             return
-        self._mandatory_update_declined_until = time.monotonic() + 300.0
-        self._msg('Update', 'Update postponed. The dashboard will stay open; you can update later from Settings.')
+        self._msg('Update', 'La actualización es obligatoria. XUI se cerrará; vuelve a abrirlo para instalarla.')
+        self._request_application_exit()
 
     def _request_application_exit(self):
         self._allow_exit = True
@@ -26298,7 +26295,7 @@ headers={
   "Accept":"application/vnd.github+json",
   "User-Agent":"xui-update-checker",
 }
-    def fetch(url, timeout=5):
+def fetch(url, timeout=5):
   req=urllib.request.Request(url, headers=headers)
   with urllib.request.urlopen(req, timeout=timeout) as r:
     return json.loads(r.read().decode('utf-8', errors='ignore'))
