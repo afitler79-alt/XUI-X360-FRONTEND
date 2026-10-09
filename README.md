@@ -1,4 +1,4 @@
-From the repository root, install on Linux with:
+From the repository root and puente, install on Linux with:
 
 	./xui11.sh.fixed.sh --yes-install --skip-apt-wait
 
