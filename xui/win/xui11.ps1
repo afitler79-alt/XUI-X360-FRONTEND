@@ -42,6 +42,11 @@ function Install-Dependencies($py){
     if(-not $YesInstall){ Write-Info "Omitiendo instalación de dependencias (use --yes-install)"; return }
     try { & $py -m pip install --user PyQt5 Pillow | Out-Null }
     catch { Write-Warn "pip falló: $($_.Exception.Message)" }
+    try {
+        & $py -m pip install --user pygame | Out-Null
+        if($LASTEXITCODE -ne 0){ Write-Warn "pygame no disponible; el dashboard funcionará con teclado y ratón" }
+    }
+    catch { Write-Warn "pygame no disponible; el dashboard funcionará con teclado y ratón" }
 }
 
 function Copy-Assets(){
@@ -122,6 +127,8 @@ function Write-Manifest(){
 }
 
 function Copy-Dashboard(){
+    $catalog = Join-Path $PSScriptRoot "web_game_ports.json"
+    if(Test-Path $catalog){ Copy-Item $catalog (Join-Path $DashboardDir "web_game_ports.json") -Force }
     $candidate = Join-Path $PSScriptRoot "pyqt_dashboard_improved.py"
     if(-not (Test-Path $candidate)){
         $candidate = Join-Path (Split-Path -Parent $PSScriptRoot) "pyqt_dashboard_improved_fixed2.py"

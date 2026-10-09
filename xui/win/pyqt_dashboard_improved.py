@@ -4,6 +4,7 @@ import subprocess
 import random
 import json
 import shutil
+import time
 from pathlib import Path
 
 ASSETS = Path.home() / '.xui' / 'assets'
@@ -12,12 +13,20 @@ DATA.mkdir(parents=True, exist_ok=True)
 SLOTS_FILE = DATA / 'slots.json'
 MISSIONS_FILE = DATA / 'missions.json'
 SETTINGS_FILE = DATA / 'settings.json'
+PORTS_CATALOG_FILE = Path(__file__).with_name('web_game_ports.json')
+XUI_WALLET_FILE = DATA / 'xui_wallet.json'
+GAME_LIBRARY_FILE = DATA / 'web_game_library.json'
 
 try:
     from PyQt5 import QtWidgets, QtGui, QtCore
 except Exception:
     print('PyQt5 not installed')
     sys.exit(1)
+
+try:
+    import pygame
+except Exception:
+    pygame = None
 
 
 class SlotMachineDialog(QtWidgets.QDialog):
@@ -111,6 +120,519 @@ class SlotMachineDialog(QtWidgets.QDialog):
             pass
 
 
+class VerticalGuideButton(QtWidgets.QPushButton):
+    def __init__(self, text, callback, parent=None):
+        super().__init__(parent)
+        self.label = text
+        self.clicked.connect(callback)
+        self.setFocusPolicy(QtCore.Qt.StrongFocus)
+        self.setFixedWidth(44)
+        self.setStyleSheet('''
+            QPushButton { background:#d9dfe2; color:#283946; border:1px solid #f4f7f8;
+                          font-weight:bold; }
+            QPushButton:checked { background:#394954; color:#fff; }
+            QPushButton:focus { border:2px solid #63b943; }
+        ''')
+        self.setCheckable(True)
+
+    def sizeHint(self):
+        return QtCore.QSize(44, 300)
+
+    def paintEvent(self, event):
+        painter = QtGui.QPainter(self)
+        option = QtWidgets.QStyleOptionButton()
+        self.initStyleOption(option)
+        self.style().drawPrimitive(QtWidgets.QStyle.PE_Widget, option, painter, self)
+        painter.save()
+        painter.translate(self.width() / 2, self.height() / 2)
+        painter.rotate(90)
+        painter.setPen(self.palette().buttonText().color())
+        painter.setFont(self.font())
+        painter.drawText(QtCore.QRect(-self.height() / 2, -self.width() / 2,
+                                      self.height(), self.width()),
+                         QtCore.Qt.AlignCenter, self.label)
+        painter.restore()
+
+
+class XboxGuideDialog(QtWidgets.QDialog):
+    PAGES = ('Games & Apps', 'Player', 'Media', 'Settings')
+
+    def __init__(self, actions, parent=None):
+        super().__init__(parent)
+        self.actions = actions
+        self.page_index = 1
+        self.setWindowTitle('Xbox Guide')
+        self.setWindowModality(QtCore.Qt.ApplicationModal)
+        self.setWindowFlags(self.windowFlags() | QtCore.Qt.WindowStaysOnTopHint)
+        self.setFixedSize(620, 440)
+        self.setStyleSheet('''
+            QDialog { background:#a6afb2; color:#f5f7f8; border:2px solid #e8edef; }
+            QLabel { color:#f5f7f8; }
+            QPushButton { border:0; border-radius:0; text-align:left; padding:0 12px;
+                          background:#e4e8ea; color:#172c3c; font-size:17px; }
+            QPushButton:hover, QPushButton:focus { background:#55b53e; color:white; }
+        ''')
+        self._build_ui()
+        self._show_page(self.page_index)
+        self.clock_timer = QtCore.QTimer(self)
+        self.clock_timer.timeout.connect(self._update_clock)
+        self.clock_timer.start(1000)
+
+    def _build_ui(self):
+        outer = QtWidgets.QVBoxLayout(self)
+        outer.setContentsMargins(10, 8, 10, 8)
+        outer.setSpacing(8)
+
+        header = QtWidgets.QHBoxLayout()
+        title = QtWidgets.QLabel('Xbox Guide')
+        title.setStyleSheet('font-size:25px; font-weight:bold;')
+        header.addWidget(title)
+        header.addStretch(1)
+        status = QtWidgets.QLabel('◩  ◉  ')
+        header.addWidget(status)
+        self.clock_label = QtWidgets.QLabel()
+        self.clock_label.setStyleSheet('font-weight:bold;')
+        header.addWidget(self.clock_label)
+        header.addWidget(QtWidgets.QLabel('DASH'))
+        outer.addLayout(header)
+
+        body = QtWidgets.QHBoxLayout()
+        body.setSpacing(2)
+        self.left_buttons = []
+        self.right_buttons = []
+        for page in self.PAGES[:2]:
+            button = VerticalGuideButton(page, lambda checked=False, p=page: self._select_page(p))
+            self.left_buttons.append(button)
+            body.addWidget(button)
+
+        self.rows_host = QtWidgets.QWidget()
+        self.rows_host.setStyleSheet('background:#e0e5e7;')
+        self.rows_layout = QtWidgets.QVBoxLayout(self.rows_host)
+        self.rows_layout.setContentsMargins(0, 0, 0, 0)
+        self.rows_layout.setSpacing(0)
+        body.addWidget(self.rows_host, 1)
+
+        for page in self.PAGES[2:]:
+            button = VerticalGuideButton(page, lambda checked=False, p=page: self._select_page(p))
+            self.right_buttons.append(button)
+            body.addWidget(button)
+        outer.addLayout(body, 1)
+
+        footer = QtWidgets.QHBoxLayout()
+        footer.setSpacing(12)
+        footer.setContentsMargins(0, 0, 0, 0)
+        for label, callback, color in (
+            ('A Select', self._activate_current, '#4eb845'),
+            ('B Back', self.reject, '#e44141'),
+            ('X Close Game', lambda: self._run_action('close'), '#3b9de0'),
+            ('Y Minimize Dashboard', lambda: self._run_action('minimize'), '#e3bb31'),
+            ('LB/RB Page', self._next_page, '#f2f5f6'),
+        ):
+            button = QtWidgets.QPushButton(label)
+            button.setFocusPolicy(QtCore.Qt.StrongFocus)
+            button.setStyleSheet(f'QPushButton {{ background:transparent; color:{color}; '
+                                 'padding:0; font-size:12px; font-weight:bold; } '
+                                 'QPushButton:focus { text-decoration:underline; }')
+            button.clicked.connect(lambda checked=False, cb=callback: cb())
+            footer.addWidget(button)
+        outer.addLayout(footer)
+
+    def _update_clock(self):
+        self.clock_label.setText(QtCore.QTime.currentTime().toString('HH:mm'))
+
+    def _select_page(self, page):
+        self.page_index = self.PAGES.index(page)
+        self._show_page(self.page_index)
+
+    def _show_page(self, index):
+        while self.rows_layout.count():
+            item = self.rows_layout.takeAt(0)
+            if item.widget():
+                item.widget().deleteLater()
+        self.row_buttons = []
+        pages = {
+            'Games & Apps': [('Xbox Home', 'home'), ('Games & Apps', 'library'),
+                             ('Minimize', 'minimize')],
+            'Player': [('Xbox Home', 'home'), ('Friends', 'friends'), ('Party', 'party'),
+                       ('Messages', 'messages'), ('Chat', 'chat'),
+                       ('Beacons & Activity', 'activity'), ('Minimize', 'minimize')],
+            'Media': [('Open Media Folder', 'media'), ('Messages', 'messages'),
+                      ('Minimize', 'minimize')],
+            'Settings': [('Settings', 'settings'), ('Minimize Dashboard', 'minimize'),
+                         ('Close Game', 'close')],
+        }
+        for label, action in pages[self.PAGES[index]]:
+            button = QtWidgets.QPushButton(label)
+            button.setFixedHeight(40)
+            button.setFocusPolicy(QtCore.Qt.StrongFocus)
+            button.clicked.connect(lambda checked=False, a=action: self._run_action(a))
+            self.rows_layout.addWidget(button)
+            self.row_buttons.append(button)
+        self.rows_layout.addStretch(1)
+        self._update_tabs()
+        self.row_buttons[0].setFocus()
+
+    def _update_tabs(self):
+        for idx, button in enumerate(self.left_buttons):
+            button.setChecked(idx == self.page_index)
+        for idx, button in enumerate(self.right_buttons, start=2):
+            button.setChecked(idx == self.page_index)
+
+    def _run_action(self, action):
+        self.accept()
+        callback = self.actions.get(action)
+        if callback:
+            QtCore.QTimer.singleShot(0, callback)
+
+    def _activate_current(self):
+        focused = QtWidgets.QApplication.focusWidget()
+        if focused in self.row_buttons or isinstance(focused, VerticalGuideButton):
+            focused.click()
+
+    def _next_page(self, direction=1):
+        self._select_page(self.PAGES[(self.page_index + direction) % len(self.PAGES)])
+
+    def keyPressEvent(self, event):
+        key = event.key()
+        if key in (QtCore.Qt.Key_Escape, QtCore.Qt.Key_B):
+            self.reject()
+        elif key == QtCore.Qt.Key_X:
+            self._run_action('close')
+        elif key == QtCore.Qt.Key_Y:
+            self._run_action('minimize')
+        elif key in (QtCore.Qt.Key_PageDown, QtCore.Qt.Key_PageUp):
+            self._next_page(1 if key == QtCore.Qt.Key_PageDown else -1)
+        elif key in (QtCore.Qt.Key_Left, QtCore.Qt.Key_Right):
+            self._next_page(1 if key == QtCore.Qt.Key_Right else -1)
+        elif key in (QtCore.Qt.Key_Up, QtCore.Qt.Key_Down):
+            if self.row_buttons:
+                current = self.row_buttons.index(QtWidgets.QApplication.focusWidget()) \
+                    if QtWidgets.QApplication.focusWidget() in self.row_buttons else 0
+                step = -1 if key == QtCore.Qt.Key_Up else 1
+                self.row_buttons[(current + step) % len(self.row_buttons)].setFocus()
+        elif key in (QtCore.Qt.Key_Return, QtCore.Qt.Key_Enter, QtCore.Qt.Key_A,
+                     QtCore.Qt.Key_Space):
+            self._activate_current()
+        else:
+            super().keyPressEvent(event)
+
+
+class GamepadListener(QtCore.QObject):
+    left = QtCore.pyqtSignal()
+    right = QtCore.pyqtSignal()
+    up = QtCore.pyqtSignal()
+    down = QtCore.pyqtSignal()
+    select = QtCore.pyqtSignal()
+    back = QtCore.pyqtSignal()
+    guide = QtCore.pyqtSignal()
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        if pygame is None:
+            return
+        try:
+            pygame.init()
+            pygame.joystick.init()
+            self.joysticks = [pygame.joystick.Joystick(i)
+                              for i in range(pygame.joystick.get_count())]
+            for joystick in self.joysticks:
+                joystick.init()
+            self.last_buttons = {}
+            self.held_directions = set()
+            self.last_direction_emit = {}
+            self.timer = QtCore.QTimer(self)
+            self.timer.timeout.connect(self.poll)
+            self.timer.start(50)
+        except Exception:
+            self.joysticks = []
+
+    def poll(self):
+        try:
+            pygame.event.pump()
+            for joystick in self.joysticks:
+                if joystick.get_numaxes() > 0:
+                    axis_x = joystick.get_axis(0)
+                    self._poll_direction('left', axis_x < -0.6, self.left)
+                    self._poll_direction('right', axis_x > 0.6, self.right)
+                else:
+                    self._poll_direction('left', False, self.left)
+                    self._poll_direction('right', False, self.right)
+                if joystick.get_numaxes() > 1:
+                    axis_y = joystick.get_axis(1)
+                    self._poll_direction('up', axis_y < -0.6, self.up)
+                    self._poll_direction('down', axis_y > 0.6, self.down)
+                else:
+                    self._poll_direction('up', False, self.up)
+                    self._poll_direction('down', False, self.down)
+                current = {}
+                for button_id, signal in ((0, self.select), (1, self.back), (3, self.guide)):
+                    pressed = (joystick.get_button(button_id)
+                               if joystick.get_numbuttons() > button_id else 0)
+                    current[button_id] = pressed
+                    previous = self.last_buttons.get(joystick.get_id(), {})
+                    if pressed and not previous.get(button_id, 0):
+                        signal.emit()
+                self.last_buttons[joystick.get_id()] = current
+        except Exception:
+            pass
+
+    def _poll_direction(self, direction, active, signal):
+        if not active:
+            self.held_directions.discard(direction)
+            return
+        now = time.monotonic()
+        last = self.last_direction_emit.get(direction, 0.0)
+        if direction not in self.held_directions or now - last >= 0.14:
+            signal.emit()
+            self.held_directions.add(direction)
+            self.last_direction_emit[direction] = now
+
+
+class StoreDialog(QtWidgets.QDialog):
+    STARTING_XUI = 500
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle('XUI Game Store')
+        self.setWindowModality(QtCore.Qt.ApplicationModal)
+        self.setWindowFlags(self.windowFlags() | QtCore.Qt.WindowStaysOnTopHint)
+        self.resize(1000, 680)
+        self.setStyleSheet('''
+            QDialog { background:#101a22; color:#e7edf0; }
+            QLabel { color:#e7edf0; }
+            QLineEdit, QComboBox, QTableWidget, QPlainTextEdit {
+                background:#192731; color:#e7edf0; border:1px solid #344650;
+                selection-background-color:#3c9c43;
+            }
+            QHeaderView::section { background:#263640; color:#e7edf0; padding:7px;
+                                   border:0; }
+            QPushButton { background:#344650; color:white; padding:9px 13px; border:0; }
+            QPushButton:disabled { color:#89959a; background:#26343d; }
+            QPushButton#buyButton { background:#4cae43; font-weight:bold; }
+        ''')
+        self.games = self._load_catalog()
+        self.games_by_id = {game['id']: game for game in self.games}
+        self.wallet = self._load_wallet()
+        self.owned_ids = self._load_library()
+        self.visible_games = []
+        self._build_ui()
+        self._refresh_table()
+
+    def _read_json(self, path, fallback):
+        try:
+            with path.open(encoding='utf-8') as data_file:
+                return json.load(data_file)
+        except (OSError, ValueError, TypeError):
+            return fallback
+
+    def _write_json(self, path, value):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        temporary_path = path.with_suffix(path.suffix + '.tmp')
+        temporary_path.write_text(json.dumps(value, ensure_ascii=False, indent=2), encoding='utf-8')
+        temporary_path.replace(path)
+
+    def _load_catalog(self):
+        catalog = self._read_json(PORTS_CATALOG_FILE, {})
+        games = catalog.get('games', []) if isinstance(catalog, dict) else []
+        return [game for game in games if isinstance(game, dict) and game.get('id')]
+
+    def _load_wallet(self):
+        wallet = self._read_json(XUI_WALLET_FILE, None)
+        if not isinstance(wallet, dict):
+            wallet = {'balance': self.STARTING_XUI, 'currency': 'XUI'}
+            self._write_json(XUI_WALLET_FILE, wallet)
+        try:
+            wallet['balance'] = max(0, int(wallet.get('balance', 0)))
+        except (TypeError, ValueError):
+            wallet['balance'] = 0
+        wallet['currency'] = 'XUI'
+        return wallet
+
+    def _load_library(self):
+        library = self._read_json(GAME_LIBRARY_FILE, {})
+        ids = library.get('owned_ids', []) if isinstance(library, dict) else []
+        return set(ids) if isinstance(ids, list) else set()
+
+    def _build_ui(self):
+        layout = QtWidgets.QVBoxLayout(self)
+        layout.setContentsMargins(18, 16, 18, 16)
+        layout.setSpacing(12)
+
+        header = QtWidgets.QHBoxLayout()
+        title = QtWidgets.QLabel('XUI GAME STORE')
+        title.setStyleSheet('font-size:22px; font-weight:bold;')
+        header.addWidget(title)
+        header.addStretch(1)
+        self.wallet_label = QtWidgets.QLabel()
+        self.wallet_label.setStyleSheet('color:#80d877; font-size:16px; font-weight:bold;')
+        header.addWidget(self.wallet_label)
+        layout.addLayout(header)
+
+        filters = QtWidgets.QHBoxLayout()
+        self.search_box = QtWidgets.QLineEdit()
+        self.search_box.setPlaceholderText('Buscar entre los juegos...')
+        filters.addWidget(self.search_box, 1)
+        self.filter_box = QtWidgets.QComboBox()
+        for label, value in (
+            ('Todo el catálogo', 'all'),
+            ('Demos jugables', 'demo'),
+            ('Solo repositorios', 'source'),
+            ('Gratis', 'free'),
+            ('Con precio XUI', 'paid'),
+            ('Mi biblioteca', 'owned'),
+        ):
+            self.filter_box.addItem(label, value)
+        filters.addWidget(self.filter_box)
+        layout.addLayout(filters)
+
+        self.table = QtWidgets.QTableWidget(0, 4)
+        self.table.setHorizontalHeaderLabels(['Juego', 'Acceso', 'Precio', 'Biblioteca'])
+        self.table.setSelectionBehavior(QtWidgets.QAbstractItemView.SelectRows)
+        self.table.setSelectionMode(QtWidgets.QAbstractItemView.SingleSelection)
+        self.table.setEditTriggers(QtWidgets.QAbstractItemView.NoEditTriggers)
+        self.table.verticalHeader().setVisible(False)
+        self.table.horizontalHeader().setStretchLastSection(True)
+        self.table.horizontalHeader().setSectionResizeMode(0, QtWidgets.QHeaderView.Stretch)
+        self.table.horizontalHeader().setSectionResizeMode(1, QtWidgets.QHeaderView.ResizeToContents)
+        self.table.horizontalHeader().setSectionResizeMode(2, QtWidgets.QHeaderView.ResizeToContents)
+        layout.addWidget(self.table, 1)
+
+        detail = QtWidgets.QHBoxLayout()
+        self.detail_label = QtWidgets.QLabel('Selecciona un juego para ver sus opciones.')
+        self.detail_label.setWordWrap(True)
+        detail.addWidget(self.detail_label, 1)
+        self.open_button = QtWidgets.QPushButton('Abrir enlace')
+        self.open_button.clicked.connect(self._open_selected_link)
+        detail.addWidget(self.open_button)
+        self.buy_button = QtWidgets.QPushButton('Comprar')
+        self.buy_button.setObjectName('buyButton')
+        self.buy_button.clicked.connect(self._buy_selected_game)
+        detail.addWidget(self.buy_button)
+        close_button = QtWidgets.QPushButton('Cerrar')
+        close_button.clicked.connect(self.accept)
+        detail.addWidget(close_button)
+        layout.addLayout(detail)
+
+        self.search_box.textChanged.connect(self._refresh_table)
+        self.filter_box.currentIndexChanged.connect(self._refresh_table)
+        self.table.itemSelectionChanged.connect(self._update_selection)
+        self._update_wallet_label()
+
+    def _refresh_table(self, *_):
+        query = self.search_box.text().strip().casefold()
+        filter_mode = self.filter_box.currentData()
+        games = []
+        for game in self.games:
+            game_id = game['id']
+            paid = int(game.get('price_xui', 0)) > 0
+            has_demo = bool(game.get('demo_url'))
+            if query and query not in game.get('name', '').casefold():
+                continue
+            if filter_mode == 'demo' and not has_demo:
+                continue
+            if filter_mode == 'source' and (has_demo or not game.get('source_url')):
+                continue
+            if filter_mode == 'free' and paid:
+                continue
+            if filter_mode == 'paid' and not paid:
+                continue
+            if filter_mode == 'owned' and game_id not in self.owned_ids:
+                continue
+            games.append(game)
+
+        self.visible_games = games
+        self.table.setRowCount(len(games))
+        for row, game in enumerate(games):
+            price = int(game.get('price_xui', 0))
+            acquired = game['id'] in self.owned_ids
+            access = 'Demo jugable' if game.get('demo_url') else (
+                'Repositorio' if game.get('source_url') else 'Sin enlace')
+            library_status = 'Comprado' if acquired else ('Gratis' if price == 0 else 'Bloqueado')
+            values = (game.get('name', 'Juego'), access,
+                      'Gratis' if price == 0 else f'{price} XUI', library_status)
+            for column, value in enumerate(values):
+                item = QtWidgets.QTableWidgetItem(value)
+                if column == 0:
+                    item.setData(QtCore.Qt.UserRole, game['id'])
+                self.table.setItem(row, column, item)
+
+        if games:
+            self.table.selectRow(0)
+        else:
+            self._update_selection()
+
+    def _selected_game(self):
+        row = self.table.currentRow()
+        if row < 0 or row >= len(self.visible_games):
+            return None
+        return self.visible_games[row]
+
+    def _update_selection(self):
+        game = self._selected_game()
+        if not game:
+            self.detail_label.setText('No hay juegos que coincidan con la búsqueda.')
+            self.open_button.setEnabled(False)
+            self.buy_button.setEnabled(False)
+            return
+        price = int(game.get('price_xui', 0))
+        is_owned = game['id'] in self.owned_ids
+        link_kind = 'demo' if game.get('demo_url') else 'repositorio'
+        link_available = bool(game.get('demo_url') or game.get('source_url'))
+        self.detail_label.setText(
+            f"{game.get('name')} · {link_kind.title()} · "
+            f"{'Desbloqueado en tu biblioteca' if is_owned else 'Gratis' if price == 0 else 'Precio por popularidad: ' + str(price) + ' XUI'}"
+            + (f"\n{game['description']}" if game.get('description') else '')
+        )
+        self.open_button.setText('Jugar demo' if game.get('demo_url') else 'Abrir repositorio')
+        self.open_button.setEnabled(link_available)
+        self.buy_button.setVisible(price > 0)
+        self.buy_button.setEnabled(price > 0 and not is_owned)
+        self.buy_button.setText('Comprado' if is_owned else f'Comprar · {price} XUI')
+
+    def _update_wallet_label(self):
+        self.wallet_label.setText(f"Saldo: {self.wallet['balance']} XUI")
+
+    def _open_selected_link(self):
+        game = self._selected_game()
+        if not game:
+            return
+        if int(game.get('price_xui', 0)) and game['id'] not in self.owned_ids:
+            QtWidgets.QMessageBox.information(self, 'Juego bloqueado', 'Compra este juego para abrir su demo.')
+            return
+        url = game.get('demo_url') or game.get('source_url')
+        if url:
+            QtGui.QDesktopServices.openUrl(QtCore.QUrl(url))
+
+    def _buy_selected_game(self):
+        game = self._selected_game()
+        if not game:
+            return
+        price = int(game.get('price_xui', 0))
+        if price <= 0 or game['id'] in self.owned_ids:
+            return
+        if self.wallet['balance'] < price:
+            QtWidgets.QMessageBox.warning(self, 'Saldo insuficiente', 'No tienes suficientes monedas XUI.')
+            return
+        answer = QtWidgets.QMessageBox.question(
+            self, 'Confirmar compra',
+            f"Desbloquear {game.get('name')} por {price} XUI? Son monedas virtuales locales.",
+            QtWidgets.QMessageBox.Yes | QtWidgets.QMessageBox.No,
+            QtWidgets.QMessageBox.No,
+        )
+        if answer != QtWidgets.QMessageBox.Yes:
+            return
+        self.wallet['balance'] -= price
+        self.owned_ids.add(game['id'])
+        self._write_json(XUI_WALLET_FILE, self.wallet)
+        self._write_json(GAME_LIBRARY_FILE, {'owned_ids': sorted(self.owned_ids)})
+        self._update_wallet_label()
+        self._refresh_table()
+        for row, visible_game in enumerate(self.visible_games):
+            if visible_game['id'] == game['id']:
+                self.table.selectRow(row)
+                break
+
+
 class TileWidget(QtWidgets.QFrame):
     def __init__(self, name, img_path=None, size=(220, 140), parent=None):
         super().__init__(parent)
@@ -184,6 +706,8 @@ class TileWidget(QtWidgets.QFrame):
 class MainWindow(QtWidgets.QMainWindow):
     def __init__(self, windowed=False):
         super().__init__()
+        if os.name == 'nt' and not windowed:
+            self.setWindowFlag(QtCore.Qt.WindowStaysOnTopHint, True)
         self.setWindowTitle('XUI GUI - Xbox Style')
         self.setMinimumSize(1280, 720)
         central = QtWidgets.QWidget()
@@ -258,6 +782,197 @@ class MainWindow(QtWidgets.QMainWindow):
         self.current_index = 0
         QtCore.QTimer.singleShot(120, self.update_focus)
         self.windowed = windowed
+        self._party_active = False
+        self._guide_dialog = None
+        self._guide_shortcut = QtWidgets.QShortcut(QtGui.QKeySequence(QtCore.Qt.Key_F1), self)
+        self._guide_shortcut.activated.connect(self.show_controller_guide)
+        self.gamepad = GamepadListener(self)
+        self.gamepad.left.connect(lambda: self._dispatch_gamepad_key(QtCore.Qt.Key_Left))
+        self.gamepad.right.connect(lambda: self._dispatch_gamepad_key(QtCore.Qt.Key_Right))
+        self.gamepad.up.connect(lambda: self._dispatch_gamepad_key(QtCore.Qt.Key_Up))
+        self.gamepad.down.connect(lambda: self._dispatch_gamepad_key(QtCore.Qt.Key_Down))
+        self.gamepad.select.connect(lambda: self._dispatch_gamepad_key(QtCore.Qt.Key_Return))
+        self.gamepad.back.connect(lambda: self._dispatch_gamepad_key(QtCore.Qt.Key_Escape))
+        self.gamepad.guide.connect(self.show_controller_guide)
+
+    def _guide_actions(self):
+        return {
+            'friends': self._guide_show_friends,
+            'party': self._guide_show_party,
+            'messages': self._guide_show_messages,
+            'chat': self._guide_show_chat,
+            'activity': self._guide_show_activity,
+            'settings': lambda: self.on_tile_clicked('Settings'),
+            'media': self._guide_open_media,
+            'library': self._guide_open_library,
+            'minimize': self.showMinimized,
+            'close': self._guide_close_dashboard,
+        }
+
+    def show_controller_guide(self):
+        if self._guide_dialog and self._guide_dialog.isVisible():
+            self._guide_dialog.reject()
+            return
+        self._guide_dialog = XboxGuideDialog(self._guide_actions(), self)
+        self._guide_dialog.exec_()
+        self._guide_dialog = None
+        if not self.isMinimized() and self.isVisible():
+            self.activateWindow()
+
+    def _dispatch_gamepad_key(self, key):
+        target = QtWidgets.QApplication.activeWindow() or self
+        event = QtGui.QKeyEvent(QtCore.QEvent.KeyPress, key, QtCore.Qt.NoModifier)
+        QtWidgets.QApplication.sendEvent(target, event)
+
+    def _guide_show_dialog(self, title, text):
+        dialog = QtWidgets.QDialog(self)
+        dialog.setWindowTitle(title)
+        dialog.resize(440, 340)
+        layout = QtWidgets.QVBoxLayout(dialog)
+        content = QtWidgets.QPlainTextEdit()
+        content.setReadOnly(True)
+        content.setPlainText(text or 'No hay contenido disponible.')
+        layout.addWidget(content)
+        close_button = QtWidgets.QPushButton('Cerrar')
+        close_button.clicked.connect(dialog.accept)
+        layout.addWidget(close_button)
+        dialog.exec_()
+
+    def _guide_show_friends(self):
+        try:
+            friends = json.load(open(Path.home() / '.xui' / 'data' / 'friends.json', encoding='utf-8'))
+        except Exception:
+            friends = []
+        lines = [f"{'●' if friend.get('online') else '○'}  {friend.get('name', 'Amigo')}"
+                 for friend in friends]
+        self._guide_show_dialog('Friends', '\n'.join(lines))
+
+    def _guide_show_party(self):
+        dialog = QtWidgets.QDialog(self)
+        dialog.setWindowTitle('Party')
+        layout = QtWidgets.QVBoxLayout(dialog)
+        status = QtWidgets.QLabel('Party activa' if self._party_active else 'No hay una party activa')
+        layout.addWidget(status)
+        toggle = QtWidgets.QPushButton('Salir de la party' if self._party_active else 'Crear party')
+
+        def toggle_party():
+            self._party_active = not self._party_active
+            status.setText('Party activa' if self._party_active else 'No hay una party activa')
+            toggle.setText('Salir de la party' if self._party_active else 'Crear party')
+
+        toggle.clicked.connect(toggle_party)
+        layout.addWidget(toggle)
+        invite = QtWidgets.QPushButton('Ver amigos')
+        invite.clicked.connect(self._guide_show_friends)
+        layout.addWidget(invite)
+        close_button = QtWidgets.QPushButton('Cerrar')
+        close_button.clicked.connect(dialog.accept)
+        layout.addWidget(close_button)
+        dialog.exec_()
+
+    def _guide_show_messages(self):
+        path = Path.home() / '.xui' / 'data' / 'notifications.json'
+        try:
+            messages = json.load(open(path, encoding='utf-8'))
+        except Exception:
+            messages = []
+        lines = [message.get('text', '') for message in messages]
+        for message in messages:
+            message['read'] = True
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            json.dump(messages, open(path, 'w', encoding='utf-8'), ensure_ascii=False, indent=2)
+        except Exception:
+            pass
+        self._guide_show_dialog('Messages', '\n'.join(lines))
+
+    def _guide_show_chat(self):
+        path = Path.home() / '.xui' / 'data' / 'chat.json'
+        try:
+            messages = json.load(open(path, encoding='utf-8'))
+        except Exception:
+            messages = []
+        dialog = QtWidgets.QDialog(self)
+        dialog.setWindowTitle('Chat')
+        dialog.resize(440, 340)
+        layout = QtWidgets.QVBoxLayout(dialog)
+        history = QtWidgets.QPlainTextEdit()
+        history.setReadOnly(True)
+        history.setPlainText('\n'.join(f"{item.get('sender', 'Tú')}: {item.get('text', '')}"
+                                       for item in messages))
+        layout.addWidget(history)
+        entry = QtWidgets.QLineEdit()
+        entry.setPlaceholderText('Escribe un mensaje')
+        layout.addWidget(entry)
+        send_button = QtWidgets.QPushButton('Enviar')
+
+        def send_message():
+            text = entry.text().strip()
+            if not text:
+                return
+            messages.append({'sender': 'Tú', 'text': text})
+            history.appendPlainText(f'Tú: {text}')
+            entry.clear()
+            try:
+                path.parent.mkdir(parents=True, exist_ok=True)
+                json.dump(messages, open(path, 'w', encoding='utf-8'), ensure_ascii=False, indent=2)
+            except Exception:
+                pass
+
+        send_button.clicked.connect(send_message)
+        entry.returnPressed.connect(send_message)
+        layout.addWidget(send_button)
+        close_button = QtWidgets.QPushButton('Cerrar')
+        close_button.clicked.connect(dialog.accept)
+        layout.addWidget(close_button)
+        dialog.exec_()
+
+    def _guide_show_activity(self):
+        sections = []
+        for title, path in (
+            ('Misiones', Path.home() / '.xui' / 'data' / 'missions.json'),
+            ('Logros', Path.home() / '.xui' / 'data' / 'achievements.json'),
+        ):
+            try:
+                entries = json.load(open(path, encoding='utf-8'))
+            except Exception:
+                entries = []
+            sections.append(title)
+            sections.extend(f"{'[x]' if item.get('done') else '[ ]'} {item.get('title', '')}: "
+                            f"{item.get('desc', '')}" for item in entries)
+        self._guide_show_dialog('Beacons & Activity', '\n'.join(sections))
+
+    def _guide_open_media(self):
+        ASSETS.mkdir(parents=True, exist_ok=True)
+        QtGui.QDesktopServices.openUrl(QtCore.QUrl.fromLocalFile(str(ASSETS)))
+
+    def _guide_open_library(self):
+        library = Path.home() / '.xui' / 'games'
+        target = library if library.exists() else Path.home() / '.xui'
+        QtGui.QDesktopServices.openUrl(QtCore.QUrl.fromLocalFile(str(target)))
+
+    def _guide_close_dashboard(self):
+        answer = QtWidgets.QMessageBox.question(
+            self, 'Close Game', '¿Quieres cerrar el dashboard?',
+            QtWidgets.QMessageBox.Yes | QtWidgets.QMessageBox.No,
+            QtWidgets.QMessageBox.No,
+        )
+        if answer == QtWidgets.QMessageBox.Yes:
+            self.close()
+
+    def keyPressEvent(self, event):
+        if event.key() == QtCore.Qt.Key_F1:
+            self.show_controller_guide()
+        elif event.key() in (QtCore.Qt.Key_Left, QtCore.Qt.Key_Up):
+            self.current_index = (self.current_index - 1) % len(self.tiles)
+            self.update_focus()
+        elif event.key() in (QtCore.Qt.Key_Right, QtCore.Qt.Key_Down):
+            self.current_index = (self.current_index + 1) % len(self.tiles)
+            self.update_focus()
+        elif event.key() in (QtCore.Qt.Key_Return, QtCore.Qt.Key_Enter, QtCore.Qt.Key_Space):
+            self.on_tile_clicked(self.tiles[self.current_index].name)
+        else:
+            super().keyPressEvent(event)
 
     def update_focus(self):
         if 0 <= self.current_index < len(self.tiles):
@@ -267,6 +982,9 @@ class MainWindow(QtWidgets.QMainWindow):
         xui = str(Path.home() / '.xui')
         if name == 'Casino':
             dlg = SlotMachineDialog(self)
+            dlg.exec_()
+        elif name == 'Store':
+            dlg = StoreDialog(self)
             dlg.exec_()
         elif name == 'LAN':
             dlg = QtWidgets.QDialog(self)
@@ -371,6 +1089,8 @@ if __name__ == '__main__':
     try:
         if not windowed:
             w.showFullScreen()
+            w.raise_()
+            w.activateWindow()
         else:
             w.resize(1280, 768)
             w.show()
