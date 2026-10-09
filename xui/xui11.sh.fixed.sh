@@ -16429,17 +16429,15 @@ class ControllerBridge:
 
     def _open_global_guide(self):
         now = time.monotonic()
+        if self.last_guide_open and (now - self.last_guide_open) < GUIDE_COOLDOWN_SEC:
+            return True
+        self.last_guide_open = now
         if os.path.exists(GUIDE_SOCKET):
             if _guide_ipc('toggle'):
-                self.last_guide_open = now
                 return True
         if self._active_window_dashboard():
             if _open_global_guide():
-                self.last_guide_open = now
                 return True
-        if (now - self.last_guide_open) < GUIDE_COOLDOWN_SEC:
-            return True
-        self.last_guide_open = now
         return _open_global_guide()
 
     def _mapping_for_kind(self, kind):
@@ -28075,6 +28073,7 @@ BASH
     cat > "$BIN_DIR/xui_global_guide.py" <<'PY'
 #!/usr/bin/env python3
 import os
+import fcntl
 import logging
 import signal
 import socket
@@ -28082,7 +28081,7 @@ import subprocess
 import sys
 import time
 from pathlib import Path
-from PyQt5 import QtCore, QtGui, QtWidgets
+from PyQt5 import QtCore, QtGui, QtWidgets, QtNetwork
 
 DATA = Path.home() / '.xui' / 'data'
 PAUSED_FILE = DATA / 'active_paused.pid'
@@ -29003,7 +29002,21 @@ def main():
     if not _session_display():
         print('No graphical session found (DISPLAY/WAYLAND_DISPLAY); cannot show external Guide.', file=sys.stderr)
         return 2
+    lock_handle = LOCK_FILE.open('a+')
+    try:
+        fcntl.flock(lock_handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        # Another launcher may still be creating its IPC socket. Forward once it is ready;
+        # if it is already visible, do not start a second Guide process.
+        for _ in range(30):
+            if _forward_to_existing():
+                lock_handle.close()
+                return 0
+            time.sleep(0.05)
+        lock_handle.close()
+        return 0
     if _forward_to_existing():
+        lock_handle.close()
         return 0
     previous_window = _remember_target_window()
     app = QtWidgets.QApplication(sys.argv)
@@ -29011,10 +29024,9 @@ def main():
     app.setQuitOnLastWindowClosed(False)
     d = Guide(gamertag=_profile_gamertag(), previous_window=previous_window)
     d.accepted.connect(app.quit)
-    d.show()
-    d.raise_()
     server = QtNetwork.QLocalServer(d)
     try:
+        # The lock is held, so removing a stale socket cannot disrupt another instance.
         server.removeServer(str(LOCK_SOCKET))
         if not server.listen(str(LOCK_SOCKET)):
             print(f'Cannot listen on Guide IPC socket: {server.errorString()}', file=sys.stderr)
@@ -29061,11 +29073,16 @@ def main():
             client.disconnectFromServer()
 
     server.newConnection.connect(handle_clients)
+    d.show()
+    d.raise_()
     if previous_window:
         QtCore.QTimer.singleShot(80, d.raise_)
-    result = app.exec_()
-    if LOCK_SOCKET.exists():
-        LOCK_SOCKET.unlink()
+    try:
+        result = app.exec_()
+    finally:
+        server.close()
+        QtNetwork.QLocalServer.removeServer(str(LOCK_SOCKET))
+        lock_handle.close()
     if d.action:
         _handle_action(d.action, d)
     elif previous_window:
