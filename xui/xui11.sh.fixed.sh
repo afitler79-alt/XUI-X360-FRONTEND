@@ -13163,8 +13163,8 @@ exit 1
     def _run_game(self, cmd, args=None):
         intro_launcher = XUI_HOME / 'bin' / 'xui_play_game_intro.sh'
         if not intro_launcher.is_file():
-            # The intro is optional; a missing helper must not block a game.
-            return self._run(str(cmd), args or [])
+                self._msg('Game boot screen', f'No se encontró el reproductor obligatorio:\n{intro_launcher}\n\nEjecuta de nuevo el instalador para restaurar el boot screen.')
+                return False
         command = [str(intro_launcher), '--', str(cmd), *(str(arg) for arg in (args or []))]
         shell_command = ' '.join(shlex.quote(part) for part in command)
         return self._run('/bin/sh', ['-c', shell_command])
@@ -13979,13 +13979,13 @@ exit 1
         q_target = shlex.quote(str(target))
         ext = Path(target).suffix.lower().lstrip('.')
         if ext in ('exe', 'msi', 'bat'):
-            self._run('/bin/sh', ['-c', f'"{xui}/bin/xui_wine_run.sh" {q_target}'])
+            self._run_game('/bin/sh', ['-lc', f'"{xui}/bin/xui_wine_run.sh" {q_target}'])
             return
         if ext == 'appimage':
-            self._run('/bin/sh', ['-c', f'chmod +x {q_target} >/dev/null 2>&1 || true; {q_target}'])
+            self._run_game('/bin/sh', ['-lc', f'chmod +x {q_target} >/dev/null 2>&1 || true; {q_target}'])
             return
         if ext == 'sh':
-            self._run('/bin/sh', ['-c', f'bash {q_target}'])
+            self._run_game('/bin/sh', ['-lc', f'bash {q_target}'])
             return
         if ext == 'desktop':
             if shutil.which('gtk-launch'):
@@ -13997,9 +13997,9 @@ exit 1
         if ext in ('iso', 'chd', 'cue'):
             retro = XUI_HOME / 'bin' / 'xui_retroarch.sh'
             if retro.exists():
-                self._run('/bin/sh', ['-c', f'"{retro}" {q_target}'])
+                self._run_game('/bin/sh', ['-lc', f'"{retro}" {q_target}'])
             else:
-                self._run('/bin/sh', ['-c', f'xdg-open {q_target}'])
+                self._run_game('/bin/sh', ['-lc', f'xdg-open {q_target}'])
             return
         self._run('/bin/sh', ['-c', f'xdg-open {q_target}'])
 
@@ -17100,6 +17100,8 @@ EOF
 write_extras(){
   info "Writing casino, runner, missions, store and helper scripts"
   mkdir -p "$CASINO_DIR" "$GAMES_DIR" "$DATA_DIR" "$XUI_DIR/apps"
+    copy_assets
+    write_game_intro_wrapper
   cat > "$CASINO_DIR/poker_engine_v2.py" <<'PY'
 import itertools
 import random
@@ -19809,6 +19811,7 @@ def _catalog_entries(payload):
             'category': 'Xbox 360 Homebrew',
             'source': 'XUI 360 Homebrew',
             'desc': 'Homebrew package from the XUI 360 catalog. Downloads and extracts locally.',
+            'is_game': True,
             'download_url': url,
             # Route catalog downloads through the Python installer. It handles
             # Google Drive confirmation pages and safely extracts archives.
@@ -19864,6 +19867,18 @@ def _sync_xbox360_catalog():
     items = _catalog_entries(payload.decode('utf-8-sig', errors='replace'))
     if not items:
         raise ValueError('El catálogo no contiene enlaces HTTP/HTTPS reconocibles.')
+    try:
+        previous = json.loads(XBOX360_CATALOG_FILE.read_text(encoding='utf-8'))
+        installed_paths = {
+            str(row.get('id')): row.get('installed_path')
+            for row in previous.get('items', [])
+            if isinstance(row, dict) and row.get('installed_path')
+        }
+        for item in items:
+            if item['id'] in installed_paths:
+                item['installed_path'] = installed_paths[item['id']]
+    except Exception:
+        pass
     _safe_write(XBOX360_CATALOG_FILE, {'source': url, 'updated': int(time.time()), 'items': items})
     print(f'Catálogo sincronizado: {len(items)} juegos homebrew.')
 
@@ -19946,6 +19961,18 @@ def _extract_game_archive(archive, destination, progress_callback=None):
     return False
 
 
+def _record_xbox360_install(game_id, destination):
+    try:
+        data = json.loads(XBOX360_CATALOG_FILE.read_text(encoding='utf-8'))
+        rows = data.get('items', []) if isinstance(data, dict) else []
+        for row in rows:
+            if isinstance(row, dict) and str(row.get('id')) == str(game_id):
+                row['installed_path'] = str(destination)
+        _safe_write(XBOX360_CATALOG_FILE, data)
+    except Exception:
+        pass
+
+
 def _install_xbox360_game(game_id):
     item = next((row for row in _load_xbox360_items() if str(row.get('id')) == str(game_id)), None)
     if item is None:
@@ -19959,6 +19986,7 @@ def _install_xbox360_game(game_id):
         root.mkdir(parents=True, exist_ok=True)
     destination = root / slug
     if destination.exists():
+        _record_xbox360_install(game_id, destination)
         print(f'Ya está descargado: {destination}')
         return
     root.mkdir(parents=True, exist_ok=True)
@@ -20031,6 +20059,7 @@ def _install_xbox360_game(game_id):
                 shutil.copy2(archive, staging / archive.name)
             report_progress(98, 'Guardando los archivos instalados...')
             staging.replace(destination)
+            _record_xbox360_install(game_id, destination)
         except Exception:
             shutil.rmtree(staging, ignore_errors=True)
             raise
@@ -20040,6 +20069,33 @@ def _install_xbox360_game(game_id):
         raise
     report_progress(99, f'Instalación terminada: {destination}')
     print(f'Instalado en: {destination}')
+
+
+def _launch_xbox360_game(game_id):
+    item = next((row for row in _load_xbox360_items() if str(row.get('id')) == str(game_id)), None)
+    if item is None:
+        raise ValueError('Juego no encontrado en el catálogo Xbox 360.')
+    install_path = Path(str(item.get('installed_path') or '')).expanduser()
+    if not install_path.is_dir():
+        slug = re.sub(r'[^A-Za-z0-9._-]+', '_', str(item.get('name', game_id))).strip('._')[:80] or str(game_id)
+        root = Path(_select_largest_secondary_disk() or str(Path.home() / '.xui' / 'GAMES' / 'Xbox360'))
+        install_path = root / slug
+    xex_files = sorted(
+        (path for path in install_path.rglob('*') if path.is_file() and path.suffix.lower() == '.xex'),
+        key=lambda path: (path.name.lower() != 'default.xex', str(path).lower()),
+    ) if install_path.is_dir() else []
+    if not xex_files:
+        raise ValueError(f'No se encontró un XEX instalado para {item.get("name", game_id)} en {install_path}.')
+    xenia = Path.home() / '.xui' / 'emulators' / 'xenia-canary' / 'xenia_canary_linux.AppImage'
+    if not xenia.is_file():
+        raise ValueError('Xenia Canary no está instalado. Instálalo desde el menú XUI antes de lanzar el juego.')
+    helper = XUI_BIN / 'xui_play_game_intro.sh'
+    if not helper.is_file():
+        raise ValueError(f'No se encontró el reproductor del boot screen: {helper}')
+    command = 'APPIMAGE_EXTRACT_AND_RUN=1 ' + ' '.join(
+        shlex.quote(part) for part in (str(xenia), str(xex_files[0]))
+    )
+    os.execv(str(helper), [str(helper), '--', '/bin/bash', '-lc', command])
 
 
 def _norm_item(raw):
@@ -20067,6 +20123,7 @@ def _norm_item(raw):
         pricing = 'paid' if float(it['price']) > 0 else 'free'
     it['pricing'] = pricing
     it['purchase_url'] = str(it.get('purchase_url', '')).strip()
+    it['is_game'] = bool(it.get('is_game', False))
     it['external_checkout'] = bool(
         bool(it.get('external_checkout', False))
         or (it['pricing'] == 'paid' and bool(it['purchase_url']))
@@ -20075,7 +20132,7 @@ def _norm_item(raw):
 
 
 def _curated_items():
-    return [
+    items = [
         {
             'id': 'browser_xui_webhub',
             'name': 'XUI Web Browser',
@@ -20092,6 +20149,7 @@ def _curated_items():
             'category': 'Games',
             'source': 'XUI',
             'desc': 'Fangame package with Linux/Windows detection and launcher.',
+            'is_game': True,
             'install': str(XUI_BIN / 'xui_install_fnae.sh'),
             'launch': str(XUI_BIN / 'xui_run_fnae.sh'),
         },
@@ -20101,6 +20159,7 @@ def _curated_items():
             'price': 20,
             'category': 'MiniGames',
             'desc': 'Match-3 style minigame integrated in dashboard.',
+            'is_game': True,
             'launch': str(XUI_BIN / 'xui_gem_match.sh'),
         },
         {
@@ -20109,6 +20168,7 @@ def _curated_items():
             'price': 0,
             'category': 'Games',
             'desc': 'Casino minigame.',
+            'is_game': True,
             'launch': str(XUI_BIN / 'xui_python.sh') + ' ' + str(Path.home() / '.xui' / 'casino' / 'casino.py'),
         },
         {
@@ -20117,6 +20177,7 @@ def _curated_items():
             'price': 0,
             'category': 'MiniGames',
             'desc': 'Runner arcade minigame.',
+            'is_game': True,
             'launch': str(XUI_BIN / 'xui_python.sh') + ' ' + str(Path.home() / '.xui' / 'games' / 'runner.py'),
         },
         {
@@ -20295,6 +20356,31 @@ def _curated_items():
             'launch': str(XUI_BIN / 'xui_browser.sh') + ' --hub https://www.gog.com/en/games',
         },
     ]
+    # Stable, installable free games: retain these even when external catalog
+    # sync is offline or the daily rotation changes.
+    curated_flatpak_games = [
+        ('net.supertuxkart.SuperTuxKart', 'SuperTuxKart', '3D open-source kart racing with local and online modes.'),
+        ('org.supertuxproject.SuperTux', 'SuperTux', 'Classic jump-and-run platform game starring Tux.'),
+        ('org.wesnoth.Wesnoth', 'Battle for Wesnoth', 'Turn-based fantasy strategy with campaigns and multiplayer.'),
+        ('net.openra.OpenRA', 'OpenRA', 'Modern open-source reimagining of classic real-time strategy.'),
+        ('org.xonotic.Xonotic', 'Xonotic', 'Fast-paced free arena shooter with online matches.'),
+        ('org.cataclysmdda.CataclysmDDA', 'Cataclysm: Dark Days Ahead', 'Free turn-based survival game in a procedurally generated world.'),
+        ('org.openttd.OpenTTD', 'OpenTTD', 'Open-source transport and logistics simulation.'),
+        ('eu.usdx.UltraStarDeluxe', 'UltraStar Deluxe', 'Free open-source karaoke game with local multiplayer.'),
+    ]
+    for app_id, name, description in curated_flatpak_games:
+        items.append({
+            'id': f'flathub_{app_id}',
+            'name': name,
+            'price': 0,
+            'category': 'Games',
+            'source': 'Flathub',
+            'desc': description,
+            'is_game': True,
+            'install': str(XUI_BIN / 'xui_install_flatpak_game.sh') + f' {app_id}',
+            'launch': f'flatpak run {app_id}',
+        })
+    return items
 
 def _rotation_key():
     return date.today().isoformat()
@@ -21897,6 +21983,13 @@ class StoreWindow(QtWidgets.QMainWindow):
         if iid not in inv_ids and pricing == 'paid' and not external_paid:
             self.reload('Buy this item before launching.')
             return
+        if iid.startswith('x360_') and item.get('is_game') and str(item.get('install', '')).startswith('xui360repo:'):
+            shell_cmd = ' '.join(shlex.quote(part) for part in (
+                sys.executable, str(Path(__file__).resolve()), '--launch-xbox360', iid
+            ))
+            self._run_detached(shell_cmd)
+            self.reload(f'Iniciando {item.get("name", "Xbox 360 Homebrew")} con Xenia…')
+            return
         cmd = str(item.get('launch', '')).strip()
         if not cmd and external_paid:
             purchase_url = str(item.get('purchase_url', '')).strip()
@@ -21906,7 +21999,16 @@ class StoreWindow(QtWidgets.QMainWindow):
             self.reload('No launcher defined for this item.')
             return
         category = str(item.get('category', '')).strip().lower()
-        if iid.lower().startswith('game_') or 'game' in category:
+        launch_lower = cmd.lower()
+        is_game = bool(item.get('is_game')) or (
+            category in ('games', 'minigames', 'xbox 360 homebrew')
+            and 'xui_browser.sh' not in launch_lower
+            and not launch_lower.startswith(('http://', 'https://', 'xdg-open '))
+        )
+        launcher_has_intro = any(token in launch_lower for token in (
+            'xui_play_game_intro.sh', 'xui_download_xbox360_repo.sh'
+        ))
+        if is_game and not launcher_has_intro:
             intro_launcher = shlex.quote(str(XUI_BIN / 'xui_play_game_intro.sh'))
             cmd = f'{intro_launcher} -- /bin/sh -c {shlex.quote(cmd)}'
         self._run_detached(cmd)
@@ -22153,6 +22255,13 @@ def main():
         except Exception as exc:
             print(f'Error instalando juego Xbox 360: {exc}', file=sys.stderr)
             return 1
+    if len(sys.argv) >= 3 and sys.argv[1] == '--launch-xbox360':
+        try:
+            _launch_xbox360_game(sys.argv[2])
+            return 0
+        except Exception as exc:
+            print(f'Error lanzando juego Xbox 360: {exc}', file=sys.stderr)
+            return 1
     app = QtWidgets.QApplication(sys.argv)
     w = StoreWindow()
     try:
@@ -22343,6 +22452,7 @@ def flathub_items(limit=260):
                 'category': 'Games',
                 'source': 'Flathub',
                 'desc': summary,
+                'is_game': True,
                 'cover': icon,
                 'cover_local': cover_local,
                 'install': str(BIN / 'xui_install_flatpak_game.sh') + f' {app_id}',
@@ -22501,6 +22611,7 @@ def xbox360_repo_items(repo_urls=None, list_name='xui360repo.txt', limit=60):
             'category': 'Xbox 360 Homebrew',
             'source': 'XUI 360 Homebrew',
             'desc': f'Download from the XUI 360 games repository and extract it automatically.',
+            'is_game': True,
             'cover': 'https://raw.githubusercontent.com/afitler79-alt/XUI_360GAMES_REP/main/favicon.ico',
             'cover_local': '',
             'install': str(downloader) + f' --name {shlex.quote(name)} --url {shlex.quote(candidate)}',
@@ -23099,8 +23210,12 @@ fi
 mkdir -p "$GAME_ROOT"
 ARCHIVE_PATH="$GAME_ROOT/${SAFE_NAME}.download"
 EXTRACT_DIR="$GAME_ROOT/${SAFE_NAME}_extracted"
-rm -rf "$EXTRACT_DIR"
-mkdir -p "$EXTRACT_DIR"
+if [ "$MODE" = "launch" ]; then
+    mkdir -p "$EXTRACT_DIR"
+else
+    rm -rf "$EXTRACT_DIR"
+    mkdir -p "$EXTRACT_DIR"
+fi
 
 fetch_archive(){
   local url="$1" out="$2"
@@ -23132,7 +23247,12 @@ if [ "$MODE" = "launch" ]; then
   if [ -n "$exe" ] && [ -f "$exe" ]; then
     chmod +x "$exe" >/dev/null 2>&1 || true
     echo "Launching: $exe"
-    exec "$exe" "$@"
+        INTRO_LAUNCHER="$HOME/.xui/bin/xui_play_game_intro.sh"
+        if [ -x "$INTRO_LAUNCHER" ]; then
+            exec "$INTRO_LAUNCHER" -- "$exe" "$@"
+        fi
+        echo "Required game boot screen launcher is missing: $INTRO_LAUNCHER" >&2
+        exit 1
   fi
   if [ -d "$EXTRACT_DIR" ] && [ -n "$(find "$EXTRACT_DIR" -maxdepth 2 -mindepth 1 -print -quit 2>/dev/null || true)" ]; then
     echo "Downloaded game already present in: $EXTRACT_DIR"
@@ -32761,6 +32881,10 @@ write_game_intro_wrapper(){
 #!/usr/bin/env bash
 set -euo pipefail
 INTRO="${XUI_GAME_INTRO:-$HOME/.xui/assets/appbootscreen.mp4}"
+if [[ ! -s "$INTRO" ]]; then
+    echo "Required game boot screen is missing: $INTRO" >&2
+    exit 1
+fi
 if [[ "${1:-}" != "--" ]]; then
     echo "Usage: $0 -- <game command> [args...]" >&2
     exit 2
@@ -32770,11 +32894,15 @@ if [[ "$#" -eq 0 ]]; then
     echo "No game command was provided." >&2
     exit 2
 fi
-if [[ -s "$INTRO" ]] && command -v mpv >/dev/null 2>&1; then
-    mpv --no-terminal --really-quiet --fullscreen --no-config --input-conf=/dev/null --input-default-bindings=no --input-cursor=no --input-vo-keyboard=no --cursor-autohide=always --osc=no --osd-bar=no "$INTRO" || \
-        echo "Game intro playback failed; starting the game anyway." >&2
+if command -v mpv >/dev/null 2>&1; then
+    mpv --no-terminal --really-quiet --fullscreen --no-config --input-conf=/dev/null --input-default-bindings=no --input-cursor=no --input-vo-keyboard=no --cursor-autohide=always --osc=no --osd-bar=no "$INTRO"
+elif command -v ffplay >/dev/null 2>&1; then
+    ffplay -autoexit -fs -an -loglevel error "$INTRO"
+elif command -v vlc >/dev/null 2>&1; then
+    vlc --fullscreen --play-and-exit --no-video-title-show --quiet "$INTRO"
 else
-    echo "Game intro video or mpv is unavailable; starting the game without the intro." >&2
+    echo "Install mpv, ffplay, or VLC to play the required game boot screen." >&2
+    exit 127
 fi
 exec "$@"
 BASH
