@@ -20686,7 +20686,7 @@ def _curated_items():
             'category': 'Games',
             'source': 'Web Ports',
             'desc': description,
-            'launch': str(XUI_BIN / 'xui_browser.sh') + ' --hub ' + shlex.quote(target_url) if target_url else '',
+            'launch': str(XUI_BIN / 'xui_browser.sh') + ' --hub ' + shlex.quote(target_url) + ' --fullscreen' if target_url else '',
         })
     return items
 
@@ -22353,17 +22353,11 @@ class StoreWindow(QtWidgets.QMainWindow):
         if not cmd:
             self.reload('No launcher defined for this item.')
             return
-        category = str(item.get('category', '')).strip().lower()
         launch_lower = cmd.lower()
-        is_game = bool(item.get('is_game')) or (
-            category in ('games', 'minigames', 'xbox 360 homebrew')
-            and 'xui_browser.sh' not in launch_lower
-            and not launch_lower.startswith(('http://', 'https://', 'xdg-open '))
-        )
         launcher_has_intro = any(token in launch_lower for token in (
             'xui_play_game_intro.sh', 'xui_download_xbox360_repo.sh'
         ))
-        if is_game and not launcher_has_intro:
+        if not launcher_has_intro:
             intro_launcher = shlex.quote(str(XUI_BIN / 'xui_play_game_intro.sh'))
             cmd = f'{intro_launcher} -- /bin/sh -c {shlex.quote(cmd)}'
         launch_result = self._run_detached(cmd)
@@ -33452,9 +33446,6 @@ if [[ "$#" -eq 0 ]]; then
     echo "No game command was provided." >&2
     exit 2
 fi
-    if [[ "$(basename -- "$1")" == "xenia_canary_linux.AppImage" ]]; then
-        exec "$HOME/.xui/bin/xui_xenia_run.sh" "$@"
-    fi
 played=0
 if command -v mpv >/dev/null 2>&1 && mpv --no-terminal --really-quiet --fullscreen --no-config --input-conf=/dev/null --input-default-bindings=no --input-cursor=no --input-vo-keyboard=no --cursor-autohide=always --osc=no --osd-bar=no "$INTRO"; then
     played=1
@@ -33468,6 +33459,9 @@ fi
 if [[ "$played" -eq 0 ]]; then
     echo "Install mpv, ffplay, or VLC to play the required game boot screen." >&2
     exit 1
+fi
+if [[ "$(basename -- "$1")" == "xenia_canary_linux.AppImage" ]]; then
+    exec "$HOME/.xui/bin/xui_xenia_run.sh" "$@"
 fi
 exec "$@"
 BASH
