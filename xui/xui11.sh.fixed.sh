@@ -458,15 +458,16 @@ copy_web_game_ports_catalog(){
     if [ -n "$catalog_source" ]; then
         if ! python3 -c 'import json,sys; d=json.load(open(sys.argv[1], encoding="utf-8")); assert isinstance(d.get("games"), list) and d["games"]' "$catalog_source" >/dev/null 2>&1; then
             warn "Web game ports catalog is invalid: $catalog_source"
-            return 1
+            warn "Continuing with the built-in web game list"
+            return 0
         fi
         cp -f "$catalog_source" "$DATA_DIR/web_game_ports.json"
         info "Copied $(python3 -c 'import json,sys; print(len(json.load(open(sys.argv[1], encoding="utf-8"))["games"]))' "$DATA_DIR/web_game_ports.json") web game entries"
     elif [ -s "$DATA_DIR/web_game_ports.json" ]; then
         info "Using existing web game ports catalog ($(python3 -c 'import json,sys; print(len(json.load(open(sys.argv[1], encoding="utf-8"))["games"]))' "$DATA_DIR/web_game_ports.json") entries)"
     else
-        warn "Web game ports catalog missing. Put web_game_ports.json beside the installer or in its win/ folder."
-        return 1
+        warn "Web game ports catalog missing; using the built-in web game list"
+        return 0
     fi
 }
 
@@ -20315,6 +20316,46 @@ def _norm_item(raw):
     return it
 
 
+def _builtin_web_port_catalog():
+    entries = [
+        ('xui-bo1-zombies', 'BO1 Zombies', 'https://vel.gg/bo1z'),
+        ('xui-moon-zombies', 'Moon', 'https://moon-zombies.pages.dev'),
+        ('xui-kino-der-toten', 'Kino der Toten', 'https://kino-der-toten.pages.dev'),
+        ('xui-bo3-cheese-cube', 'BO3 Cheese Cube', 'https://cheese-cube.pages.dev'),
+        ('xui-black-ops-2', 'Black Ops 2', 'https://vibeslops.luckeysystems.com'),
+        ('xui-modern-warfare-2', 'Modern Warfare 2', 'https://ovz-game-production.up.railway.app'),
+        ('xui-skate-fan-engine', 'Skate 3', 'https://skate.aaddpp.lol'),
+        ('xui-skate-rust', 'Skate Rust', 'https://global-terror.net'),
+        ('xui-cs-surf', 'CS Surf', 'https://surfd.net'),
+        ('xui-halo-ce', 'Halo CE', 'https://mitchellhynes.com/halo'),
+        ('xui-halo-ce-mobile', 'Halo CE Mobile', 'https://hcemobile.com'),
+        ('xui-pes-6', 'PES 6', 'https://pes6.optijuegos.net'),
+        ('xui-gta-5-archived', 'GTA 5 (Archived Port)', 'https://web.archive.org/web/20261006055917/https://playgta5.com/'),
+        ('xui-gta-vice-city-wasm', 'GTA Vice City', 'https://joncodeofficial.github.io/gta-vice-city-wasm'),
+        ('xui-simpsons-hit-and-run', 'The Simpsons: Hit & Run', 'https://shar-wasm.cjoseph.workers.dev/?skipmovie'),
+        ('xui-quake-1-browser', 'Quake 1', 'https://q1.pieter.com'),
+        ('xui-quake-2-browser', 'Quake 2', 'https://q2.pieter.com'),
+        ('xui-quake-3-browser', 'Quake 3', 'https://q3.pieter.com'),
+        ('xui-rtc-wolfenstein-browser', 'Return to Castle Wolfenstein', 'https://rtcw.pieter.com'),
+        ('xui-unreal-tournament-browser', 'Unreal Tournament', 'https://ut.pieter.com'),
+        ('xui-half-life-pixelsuft', 'Half-Life', 'https://pixelsuft.github.io/hl/'),
+        ('xui-half-life-cs-16', 'Half-Life / CS 1.6', 'https://x8bitrain.github.io/webXash/'),
+        ('xui-diablo-browser', 'Diablo', 'https://johnimril.github.io/diablo_web/'),
+        ('xui-hedgewars', 'Hedgewars', 'https://webwars.link'),
+    ]
+    return [
+        {
+            'id': game_id,
+            'name': name,
+            'demo_url': url,
+            'source_url': None,
+            'description': 'External browser port; opened in the XUI integrated web browser.',
+            'price_xui': 0,
+        }
+        for game_id, name, url in entries
+    ]
+
+
 def _curated_items():
     items = [
         {
@@ -20565,11 +20606,16 @@ def _curated_items():
             'install': str(XUI_BIN / 'xui_install_flatpak_game.sh') + f' {app_id}',
             'launch': f'flatpak run {app_id}',
         })
+    web_games_by_id = {game['id']: game for game in _builtin_web_port_catalog()}
     try:
         web_catalog = json.loads(WEB_PORTS_CATALOG_FILE.read_text(encoding='utf-8'))
-        web_games = web_catalog.get('games', []) if isinstance(web_catalog, dict) else []
+        catalog_games = web_catalog.get('games', []) if isinstance(web_catalog, dict) else []
+        for game in catalog_games:
+            if isinstance(game, dict) and game.get('id'):
+                web_games_by_id[str(game['id'])] = game
     except Exception:
-        web_games = []
+        pass
+    web_games = list(web_games_by_id.values())
     for game in web_games:
         if not isinstance(game, dict) or not game.get('id'):
             continue
