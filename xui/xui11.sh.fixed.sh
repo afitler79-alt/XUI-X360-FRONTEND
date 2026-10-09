@@ -20293,10 +20293,11 @@ def _curated_items():
         },
         {
             'id': 'game_runner',
-            'name': 'Runner',
+            'name': 'Neon Sprint 3D · Runner',
             'price': 0,
-            'category': 'MiniGames',
-            'desc': 'Runner arcade minigame.',
+            'category': 'Games',
+            'source': 'XUI',
+            'desc': 'XUI 3D-style neon runner with perspective track, three lanes, jumping, sliding and progressive difficulty.',
             'is_game': True,
             'launch': str(XUI_BIN / 'xui_python.sh') + ' ' + str(Path.home() / '.xui' / 'games' / 'runner.py'),
         },
@@ -20596,7 +20597,9 @@ def ensure_catalog_minimum(min_count=620):
         if item is None:
             continue
         iid = item['id']
-        if iid in authoritative_xbox360_ids:
+        if iid in authoritative_xbox360_ids or iid == 'game_runner':
+            # Refresh the cached Store card so the previous "Runner" listing
+            # is replaced by the new Neon Sprint 3D game entry below.
             continue
         if _is_legacy_xbox360_repo_item(item):
             continue
