@@ -2171,7 +2171,7 @@ def play_media(path, video=False, blocking=False):
             try:
                 if blocking:
                     result = subprocess.run(
-                        cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False
+                        cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False, timeout=8
                     )
                     if result.returncode != 0:
                         continue
@@ -11535,7 +11535,7 @@ class Dashboard(QtWidgets.QMainWindow):
         self._mandatory_payload_proc = None
         self._mandatory_payload_watchdog = QtCore.QTimer(self)
         self._mandatory_payload_watchdog.setSingleShot(True)
-        self._mandatory_payload_watchdog.setInterval(45000)
+        self._mandatory_payload_watchdog.setInterval(15000)
         self._mandatory_payload_watchdog.timeout.connect(self._on_mandatory_payload_stalled)
         self._install_task_proc = None
         self._install_task_progress = None
@@ -11869,7 +11869,7 @@ class Dashboard(QtWidgets.QMainWindow):
         if self._mandatory_update_timer is not None:
             return
         t = QtCore.QTimer(self)
-        t.setInterval(45000 if self._ultra_low_ram else 30000)
+        t.setInterval(20000 if self._ultra_low_ram else 15000)
         t.timeout.connect(self._check_mandatory_update_gate)
         t.start()
         self._mandatory_update_timer = t
@@ -12459,9 +12459,9 @@ class Dashboard(QtWidgets.QMainWindow):
         if proc is not None and proc.state() != QtCore.QProcess.NotRunning:
             return True
         now = time.monotonic()
-        ttl = 25.0 if self._ultra_low_ram else 15.0
+        ttl = 4.0
         if (not force) and isinstance(self._mandatory_payload_cache, dict):
-            if (now - float(self._mandatory_payload_checked_at)) <= ttl:
+            if self._mandatory_payload_cache.get('checked') and (now - float(self._mandatory_payload_checked_at)) <= ttl:
                 return False
         p = QtCore.QProcess(self)
         p.setProgram(invocation[0])
@@ -12485,6 +12485,8 @@ class Dashboard(QtWidgets.QMainWindow):
                 p.deleteLater()
             except Exception:
                 pass
+            if not bool(self._mandatory_payload_cache.get('checked', False)):
+                self._queue_mandatory_update_retry(1800)
             if self.isVisible():
                 QtCore.QTimer.singleShot(0, self._check_mandatory_update_gate)
 
@@ -12497,6 +12499,8 @@ class Dashboard(QtWidgets.QMainWindow):
                 p.deleteLater()
             except Exception:
                 pass
+            if self.isVisible():
+                self._queue_mandatory_update_retry(1800)
 
         p.finished.connect(finished)
         p.errorOccurred.connect(errored)
@@ -12509,11 +12513,11 @@ class Dashboard(QtWidgets.QMainWindow):
         if self._update_checker_path() is None:
             return None
         now = time.monotonic()
-        ttl = 25.0 if self._ultra_low_ram else 15.0
+        ttl = 4.0
         if force:
             self._request_mandatory_update_payload(force=True)
         if isinstance(self._mandatory_payload_cache, dict):
-            if (now - float(self._mandatory_payload_checked_at)) <= ttl:
+            if self._mandatory_payload_cache.get('checked') and (now - float(self._mandatory_payload_checked_at)) <= ttl:
                 return dict(self._mandatory_payload_cache)
         self._request_mandatory_update_payload(force=False)
         if isinstance(self._mandatory_payload_cache, dict):
@@ -12649,7 +12653,7 @@ class Dashboard(QtWidgets.QMainWindow):
         self._mandatory_payload_proc = None
         self._mandatory_payload_checked_at = time.monotonic()
         self._mandatory_payload_cache = {'checked': False, 'update_required': False}
-        self._queue_mandatory_update_retry(3000)
+        self._queue_mandatory_update_retry(1800)
 
     def _build_update_status_code(self, text='', exit_code=None, process_err=None):
         raw = str(text or '').strip()
@@ -12985,7 +12989,7 @@ exit 1
             return
         if not bool(payload.get('checked', False)):
             # Network/GitHub can come up a bit later after boot; retry sooner than monitor interval.
-            self._queue_mandatory_update_retry(25000)
+            self._queue_mandatory_update_retry(4500)
             return
         if not bool(payload.get('update_required', False)):
             return
@@ -25594,17 +25598,37 @@ fi
 
 # Helper to play video (blocking) with mpv input disabled
 play_video(){
-    local file="$1"
+    local file="$1" started elapsed remaining limit
     if [ ! -f "$file" ]; then return 1; fi
+    limit="${XUI_STARTUP_VIDEO_TIMEOUT_SEC:-12}"
+    started="$SECONDS"
     if command -v ffplay >/dev/null 2>&1; then
-        if ffplay -autoexit -fs -loglevel quiet "$file"; then
-            return 0
+        if command -v timeout >/dev/null 2>&1; then
+            if timeout --foreground --kill-after=1s "${limit}s" ffplay -autoexit -fs -loglevel quiet "$file"; then
+                return 0
+            fi
+        else
+            if ffplay -autoexit -fs -loglevel quiet "$file"; then
+                return 0
+            fi
         fi
         warn "ffplay could not play startup video; trying mpv software output"
     fi
     if command -v mpv >/dev/null 2>&1; then
-        if mpv --no-terminal --really-quiet --fullscreen --loop-file=no --no-config --vo=x11 --hwdec=no --input-conf=/dev/null --input-default-bindings=no --input-cursor=no --input-vo-keyboard=no --cursor-autohide=always --osc=no --osd-bar=no "$file"; then
-            return 0
+        elapsed=$((SECONDS - started))
+        remaining=$((limit - elapsed))
+        if [ "$remaining" -le 0 ]; then
+            warn "Startup video time budget expired; continuing to dashboard."
+            return 1
+        fi
+        if command -v timeout >/dev/null 2>&1; then
+            if timeout --foreground --kill-after=1s "${remaining}s" mpv --no-terminal --really-quiet --fullscreen --loop-file=no --no-config --vo=x11 --hwdec=no --input-conf=/dev/null --input-default-bindings=no --input-cursor=no --input-vo-keyboard=no --cursor-autohide=always --osc=no --osd-bar=no "$file"; then
+                return 0
+            fi
+        else
+            if mpv --no-terminal --really-quiet --fullscreen --loop-file=no --no-config --vo=x11 --hwdec=no --input-conf=/dev/null --input-default-bindings=no --input-cursor=no --input-vo-keyboard=no --cursor-autohide=always --osc=no --osd-bar=no "$file"; then
+                return 0
+            fi
         fi
     fi
     warn "No available player could play startup video: $file"
@@ -26263,7 +26287,7 @@ headers={
   "Accept":"application/vnd.github+json",
   "User-Agent":"xui-update-checker",
 }
-def fetch(url, timeout=10):
+    def fetch(url, timeout=5):
   req=urllib.request.Request(url, headers=headers)
   with urllib.request.urlopen(req, timeout=timeout) as r:
     return json.loads(r.read().decode('utf-8', errors='ignore'))
