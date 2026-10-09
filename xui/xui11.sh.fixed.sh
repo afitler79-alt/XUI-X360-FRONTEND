@@ -223,7 +223,7 @@ PY
         optional_pkgs=(
             python3-pyqt5.qtmultimedia python3-pyqt5.qtgamepad python3-pyqt5.qtwebengine python3-evdev
             hicolor-icon-theme adwaita-icon-theme humanity-icon-theme libqt5svg5 qt5-gtk-platformtheme qt5ct
-            ffmpeg mpv jq xdotool curl ca-certificates iproute2 bc
+            ffmpeg mpv jq xdotool x11-utils curl ca-certificates iproute2 bc
             xclip xsel rofi feh maim scrot udisks2 p7zip-full joystick joycond evtest jstest-gtk xboxdrv
             retroarch lutris kodi
             binutils file xz-utils
@@ -256,7 +256,7 @@ PY
     elif command -v dnf >/dev/null 2>&1; then
         run_as_root dnf install -y \
             python3 python3-pip python3-virtualenv python3-qt5 python3-pillow python3-evdev \
-            ffmpeg mpv jq xdotool curl iproute bc \
+            ffmpeg mpv jq xdotool xorg-x11-utils curl iproute bc \
             xclip xsel rofi feh scrot udisks2 p7zip joystick joycond retroarch lutris kodi || warn "Some dnf packages failed to install"
         run_as_root dnf install -y python3-qt5-webengine || true
         for pkg in python3-qt5-gamepad qt5-qtgamepad qt5-qtgamepad-devel; do
@@ -269,7 +269,7 @@ PY
     elif command -v pacman >/dev/null 2>&1; then
         run_as_root pacman -Syu --noconfirm \
             python python-pip python-virtualenv pyqt5 python-pillow python-evdev \
-            ffmpeg mpv jq xdotool curl iproute2 bc \
+            ffmpeg mpv jq xdotool xorg-xprop curl iproute2 bc \
             xclip xsel rofi feh scrot maim udisks2 p7zip joystick joycond retroarch lutris kodi || warn "Some pacman packages failed to install"
         run_as_root pacman -S --noconfirm python-pyqt5-webengine || true
         for pkg in qt5-gamepad; do
@@ -28539,17 +28539,13 @@ class Guide(QtWidgets.QDialog):
         self.action = ''
         self._open_anim = None
         self._last_row = 0
+        self._target_was_fullscreen = False
         self.setWindowTitle('Xbox Guide')
         self.setWindowFlags(
             QtCore.Qt.Dialog
             | QtCore.Qt.FramelessWindowHint
             | QtCore.Qt.WindowStaysOnTopHint
-            | QtCore.Qt.Tool
         )
-        if hasattr(QtCore.Qt, 'WindowDoesNotAcceptFocus'):
-            self.setWindowFlags(self.windowFlags() | QtCore.Qt.WindowDoesNotAcceptFocus)
-        if hasattr(QtCore.Qt, 'X11BypassWindowManagerHint'):
-            self.setWindowFlags(self.windowFlags() | QtCore.Qt.X11BypassWindowManagerHint)
         self.setAttribute(QtCore.Qt.WA_TranslucentBackground, True)
         self.setModal(False)
         screen = QtWidgets.QApplication.primaryScreen()
@@ -28558,7 +28554,6 @@ class Guide(QtWidgets.QDialog):
         else:
             self.resize(1060, 560)
         self.setWindowState(self.windowState() | QtCore.Qt.WindowFullScreen)
-        self.setAttribute(QtCore.Qt.WA_ShowWithoutActivating, True)
         self.setStyleSheet('''
             QDialog { background:rgba(13, 19, 22, 0.78); }
             QFrame#xguide_panel {
@@ -28747,13 +28742,95 @@ class Guide(QtWidgets.QDialog):
         if self.isVisible():
             self.hide_overlay()
             return
-        self.show()
+        self.show_overlay()
+
+    def _target_window_has_fullscreen_state(self):
+        if not self.previous_window:
+            return False
+        try:
+            result = subprocess.run(
+                ['xprop', '-id', str(self.previous_window), '_NET_WM_STATE'],
+                capture_output=True, text=True, timeout=1.0, check=False,
+            )
+            if result.returncode == 0:
+                return '_NET_WM_STATE_FULLSCREEN' in result.stdout
+        except (OSError, subprocess.SubprocessError):
+            pass
+        # Xenia's launcher enforces fullscreen; retain that state on systems without xprop.
+        try:
+            title = subprocess.check_output(
+                ['xdotool', 'getwindowname', str(self.previous_window)],
+                text=True, stderr=subprocess.DEVNULL, timeout=1.0,
+            ).strip().lower()
+            return 'xenia' in title
+        except (OSError, subprocess.SubprocessError):
+            return False
+
+    def _raise_overlay_window(self):
+        self.showFullScreen()
         self.raise_()
+        self.activateWindow()
+        try:
+            ids = subprocess.check_output(
+                ['xdotool', 'search', '--onlyvisible', '--pid', str(os.getpid())],
+                text=True, stderr=subprocess.DEVNULL, timeout=1.0,
+            ).splitlines()
+            if ids:
+                overlay_id = ids[-1]
+                subprocess.run(['xdotool', 'windowstate', overlay_id, '--add', 'ABOVE'], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False)
+                subprocess.run(['xdotool', 'windowraise', overlay_id], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False)
+                subprocess.run(['xdotool', 'windowactivate', '--sync', overlay_id], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False)
+        except (OSError, subprocess.SubprocessError):
+            pass
+
+    def show_overlay(self):
+        # The Guide process may stay alive while hidden; recapture the newly active
+        # application on every open instead of returning to the first game forever.
+        active_window = _active_window_id()
+        if active_window:
+            try:
+                active_pid = int(subprocess.check_output(
+                    ['xdotool', 'getwindowpid', str(active_window)],
+                    text=True, stderr=subprocess.DEVNULL, timeout=1.0,
+                ).strip() or '0')
+            except (OSError, ValueError, subprocess.SubprocessError):
+                active_pid = 0
+            if active_pid != os.getpid():
+                self.previous_window = active_window
+                try:
+                    (DATA / 'guide_target_window.id').write_text(str(active_window), encoding='utf-8')
+                except OSError:
+                    pass
+        self._target_was_fullscreen = self._target_window_has_fullscreen_state()
+        if self._target_was_fullscreen:
+            subprocess.run(
+                ['xdotool', 'windowstate', str(self.previous_window), '--remove', 'FULLSCREEN'],
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False,
+            )
+        self._raise_overlay_window()
+        QtCore.QTimer.singleShot(120, lambda: self._raise_overlay_window() if self.isVisible() else None)
+
+    def _restore_target_window(self):
+        if not self.previous_window:
+            return
+        if self._target_was_fullscreen:
+            subprocess.run(
+                ['xdotool', 'windowstate', str(self.previous_window), '--add', 'FULLSCREEN'],
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False,
+            )
+        subprocess.run(
+            ['xdotool', 'windowmap', str(self.previous_window)],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False,
+        )
+        subprocess.run(
+            ['xdotool', 'windowactivate', '--sync', str(self.previous_window)],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False,
+        )
+        self._target_was_fullscreen = False
 
     def hide_overlay(self):
         self.hide()
-        if self.previous_window:
-            subprocess.run(['xdotool', 'windowactivate', '--sync', str(self.previous_window)], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False)
+        self._restore_target_window()
 
     def _animate_open(self):
         effect = QtWidgets.QGraphicsOpacityEffect(self)
@@ -29073,13 +29150,12 @@ def main():
             client.disconnectFromServer()
 
     server.newConnection.connect(handle_clients)
-    d.show()
-    d.raise_()
-    if previous_window:
-        QtCore.QTimer.singleShot(80, d.raise_)
+    d.show_overlay()
     try:
         result = app.exec_()
     finally:
+        d.hide()
+        d._restore_target_window()
         server.close()
         QtNetwork.QLocalServer.removeServer(str(LOCK_SOCKET))
         lock_handle.close()
