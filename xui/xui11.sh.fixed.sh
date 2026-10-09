@@ -14575,12 +14575,24 @@ exit 1
                 self._msg('Xenia Canary', 'Xenia Canary is not installed. Install it first; the installer downloads the official build and verifies its SHA-256.')
                 self._install_platform('xenia-canary')
                 return
-            game_path, _selected_filter = QtWidgets.QFileDialog.getOpenFileName(
-                self,
-                'Select an Xbox 360 game dump',
-                str(Path.home()),
-                'Xbox 360 game dumps (*.iso *.xex);;ISO images (*.iso);;XEX executables (*.xex);;All files (*)',
-            )
+            picker = QtWidgets.QMessageBox(self)
+            picker.setWindowTitle('Launch Xbox 360 dump')
+            picker.setText('Select a dump file or a folder containing default.xex.')
+            choose_file = picker.addButton('Select file', QtWidgets.QMessageBox.AcceptRole)
+            choose_folder = picker.addButton('Select game folder', QtWidgets.QMessageBox.ActionRole)
+            picker.addButton(QtWidgets.QMessageBox.Cancel)
+            picker.exec_()
+            if picker.clickedButton() is choose_file:
+                game_path, _selected_filter = QtWidgets.QFileDialog.getOpenFileName(
+                    self, 'Select an Xbox 360 game dump (.xex/.iso)', str(Path.home()),
+                    'Xbox 360 game dumps (*.iso *.xex *.xiso);;All files (*)',
+                )
+            elif picker.clickedButton() is choose_folder:
+                game_path = QtWidgets.QFileDialog.getExistingDirectory(
+                    self, 'Select an extracted Xbox 360 game folder', str(Path.home())
+                )
+            else:
+                game_path = ''
             if game_path:
                 self._run(str(launcher), [str(Path(game_path).expanduser())])
                 self._unlock_achievement_event('launch', 'xenia_canary')
@@ -14604,7 +14616,7 @@ exit 1
             self._run_install_task(
                 'Xenia Homebrew DVD',
                 f'{shlex.quote(str(dumper))} {shlex.quote(source)}',
-                success_msg='Disc files copied to ~/.xui/games/xenia_dumps and the default.xex (or selected game image) was sent to Xenia Canary.',
+                success_msg='Disc files copied and launch requested. If Xenia does not open, check ~/.xui/logs/xenia.log and ~/.xui/logs/game_boot.log.',
                 fail_msg='Could not find or launch a readable .xex/.iso. Retail Xbox 360 DVDs may not mount as ordinary files; use a legally obtained Xenia-compatible dump.',
             )
             self._unlock_achievement_event('launch', 'xenia_canary')
@@ -14618,14 +14630,30 @@ exit 1
                 self._msg('xemu', 'xemu is not installed yet. Install it first, then choose the XISO again.')
                 self._install_platform('xemu')
                 return
-            game_path, _selected_filter = QtWidgets.QFileDialog.getOpenFileName(
-                self,
-                'Select an original Xbox XISO image',
-                str(Path.home()),
-                'Xbox XISO images (*.iso *.xiso);;All files (*)',
-            )
+            picker = QtWidgets.QMessageBox(self)
+            picker.setWindowTitle('Launch original Xbox XISO')
+            picker.setText('Select an .iso/.xiso image or a folder containing exactly one image.')
+            choose_file = picker.addButton('Select image', QtWidgets.QMessageBox.AcceptRole)
+            choose_folder = picker.addButton('Select image folder', QtWidgets.QMessageBox.ActionRole)
+            picker.addButton(QtWidgets.QMessageBox.Cancel)
+            picker.exec_()
+            if picker.clickedButton() is choose_file:
+                game_path, _selected_filter = QtWidgets.QFileDialog.getOpenFileName(
+                    self, 'Select an original Xbox XISO image (not a raw/redump ISO)', str(Path.home()),
+                    'Original Xbox XISO images (*.iso *.xiso)',
+                )
+            elif picker.clickedButton() is choose_folder:
+                game_path = QtWidgets.QFileDialog.getExistingDirectory(
+                    self, 'Select a folder containing one original Xbox XISO', str(Path.home())
+                )
+            else:
+                game_path = ''
             if game_path:
-                self._run(str(launcher), [str(Path(game_path).expanduser())])
+                selected_path = Path(game_path).expanduser()
+                if selected_path.is_file() and selected_path.suffix.lower() not in ('.iso', '.xiso'):
+                    self._msg('xemu', 'xemu needs an original Xbox XISO image ending in .iso or .xiso; it cannot launch .xbe or an arbitrary file.')
+                    return
+                self._run(str(launcher), [str(selected_path)])
                 self._unlock_achievement_event('launch', 'xemu')
         elif action == 'Dump Homebrew DVD to xemu':
             launcher = XUI_HOME / 'bin' / 'xui_xemu.sh'
@@ -14639,7 +14667,7 @@ exit 1
                 return
             source = QtWidgets.QFileDialog.getExistingDirectory(
                 self,
-                'Select the mounted disc folder containing an original Xbox XISO',
+                'Select a mounted DVD folder that already contains exactly one original Xbox .iso/.xiso image',
                 str(Path.home()),
             )
             if not source:
@@ -14647,7 +14675,7 @@ exit 1
             self._run_install_task(
                 'xemu Homebrew DVD',
                 f'{shlex.quote(str(dumper))} {shlex.quote(source)}',
-                success_msg='Disc files copied to ~/.xui/games/xemu_dumps and the XISO image was launched in xemu.',
+                success_msg='Disc files copied and xemu launch requested. Check ~/.xui/logs/xemu.log and ~/.xui/logs/game_boot.log if it does not open.',
                 fail_msg='Could not find a valid XISO .iso image. xemu cannot boot a mounted folder or default.xbe directly; select a folder containing an XISO image.',
             )
             self._unlock_achievement_event('launch', 'xemu')
@@ -33008,6 +33036,9 @@ write_game_intro_wrapper(){
 #!/usr/bin/env bash
 set -euo pipefail
 INTRO="${XUI_GAME_INTRO:-$HOME/.xui/assets/appbootscreen.mp4}"
+LOG_DIR="$HOME/.xui/logs"
+mkdir -p "$LOG_DIR"
+exec >>"$LOG_DIR/game_boot.log" 2>&1
 if [[ ! -s "$INTRO" ]]; then
     echo "Required game boot screen is missing: $INTRO" >&2
     exit 1
@@ -33021,15 +33052,19 @@ if [[ "$#" -eq 0 ]]; then
     echo "No game command was provided." >&2
     exit 2
 fi
-if command -v mpv >/dev/null 2>&1; then
-    mpv --no-terminal --really-quiet --fullscreen --no-config --input-conf=/dev/null --input-default-bindings=no --input-cursor=no --input-vo-keyboard=no --cursor-autohide=always --osc=no --osd-bar=no "$INTRO"
-elif command -v ffplay >/dev/null 2>&1; then
-    ffplay -autoexit -fs -an -loglevel error "$INTRO"
-elif command -v vlc >/dev/null 2>&1; then
-    vlc --fullscreen --play-and-exit --no-video-title-show --quiet "$INTRO"
-else
+played=0
+if command -v mpv >/dev/null 2>&1 && mpv --no-terminal --really-quiet --fullscreen --no-config --input-conf=/dev/null --input-default-bindings=no --input-cursor=no --input-vo-keyboard=no --cursor-autohide=always --osc=no --osd-bar=no "$INTRO"; then
+    played=1
+fi
+if [[ "$played" -eq 0 ]] && command -v ffplay >/dev/null 2>&1 && ffplay -autoexit -fs -an -loglevel error "$INTRO"; then
+    played=1
+fi
+if [[ "$played" -eq 0 ]] && command -v vlc >/dev/null 2>&1 && vlc --fullscreen --play-and-exit --no-video-title-show --quiet "$INTRO"; then
+    played=1
+fi
+if [[ "$played" -eq 0 ]]; then
     echo "Install mpv, ffplay, or VLC to play the required game boot screen." >&2
-    exit 127
+    exit 1
 fi
 exec "$@"
 BASH
@@ -33151,6 +33186,8 @@ BASH
 set -euo pipefail
 APPIMAGE="$HOME/.xui/emulators/xenia-canary/xenia_canary_linux.AppImage"
 INSTALLER="$HOME/.xui/bin/xui_install_xenia_canary.sh"
+mkdir -p "$HOME/.xui/logs"
+exec >>"$HOME/.xui/logs/xenia.log" 2>&1
 case "${1:-}" in
   --check)
     [[ -x "$APPIMAGE" ]]
@@ -33167,6 +33204,27 @@ fi
 # Fallback extracts AppImages without requiring system-wide FUSE installation.
 export APPIMAGE_EXTRACT_AND_RUN=1
 if [[ "$#" -gt 0 ]]; then
+    if [[ -d "$1" ]]; then
+        ROOT="$1"
+        mapfile -t XEX_FILES < <(find "$ROOT" -type f -iname '*.xex' | sort)
+        if [[ "${#XEX_FILES[@]}" -eq 0 ]]; then
+            echo "No .xex game executable found in folder: $ROOT" >&2
+            exit 2
+        fi
+        if [[ "${#XEX_FILES[@]}" -gt 1 ]]; then
+            DEFAULT_XEX=""
+            for candidate in "${XEX_FILES[@]}"; do
+                candidate_name="$(basename "$candidate")"
+                if [[ "${candidate_name,,}" == "default.xex" ]]; then DEFAULT_XEX="$candidate"; break; fi
+            done
+            if [[ -z "$DEFAULT_XEX" ]]; then
+                printf 'Multiple .xex files found; select a specific game executable:\n%s\n' "${XEX_FILES[@]}" >&2
+                exit 2
+            fi
+            set -- "$DEFAULT_XEX" "${@:2}"
+        fi
+        if [[ "${#XEX_FILES[@]}" -eq 1 ]]; then set -- "${XEX_FILES[0]}" "${@:2}"; fi
+    fi
     exec "$HOME/.xui/bin/xui_play_game_intro.sh" -- "$APPIMAGE" "$@"
 fi
 exec "$APPIMAGE" "$@"
@@ -33426,6 +33484,8 @@ BASH
 set -euo pipefail
 APPIMAGE="$HOME/.xui/emulators/xemu/xemu.AppImage"
 INSTALLER="$HOME/.xui/bin/xui_install_xemu.sh"
+mkdir -p "$HOME/.xui/logs"
+exec >>"$HOME/.xui/logs/xemu.log" 2>&1
 case "${1:-}" in
   --check)
     [[ -x "$APPIMAGE" ]]
@@ -33442,10 +33502,22 @@ fi
 if [[ "$#" -gt 0 && "${1:-}" != -* ]]; then
   IMAGE="$1"
   shift
+    if [[ -d "$IMAGE" ]]; then
+        mapfile -t XISOS < <(find "$IMAGE" -type f \( -iname '*.iso' -o -iname '*.xiso' \) | sort)
+        if [[ "${#XISOS[@]}" -ne 1 ]]; then
+            echo "Expected exactly one XISO image in folder; found ${#XISOS[@]}. Use Launch Original Xbox XISO to select one file." >&2
+            exit 2
+        fi
+        IMAGE="${XISOS[0]}"
+    fi
   if [[ ! -f "$IMAGE" ]]; then
     echo "XISO image not found: $IMAGE" >&2
     exit 2
   fi
+    case "${IMAGE,,}" in
+        *.iso|*.xiso) ;;
+        *) echo "xemu requires an original Xbox .iso/.xiso image, not: $IMAGE" >&2; exit 2 ;;
+    esac
   export APPIMAGE_EXTRACT_AND_RUN=1
     exec "$HOME/.xui/bin/xui_play_game_intro.sh" -- "$APPIMAGE" -dvd_path "$IMAGE" "$@"
 fi
