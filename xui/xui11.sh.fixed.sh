@@ -442,6 +442,18 @@ BASH
     chmod +x "$BIN_DIR/xui_python.sh" || true
 }
 
+copy_web_game_ports_catalog(){
+    local script_dir catalog_source
+    script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+    catalog_source="$script_dir/win/web_game_ports.json"
+    if [ -f "$catalog_source" ]; then
+        cp -f "$catalog_source" "$DATA_DIR/web_game_ports.json"
+        info "Copied web game ports catalog"
+    elif [ ! -s "$DATA_DIR/web_game_ports.json" ]; then
+        warn "Web game ports catalog not found beside installer; store will keep its existing catalog"
+    fi
+}
+
 write_windows_bundle(){
     local script_dir win_dir
     script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -17137,6 +17149,7 @@ EOF
 write_extras(){
   info "Writing casino, runner, missions, store and helper scripts"
   mkdir -p "$CASINO_DIR" "$GAMES_DIR" "$DATA_DIR" "$XUI_DIR/apps"
+    copy_web_game_ports_catalog
     copy_assets
         if declare -F write_game_intro_wrapper >/dev/null 2>&1; then
             write_game_intro_wrapper
@@ -19703,6 +19716,8 @@ from xui_game_lib import (
 
 DATA_HOME = Path.home() / '.xui' / 'data'
 STORE_FILE = DATA_HOME / 'store.json'
+WEB_PORTS_CATALOG_FILE = DATA_HOME / 'web_game_ports.json'
+XUI_WALLET_FILE = DATA_HOME / 'xui_wallet.json'
 XUI_BIN = Path.home() / '.xui' / 'bin'
 COVER_CACHE = Path.home() / '.xui' / 'cache' / 'store_covers'
 EXTERNAL_STORE_FILE = DATA_HOME / 'store_external.json'
@@ -19727,6 +19742,27 @@ def _safe_write(path, data):
     p = Path(path)
     p.parent.mkdir(parents=True, exist_ok=True)
     p.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding='utf-8')
+
+
+def get_xui_balance():
+    data = None
+    try:
+        data = json.loads(XUI_WALLET_FILE.read_text(encoding='utf-8'))
+    except Exception:
+        data = {'balance': 500, 'currency': 'XUI'}
+    try:
+        data['balance'] = max(0, int(data.get('balance', 500)))
+    except (TypeError, ValueError):
+        data['balance'] = 500
+    data['currency'] = 'XUI'
+    _safe_write(XUI_WALLET_FILE, data)
+    return data['balance']
+
+
+def change_xui_balance(delta):
+    balance = max(0, get_xui_balance() + int(delta))
+    _safe_write(XUI_WALLET_FILE, {'balance': balance, 'currency': 'XUI'})
+    return balance
 
 
 def _catalog_url(url):
@@ -20513,6 +20549,38 @@ def _curated_items():
             'install': str(XUI_BIN / 'xui_install_flatpak_game.sh') + f' {app_id}',
             'launch': f'flatpak run {app_id}',
         })
+    try:
+        web_catalog = json.loads(WEB_PORTS_CATALOG_FILE.read_text(encoding='utf-8'))
+        web_games = web_catalog.get('games', []) if isinstance(web_catalog, dict) else []
+    except Exception:
+        web_games = []
+    for game in web_games:
+        if not isinstance(game, dict) or not game.get('id'):
+            continue
+        demo_url = str(game.get('demo_url') or '').strip()
+        source_url = str(game.get('source_url') or '').strip()
+        target_url = demo_url or source_url
+        try:
+            price_xui = max(0, int(game.get('price_xui', 0))) if demo_url else 0
+        except (TypeError, ValueError):
+            price_xui = 0
+        if demo_url:
+            description = str(game.get('description') or 'Playable browser port from an external source.')
+        elif source_url:
+            description = 'Source repository only; no hosted playable demo is listed.'
+        else:
+            description = 'Catalog entry has no playable demo or source link.'
+        items.append({
+            'id': str(game['id']),
+            'name': str(game.get('name') or game['id']),
+            'price': price_xui,
+            'currency': 'XUI',
+            'pricing': 'paid' if price_xui else 'free',
+            'category': 'Browser',
+            'source': 'Web Ports',
+            'desc': description,
+            'launch': str(XUI_BIN / 'xui_browser.sh') + ' --hub ' + shlex.quote(target_url) if target_url else '',
+        })
     return items
 
 def _rotation_key():
@@ -20536,7 +20604,7 @@ def _daily_rotated_items(all_items, keep_ids=None, active_count=DAILY_ACTIVE_COU
         iid = str(item.get('id', '')).strip()
         src = str(item.get('source', 'XUI')).strip().lower()
         cat = str(item.get('category', 'Apps')).strip().lower()
-        if iid and iid in keep_ids:
+        if iid and (iid in keep_ids or src == 'web ports'):
             keep.append(item)
         elif src in ('flathub', 'itch.io', 'game jolt', 'moddb') and cat in ('games', 'minigames'):
             external_priority.append(item)
@@ -21953,11 +22021,12 @@ class StoreWindow(QtWidgets.QMainWindow):
         desc = str(item.get('desc', 'No description available.'))
         price = float(item.get('price', 0))
         pricing = str(item.get('pricing', 'free')).strip().lower()
+        currency = str(item.get('currency', 'EUR')).strip().upper()
         external_paid = bool(item.get('external_checkout', False)) and pricing == 'paid'
         if external_paid:
             price_txt = 'PAID (Official Store)'
         elif pricing == 'paid':
-            price_txt = f'EUR {price:.2f}' if price > 0 else 'PAID'
+            price_txt = f'{price:.0f} XUI' if currency == 'XUI' and price > 0 else (f'EUR {price:.2f}' if price > 0 else 'PAID')
         else:
             price_txt = 'FREE'
         owned = iid in self._inventory_ids()
@@ -21970,7 +22039,7 @@ class StoreWindow(QtWidgets.QMainWindow):
         self.sel_name.setText(name)
         self.sel_meta.setText(f'{cat} | {source} | {price_txt} | {state}')
         self.sel_desc.setText(desc)
-        self.buy_btn.setText('Buy Official' if external_paid else 'Buy')
+        self.buy_btn.setText('Buy Official' if external_paid else (f'Buy · {price:.0f} XUI' if currency == 'XUI' and pricing == 'paid' else 'Buy'))
         if external_paid:
             self.buy_btn.setEnabled(bool(purchase_url or launch_cmd))
         else:
@@ -21986,9 +22055,12 @@ class StoreWindow(QtWidgets.QMainWindow):
         active_n = len(self.store_data.get('items', []))
         total_n = int(self.store_data.get('rotation_total_count', active_n))
         rot_day = str(self.store_data.get('rotation_day', '-'))
-        self.balance_lbl.setText(f'Balance: EUR {get_balance():.2f}')
+        self._refresh_balance_label()
         self.rotation_lbl.setText(f'Catalog today {active_n}/{total_n} | Rotation {rot_day}')
         self.info_lbl.setText(msg or f'Showing {len(self.filtered_rows)} items in {self.category}.')
+
+    def _refresh_balance_label(self):
+        self.balance_lbl.setText(f'Balance: EUR {get_balance():.2f} | XUI {get_xui_balance()}')
 
     def _refresh_tiles(self):
         items = self.store_data.get('items', [])
@@ -21998,7 +22070,7 @@ class StoreWindow(QtWidgets.QMainWindow):
         total_n = int(self.store_data.get('rotation_total_count', active_n))
         rot_day = str(self.store_data.get('rotation_day', '-'))
         self.rotation_lbl.setText(f'Catalog today {active_n}/{total_n} | Rotation {rot_day}')
-        self.balance_lbl.setText(f'Balance: EUR {get_balance():.2f}')
+        self._refresh_balance_label()
         self.info_lbl.setText(f'Showing {len(self.filtered_rows)} items in {self.category}.')
 
     def buy_selected(self):
@@ -22010,6 +22082,7 @@ class StoreWindow(QtWidgets.QMainWindow):
         price = float(item.get('price', 0))
         iid = str(item.get('id', name))
         pricing = str(item.get('pricing', 'free')).strip().lower()
+        xui_currency = str(item.get('currency', 'EUR')).strip().upper() == 'XUI'
         external_paid = bool(item.get('external_checkout', False)) and pricing == 'paid'
         purchase_url = str(item.get('purchase_url', '')).strip()
         if external_paid:
@@ -22030,18 +22103,19 @@ class StoreWindow(QtWidgets.QMainWindow):
         if pricing != 'paid':
             self.reload('This item is free. Use Launch or Install.')
             return
-        bal = get_balance()
+        bal = get_xui_balance() if xui_currency else get_balance()
         if bal < price:
-            self.reload('Not enough balance.')
+            self.reload('Not enough XUI credits.' if xui_currency else 'Not enough balance.')
             return
         if price > 0:
-            bal = change_balance(-price)
+            bal = change_xui_balance(-price) if xui_currency else change_balance(-price)
 
         inv = self.inventory.get('items', [])
         inv.append({
             'id': iid,
             'name': name,
             'price': price,
+            'currency': 'XUI' if xui_currency else 'EUR',
             'category': str(item.get('category', 'Apps')),
             'launch': str(item.get('launch', '')),
             'install': str(item.get('install', '')),
@@ -22057,12 +22131,16 @@ class StoreWindow(QtWidgets.QMainWindow):
         mission = complete_mission(mission_id='m3')
         install_cmd = str(item.get('install', '')).strip()
         extra = ' | Use Install to complete setup' if install_cmd else ''
+        price_text = f'{price:.0f} XUI' if xui_currency else f'EUR {price:.2f}'
+        balance_text = f'XUI {bal}' if xui_currency else f'EUR {bal:.2f}'
         if mission.get('completed'):
-            bal = float(mission.get('balance', bal))
             reward = float(mission.get('reward', 0))
-            self.reload(f'Purchase OK: {name} (EUR {price:.2f}) | Mission +EUR {reward:.2f} | Balance EUR {bal:.2f}{extra}{ach_note}')
+            if not xui_currency:
+                bal = float(mission.get('balance', bal))
+                balance_text = f'EUR {bal:.2f}'
+            self.reload(f'Purchase OK: {name} ({price_text}) | Mission +EUR {reward:.2f} | Balance {balance_text}{extra}{ach_note}')
         else:
-            self.reload(f'Purchase OK: {name} (EUR {price:.2f}) | Balance EUR {bal:.2f}{extra}{ach_note}')
+            self.reload(f'Purchase OK: {name} ({price_text}) | Balance {balance_text}{extra}{ach_note}')
 
     def install_selected(self):
         item = self._selected_item()
