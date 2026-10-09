@@ -14399,6 +14399,31 @@ exit 1
         layout.addWidget(close_button)
         dialog.exec_()
 
+    def _library_game_entries(self):
+        entries = []
+        try:
+            for item in self.inventory.get('items', []):
+                if not isinstance(item, dict):
+                    continue
+                name = str(item.get('name', '')).strip()
+                if name:
+                    entries.append(name)
+        except Exception:
+            entries = []
+        return list(dict.fromkeys(entries))
+
+    def _find_library_game(self, action):
+        name = str(action or '').strip()
+        if not name:
+            return None
+        for item in self.inventory.get('items', []):
+            try:
+                if str(item.get('name', '')).strip() == name:
+                    return item
+            except Exception:
+                continue
+        return None
+
     def handle_action(self, action):
         self._save_recent(action)
         self._play_sfx('select')
@@ -14436,7 +14461,11 @@ exit 1
         elif action == 'Clean XUI Cache':
             self._clean_xui_cache()
         elif action == 'My Games':
-            self._menu('My Games', ['Runner', 'Casino', 'Gem Match', 'FNAE', 'Xenia Canary', 'Launch Xbox 360 Game Dump', 'Dump Homebrew DVD to Xenia', 'Xbox 360 DVD Info', 'xemu (Original Xbox)', 'Launch Original Xbox XISO', 'Dump Homebrew DVD to xemu', 'Original Xbox Setup Info', 'Steam', 'RetroArch', 'Games Integrations'])
+            purchased = self._library_game_entries()
+            options = ['Runner', 'Casino', 'Gem Match', 'FNAE', 'Xenia Canary', 'Launch Xbox 360 Game Dump', 'Dump Homebrew DVD to Xenia', 'Xbox 360 DVD Info', 'xemu (Original Xbox)', 'Launch Original Xbox XISO', 'Dump Homebrew DVD to xemu', 'Original Xbox Setup Info', 'Steam', 'RetroArch', 'Games Integrations']
+            if purchased:
+                options = list(dict.fromkeys(purchased + options))
+            self._menu('My Games', options)
         elif action in ('Browse Games', 'Browse'):
             self._menu('Browse Games', ['Games Marketplace', 'Game Marketplace', 'Indie Channel', 'Steam', 'RetroArch', 'Store'])
         elif action == 'Xbox Home Feed':
@@ -14578,6 +14607,23 @@ exit 1
             self._launch_local_python_app('Runner', 'games/runner.py', game=True)
         elif action in ('Gem Match', 'Bejeweled'):
             self._run_game('/bin/sh', ['-c', f'"{xui}/bin/xui_gem_match.sh"'])
+        elif self._find_library_game(action) is not None:
+            owned_game = self._find_library_game(action)
+            launch_cmd = str(owned_game.get('launch', '')).strip()
+            install_cmd = str(owned_game.get('install', '')).strip()
+            if launch_cmd:
+                self._run_detached(launch_cmd)
+                self._msg('My Games', f'Launching {action} from your library.')
+                return
+            if install_cmd:
+                self._run_install_task(
+                    action,
+                    install_cmd,
+                    success_msg=f'{action} installed from your library.',
+                    fail_msg=f'Could not install {action} from your library.',
+                )
+                return
+            self._msg('My Games', f'{action} is in your library but has no launcher configured.')
         elif action == 'Showcase Halo 4':
             if not self._launch_steam_game_by_name('Halo 4'):
                 self._open_url_external('https://www.bing.com/search?q=Halo+4', normal_mode=True)
@@ -15516,6 +15562,14 @@ def main():
         except Exception:
             pass
     f = app.font()
+    db = QtGui.QFontDatabase()
+    preferred = ['DejaVu Sans', 'Segoe UI', 'Noto Sans', 'Liberation Sans', 'Arial']
+    for family in preferred:
+        if family in db.families():
+            f.setFamily(family)
+            break
+    f.setStyleStrategy(QtGui.QFont.PreferQuality)
+    f.setHintingPreference(QtGui.QFont.PreferDefaultHinting)
     scr = app.primaryScreen()
     low_ui = use_low_power_ui(scr)
     if scr is not None:
@@ -15528,6 +15582,10 @@ def main():
         base_pt = 11 if low_ui else 12
     f.setPointSize(base_pt)
     app.setFont(f)
+    app.setStyleSheet(
+        'QWidget { font-family: "DejaVu Sans", "Segoe UI", "Noto Sans", "Liberation Sans", sans-serif; '
+        'font-smoothing: antialiased; }'
+    )
     if low_ui:
         for fx in (
             QtCore.Qt.UI_AnimateMenu,
@@ -18438,7 +18496,15 @@ from casino_multiplayer import MultiplayerEngine
 from poker_engine_v2 import PokerGame
 
 sys.path.insert(0, str(Path.home() / '.xui' / 'bin'))
-from xui_game_lib import change_balance, complete_mission, get_balance, ensure_wallet, unlock_for_event
+from xui_game_lib import (
+    change_balance,
+    change_xui_balance,
+    complete_mission,
+    get_balance,
+    get_xui_balance,
+    ensure_wallet,
+    unlock_for_event,
+)
 
 DATA_HOME = Path.home() / '.xui' / 'data'
 PROFILE_FILE = DATA_HOME / 'profile.json'
@@ -18888,8 +18954,15 @@ class CasinoWindow(QtWidgets.QMainWindow):
             except Exception:
                 pass
 
+    def _reward_xui_points(self, amount, reason):
+        if amount <= 0:
+            return get_xui_balance()
+        total = change_xui_balance(amount)
+        self.status_label.setText(f'{reason}: +{amount} XUI')
+        return total
+
     def _refresh_balance(self, message=''):
-        self.balance_label.setText(f'Balance: {format_money(get_balance())}')
+        self.balance_label.setText(f'Balance: {format_money(get_balance())} | XUI {get_xui_balance()}')
         self.status_label.setText(message)
         for control in self.findChildren(QtWidgets.QPushButton):
             control.setEnabled(get_balance() > 0)
@@ -18976,7 +19049,9 @@ class CasinoWindow(QtWidgets.QMainWindow):
         new_balance = change_balance(delta)
         self.slots_button.setEnabled(True)
         if payout:
-            self._set_result(f'GANADO: +{payout:.2f} € · {self.slots_target}', '#62e58b')
+            xui_gain = max(1, int(payout // 15))
+            self._reward_xui_points(xui_gain, 'Slots reward')
+            self._set_result(f'GANADO: +{payout:.2f} € + {xui_gain} XUI · {self.slots_target}', '#62e58b')
             unlock_for_event('win', 'casino_slots', limit=2)
         else:
             self._set_result(f'PERDIDA: -{bet:.2f} € · {self.slots_target}', '#ff8888')
@@ -19056,6 +19131,8 @@ class CasinoWindow(QtWidgets.QMainWindow):
         color = 'Verde' if result == 0 else ('Rojo' if result in RED_NUMBERS else 'Negro')
         self._set_result(f'REULTADO: {result} · {color.upper()}', '#4bc6f6')
         if payout:
+            xui_gain = max(1, int(payout // 18))
+            self._reward_xui_points(xui_gain, 'Roulette reward')
             unlock_for_event('win', 'casino_roulette', limit=2)
         self._refresh_balance(f'Roulette neto {delta:+.2f} €')
         self.balance_label.setText(f'Balance: {format_money(new_balance)}')
@@ -19100,7 +19177,10 @@ class CasinoWindow(QtWidgets.QMainWindow):
             delta=-bet+payout; new_balance=change_balance(delta)
             self.bj_player.setText(f'JUGADOR: {player}'); self.bj_dealer.setText(f'BANCA: {dealer}'); self.bj_cards.setText(result)
             self._set_result(f'BLACKJACK: {result}', '#f2b94b' if result!='PERDIS' else '#ff8888')
-            if payout: unlock_for_event('win','casino_blackjack',limit=2)
+            if payout:
+                xui_gain = max(1, int(payout // 12))
+                self._reward_xui_points(xui_gain, 'Blackjack reward')
+                unlock_for_event('win','casino_blackjack',limit=2)
             self._refresh_balance(f'Blackjack neto {delta:+.2f} €'); self.balance_label.setText(f'Balance: {format_money(new_balance)}')
 
     def _hilo_page(self):
@@ -19131,7 +19211,10 @@ class CasinoWindow(QtWidgets.QMainWindow):
         else: payout=0; result='FALLO'
         delta=-bet+payout; new_balance=change_balance(delta)
         self._set_result(f'HI-LO: {result} · {previous} → {self.hilo_value}', '#d16cff' if result!='FALLO' else '#ff8888')
-        if payout: unlock_for_event('win','casino_hilo',limit=2)
+        if payout:
+            xui_gain = max(1, int(payout // 10))
+            self._reward_xui_points(xui_gain, 'Hi-Lo reward')
+            unlock_for_event('win','casino_hilo',limit=2)
         self._refresh_balance(f'Hi-Lo neto {delta:+.2f} €'); self.balance_label.setText(f'Balance: {format_money(new_balance)}')
 
     def _coin_page(self):
@@ -19153,7 +19236,10 @@ class CasinoWindow(QtWidgets.QMainWindow):
         if self.coin_tick<16:return
         self.coin_timer.stop(); self.coin_button.setEnabled(True); bet=self.coin_pending['bet']; pick=self.coin_pending['pick']; result=self.coin_target; payout=bet*2 if pick==result else 0; delta=-bet+payout; new_balance=change_balance(delta)
         self.coin_face.setText(result); self._set_result(f'COIN: {result} · {"GANADO" if payout else "PERDIDA"}', '#ffe05a' if payout else '#ff8888')
-        if payout: unlock_for_event('win','casino_coin',limit=2)
+        if payout:
+            xui_gain = max(1, int(payout // 14))
+            self._reward_xui_points(xui_gain, 'Coin Flip reward')
+            unlock_for_event('win','casino_coin',limit=2)
         self._refresh_balance(f'Coin neto {delta:+.2f} €'); self.balance_label.setText(f'Balance: {format_money(new_balance)}')
 
     def _online_page(self):
@@ -19415,7 +19501,7 @@ from pathlib import Path
 from PyQt5 import QtWidgets, QtGui, QtCore
 
 sys.path.insert(0, str(Path.home() / '.xui' / 'bin'))
-from xui_game_lib import change_balance, get_balance, complete_mission, unlock_for_event
+from xui_game_lib import change_balance, change_xui_balance, get_balance, complete_mission, unlock_for_event
 
 
 class RunnerGame(QtWidgets.QWidget):
@@ -19482,13 +19568,17 @@ class RunnerGame(QtWidgets.QWidget):
     def end_game(self):
         self.running = False
         self.timer.stop()
-        reward = max(1, self.score // 160)
+        reward = max(5, self.score // 80)
+        xui_reward = max(2, self.score // 120)
         bal = change_balance(reward)
+        xui_total = change_xui_balance(xui_reward)
         m = complete_mission(mission_id='m2')
         extra = ''
         if m.get('completed'):
             bal = m.get('balance', bal)
-            extra = f"\nMission reward: +{float(m.get('reward', 0)):.2f}"
+            extra = f"\nMission reward: +{float(m.get('reward', 0)):.2f} | XUI +{xui_reward}"
+        else:
+            extra = f"\nXUI reward: +{xui_reward}"
         dlg = QtWidgets.QDialog(self)
         dlg.setWindowTitle('Runner')
         dlg.setWindowFlags(QtCore.Qt.Dialog | QtCore.Qt.FramelessWindowHint)
@@ -19532,7 +19622,7 @@ class RunnerGame(QtWidgets.QWidget):
         bl.setContentsMargins(16, 14, 16, 12)
         bl.setSpacing(10)
         txt = QtWidgets.QLabel(
-            f'Game Over\nScore: {self.score}\nReward: +{reward} credits{extra}\nBalance: EUR {bal:.2f}'
+            f'Game Over\nScore: {self.score}\nReward: +{reward} credits + {xui_reward} XUI{extra}\nBalance: EUR {bal:.2f} | XUI {xui_total}'
         )
         txt.setObjectName('body')
         txt.setWordWrap(True)
@@ -19822,9 +19912,29 @@ def get_xui_balance():
 
 
 def change_xui_balance(delta):
-    balance = max(0, get_xui_balance() + int(delta))
-    _safe_write(XUI_WALLET_FILE, {'balance': balance, 'currency': 'XUI'})
-    return balance
+    try:
+        delta_value = float(delta)
+    except Exception:
+        delta_value = 0.0
+    balance = max(0, get_xui_balance() + delta_value)
+    _safe_write(XUI_WALLET_FILE, {'balance': round(balance, 2), 'currency': 'XUI'})
+    return round(balance, 2)
+
+
+def award_xui_points(points, reason='game_reward'):
+    amount = float(points or 0)
+    if amount <= 0:
+        return get_xui_balance()
+    new_total = change_xui_balance(amount)
+    if reason:
+        try:
+            state = json.loads(XUI_WALLET_FILE.read_text(encoding='utf-8')) if XUI_WALLET_FILE.exists() else {'balance': new_total, 'currency': 'XUI'}
+            state['last_reason'] = str(reason)
+            state['updated_at'] = int(time.time())
+            _safe_write(XUI_WALLET_FILE, state)
+        except Exception:
+            pass
+    return new_total
 
 
 def _catalog_url(url):
