@@ -11666,6 +11666,25 @@ class Dashboard(QtWidgets.QMainWindow):
             shortcut.setContext(QtCore.Qt.ApplicationShortcut)
             shortcut.activated.connect(self._trigger_guide_action)
             self._guide_shortcuts.append(shortcut)
+        self._ensure_global_guide_listener()
+
+    def _ensure_global_guide_listener(self):
+        listener = XUI_HOME / 'bin' / 'xui_joy_session.sh'
+        if not listener.is_file() or not os.access(listener, os.X_OK):
+            logging.warning('global Guide input listener is missing: %s', listener)
+            return
+        try:
+            subprocess.Popen(
+                [str(listener)],
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                start_new_session=True,
+                close_fds=True,
+                env=os.environ.copy(),
+            )
+        except OSError:
+            logging.exception('could not start global Guide input listener')
 
     def _build(self):
         root = QtWidgets.QWidget()
@@ -16842,12 +16861,38 @@ set -euo pipefail
 PYRUN="$HOME/.xui/bin/xui_python.sh"
 LISTENER="$HOME/.xui/bin/xui_joy_listener.py"
 LOG="$HOME/.xui/logs/joy_listener.log"
+LOCK="$HOME/.xui/data/joy_listener.lock"
 mkdir -p "$(dirname "$LOG")"
+mkdir -p "$(dirname "$LOCK")"
+exec 9>"$LOCK"
+if command -v flock >/dev/null 2>&1 && ! flock -n 9; then
+    exit 0
+fi
+export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
+if [[ -z "${WAYLAND_DISPLAY:-}" && -d "$XDG_RUNTIME_DIR" ]]; then
+    for socket_path in "$XDG_RUNTIME_DIR"/wayland-*; do
+        if [[ -S "$socket_path" ]]; then
+            export WAYLAND_DISPLAY="${socket_path##*/}"
+            break
+        fi
+    done
+fi
+if [[ -z "${DISPLAY:-}" ]]; then
+    for socket_path in /tmp/.X11-unix/X*; do
+        if [[ -S "$socket_path" ]]; then
+            export DISPLAY=":${socket_path##*/X}"
+            break
+        fi
+    done
+fi
+if [[ -z "${XAUTHORITY:-}" && -r "$HOME/.Xauthority" ]]; then
+    export XAUTHORITY="$HOME/.Xauthority"
+fi
 if [[ -z "${DISPLAY:-}${WAYLAND_DISPLAY:-}" ]]; then
-    printf '%s no graphical session variables (DISPLAY/WAYLAND_DISPLAY); listener not started\n' "$(date -Is)" >> "$LOG"
+    printf '%s no graphical session/socket found; listener not started\n' "$(date -Is)" >> "$LOG"
     exit 1
 fi
-exec "$PYRUN" "$LISTENER"
+exec "$PYRUN" "$LISTENER" >>"$LOG" 2>&1
 BASH
     chmod +x "$BIN_DIR/xui_joy_session.sh"
     mkdir -p "$AUTOSTART_DIR"
@@ -16861,7 +16906,7 @@ Terminal=false
 StartupNotify=false
 X-GNOME-Autostart-enabled=true
 Hidden=false
-NoDisplay=true
+NoDisplay=false
 DESK
 
     if getent group input >/dev/null 2>&1; then
@@ -22099,17 +22144,24 @@ class StoreWindow(QtWidgets.QMainWindow):
         owned = iid in self._inventory_ids()
         state = 'OFFICIAL PURCHASE' if external_paid else ('OWNED' if owned else 'NOT OWNED')
         source = str(item.get('source', 'XUI'))
+        web_port = source.strip().casefold() == 'web ports'
         install_cmd = str(item.get('install', '')).strip()
         launch_cmd = str(item.get('launch', '')).strip()
         purchase_url = str(item.get('purchase_url', '')).strip()
 
         self.sel_name.setText(name)
+        if web_port and pricing == 'free':
+            state = 'IN LIBRARY' if owned else 'NOT IN LIBRARY'
         self.sel_meta.setText(f'{cat} | {source} | {price_txt} | {state}')
         self.sel_desc.setText(desc)
-        self.buy_btn.setText('Buy Official' if external_paid else (f'Buy · {price:.0f} XUI' if currency == 'XUI' and pricing == 'paid' else 'Buy'))
-        if external_paid:
+        if web_port and pricing == 'free':
+            self.buy_btn.setText('In Library' if owned else 'Add to Library')
+            self.buy_btn.setEnabled(not owned)
+        elif external_paid:
+            self.buy_btn.setText('Buy Official')
             self.buy_btn.setEnabled(bool(purchase_url or launch_cmd))
         else:
+            self.buy_btn.setText(f'Buy · {price:.0f} XUI' if currency == 'XUI' and pricing == 'paid' else 'Buy')
             self.buy_btn.setEnabled((pricing == 'paid') and (not owned))
         self.install_btn.setEnabled(bool(install_cmd) and (owned or pricing == 'free'))
         can_launch = bool(launch_cmd) and (owned or pricing == 'free' or external_paid)
@@ -22168,7 +22220,22 @@ class StoreWindow(QtWidgets.QMainWindow):
             self.reload(f'You already own: {name}')
             return
         if pricing != 'paid':
-            self.reload('This item is free. Use Launch or Install.')
+            if str(item.get('source', '')).strip().casefold() != 'web ports':
+                self.reload('This item is free. Use Launch or Install.')
+                return
+            inventory_items = self.inventory.get('items', [])
+            inventory_items.append({
+                'id': iid,
+                'name': name,
+                'price': 0,
+                'currency': 'XUI',
+                'category': str(item.get('category', 'Games')),
+                'launch': str(item.get('launch', '')),
+                'install': str(item.get('install', '')),
+            })
+            self.inventory['items'] = inventory_items
+            save_inventory(self.inventory)
+            self.reload(f'Added to library: {name}')
             return
         bal = get_xui_balance() if xui_currency else get_balance()
         if bal < price:
@@ -22299,7 +22366,12 @@ class StoreWindow(QtWidgets.QMainWindow):
         if is_game and not launcher_has_intro:
             intro_launcher = shlex.quote(str(XUI_BIN / 'xui_play_game_intro.sh'))
             cmd = f'{intro_launcher} -- /bin/sh -c {shlex.quote(cmd)}'
-        self._run_detached(cmd)
+        launch_result = self._run_detached(cmd)
+        if isinstance(launch_result, tuple):
+            launch_result = launch_result[0] if launch_result else False
+        if not launch_result:
+            self.reload(f'Could not start launcher for {item.get("name", "item")}. Check the XUI browser/runtime installation.')
+            return
         fresh = unlock_for_event('launch', iid, limit=3)
         ach_note = ''
         if fresh:
@@ -22310,7 +22382,7 @@ class StoreWindow(QtWidgets.QMainWindow):
     def show_inventory(self):
         inv = self.inventory.get('items', [])
         if not inv:
-            self._menu_notice('Inventory', 'No purchased items.')
+            self._menu_notice('Inventory', 'Your library is empty.')
             return
         options = []
         descriptions = {}
@@ -22321,7 +22393,9 @@ class StoreWindow(QtWidgets.QMainWindow):
             price = float(x.get('price', 0) or 0)
             label = f'{i:02d}. {name}'
             options.append(label)
-            desc = f'{category} | EUR {price:.2f}'
+            currency = str(x.get('currency', 'EUR')).strip().upper()
+            price_text = f'{price:.0f} XUI' if currency == 'XUI' else f'EUR {price:.2f}'
+            desc = f'{category} | {price_text}'
             if iid:
                 desc += f' | ID: {iid}'
             descriptions[label] = desc
@@ -22338,6 +22412,10 @@ class StoreWindow(QtWidgets.QMainWindow):
         iid = str(inv[idx].get('id', '')).strip()
         if not iid:
             return
+        if self.search.text():
+            self.search.clear()
+        if self.category != 'All':
+            self.set_category('All')
         self.selected_item_id = iid
         self._apply_selection()
         self._scroll_to_selected()
@@ -28117,10 +28195,12 @@ fi
 
 PYRUN="$HOME/.xui/bin/xui_python.sh"
 WEBHUB="$HOME/.xui/bin/xui_webhub.py"
-if [ -x "$PYRUN" ] && [ -f "$WEBHUB" ]; then
+if [ -x "$PYRUN" ] && [ -f "$WEBHUB" ] && \
+     "$PYRUN" -c 'from PyQt5 import QtWebEngineWidgets' >/dev/null 2>&1; then
   exec "$PYRUN" "$WEBHUB" --mode "$MODE" "$URL"
 fi
-if command -v python3 >/dev/null 2>&1 && [ -f "$WEBHUB" ]; then
+if command -v python3 >/dev/null 2>&1 && [ -f "$WEBHUB" ] && \
+     python3 -c 'from PyQt5 import QtWebEngineWidgets' >/dev/null 2>&1; then
   exec python3 "$WEBHUB" --mode "$MODE" "$URL"
 fi
 
@@ -29345,12 +29425,34 @@ PY
     cat > "$BIN_DIR/xui_global_guide.sh" <<'BASH'
 #!/usr/bin/env bash
 set -euo pipefail
+LOG="$HOME/.xui/logs/guide_global.log"
+mkdir -p "$(dirname "$LOG")"
+export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
+if [[ -z "${WAYLAND_DISPLAY:-}" && -d "$XDG_RUNTIME_DIR" ]]; then
+    for socket_path in "$XDG_RUNTIME_DIR"/wayland-*; do
+        if [[ -S "$socket_path" ]]; then
+            export WAYLAND_DISPLAY="${socket_path##*/}"
+            break
+        fi
+    done
+fi
+if [[ -z "${DISPLAY:-}" ]]; then
+    for socket_path in /tmp/.X11-unix/X*; do
+        if [[ -S "$socket_path" ]]; then
+            export DISPLAY=":${socket_path##*/X}"
+            break
+        fi
+    done
+fi
+if [[ -z "${XAUTHORITY:-}" && -r "$HOME/.Xauthority" ]]; then
+    export XAUTHORITY="$HOME/.Xauthority"
+fi
 PYRUN="$HOME/.xui/bin/xui_python.sh"
 APP="$HOME/.xui/bin/xui_global_guide.py"
 if [ -x "$PYRUN" ] && [ -f "$APP" ]; then
-  exec "$PYRUN" "$APP" "$@"
+    exec "$PYRUN" "$APP" "$@" >>"$LOG" 2>&1
 fi
-exec python3 "$APP" "$@"
+exec python3 "$APP" "$@" >>"$LOG" 2>&1
 BASH
     chmod +x "$BIN_DIR/xui_global_guide.sh"
 
@@ -33298,17 +33400,22 @@ PY
         sed -i 's/^Hidden=.*/Hidden=false/' "$AUTOSTART_DIR/xui-dashboard.desktop" 2>/dev/null || true
         sed -i 's/^X-GNOME-Autostart-enabled=.*/X-GNOME-Autostart-enabled=true/' "$AUTOSTART_DIR/xui-dashboard.desktop" 2>/dev/null || true
   fi
+  if [ -f "$AUTOSTART_DIR/xui-joy.desktop" ]; then
+      sed -i 's/^Hidden=.*/Hidden=false/' "$AUTOSTART_DIR/xui-joy.desktop" 2>/dev/null || true
+      sed -i 's/^X-GNOME-Autostart-enabled=.*/X-GNOME-Autostart-enabled=true/' "$AUTOSTART_DIR/xui-joy.desktop" 2>/dev/null || true
+      sed -i 's/^NoDisplay=.*/NoDisplay=false/' "$AUTOSTART_DIR/xui-joy.desktop" 2>/dev/null || true
+  fi
   if command -v systemctl >/dev/null 2>&1; then
     if run_user_systemctl daemon-reload; then
             # The desktop entry is the dashboard autostart source of truth. Disable an old
             # systemd dashboard link so it cannot race the graphical session or grab the lock early.
             run_user_systemctl disable xui-dashboard.service || true
-            # Use XDG autostart for the input bridge so it inherits the actual graphical
-            # session (including Wayland/Xauthority), instead of a user service with DISPLAY=:0.
-            run_user_systemctl disable --now xui-joy.service || true
+            # The service wrapper resolves the active X11/Wayland socket if systemd
+            # does not inherit the graphical session. XDG autostart remains a fallback.
+            run_user_systemctl enable --now xui-joy.service || warn "Could not start xui-joy.service; XDG autostart remains enabled"
       run_user_systemctl enable --now xui-battery-monitor.service || true
       run_user_systemctl enable --now xui-power-opt.service || true
-            info "Enabled XDG dashboard and Guide-input autostart, plus battery/power services"
+            info "Enabled dashboard and Guide-input services/autostart, plus battery/power services"
     else
             warn "systemctl --user daemon-reload failed; XDG desktop autostart remains enabled"
     fi
