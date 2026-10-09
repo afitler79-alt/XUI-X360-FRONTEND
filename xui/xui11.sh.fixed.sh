@@ -20686,7 +20686,7 @@ def _curated_items():
             'category': 'Games',
             'source': 'Web Ports',
             'desc': description,
-            'launch': str(XUI_BIN / 'xui_browser.sh') + ' --hub ' + shlex.quote(target_url) + ' --fullscreen' if target_url else '',
+            'launch': str(XUI_BIN / 'xui_browser.sh') + ' --game ' + shlex.quote(target_url) if target_url else '',
         })
     return items
 
@@ -27272,9 +27272,12 @@ class VirtualKeyboardDialog(QtWidgets.QDialog):
 
 
 class WebHub(QtWidgets.QMainWindow):
-    def __init__(self, url='https://www.xbox.com', kiosk=False):
+    def __init__(self, url='https://www.xbox.com', kiosk=False, game_mode=False):
         super().__init__()
         self.kiosk = bool(kiosk)
+        self.game_mode = bool(game_mode)
+        if self.game_mode:
+            self.setWindowFlags(self.windowFlags() | QtCore.Qt.FramelessWindowHint)
         self._ultra_low_ram = ultra_low_ram_mode()
         self.pending_url = normalize_url(url)
         self._kbd_opening = False
@@ -27353,9 +27356,9 @@ class WebHub(QtWidgets.QMainWindow):
         v.setContentsMargins(0, 0, 0, 0)
         v.setSpacing(0)
 
-        top = QtWidgets.QFrame()
-        top.setObjectName('topbar')
-        t = QtWidgets.QVBoxLayout(top)
+        self.topbar = QtWidgets.QFrame()
+        self.topbar.setObjectName('topbar')
+        t = QtWidgets.QVBoxLayout(self.topbar)
         t.setContentsMargins(10, 8, 10, 8)
         t.setSpacing(5)
         row = QtWidgets.QHBoxLayout()
@@ -27391,7 +27394,9 @@ class WebHub(QtWidgets.QMainWindow):
         self.bar.setValue(0)
         self.bar.setTextVisible(False)
         t.addWidget(self.bar)
-        v.addWidget(top, 0)
+        v.addWidget(self.topbar, 0)
+        if self.game_mode:
+            self.topbar.hide()
 
         self.stack = QtWidgets.QStackedWidget()
         if QtWebEngineWidgets is None:
@@ -28130,7 +28135,7 @@ class WebHub(QtWidgets.QMainWindow):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument('--mode', choices=['hub', 'kiosk', 'normal'], default='hub')
+    parser.add_argument('--mode', choices=['hub', 'kiosk', 'normal', 'game'], default='hub')
     parser.add_argument('url', nargs='?', default='https://www.xbox.com')
     args = parser.parse_args()
     ultra_low_ram = ultra_low_ram_mode()
@@ -28146,8 +28151,8 @@ def main():
             QtGui.QPixmapCache.setCacheLimit(4096)
         except Exception:
             pass
-    fullscreen_mode = args.mode in ('hub', 'kiosk')
-    w = WebHub(url=args.url, kiosk=fullscreen_mode)
+    fullscreen_mode = args.mode in ('hub', 'kiosk', 'game')
+    w = WebHub(url=args.url, kiosk=fullscreen_mode, game_mode=(args.mode == 'game'))
     if fullscreen_mode:
         try:
             w.showFullScreen()
@@ -28172,10 +28177,12 @@ set -euo pipefail
 MODE=hub
 URL="https://www.xbox.com"
 FORCE_FULLSCREEN="${XUI_BROWSER_FORCE_FULLSCREEN:-1}"
+GAME_MODE=0
 while [ $# -gt 0 ]; do
   case "${1:-}" in
     --kiosk) MODE=kiosk; shift ;;
     --hub) MODE=hub; shift ;;
+        --game) MODE=game; GAME_MODE=1; FORCE_FULLSCREEN=1; shift ;;
     --normal) MODE=normal; shift ;;
     --fullscreen|--full) FORCE_FULLSCREEN=1; shift ;;
     --windowed) FORCE_FULLSCREEN=0; shift ;;
@@ -28186,6 +28193,11 @@ done
 if [ "$FORCE_FULLSCREEN" = "1" ] && [ "$MODE" = "normal" ]; then
   MODE=hub
 fi
+
+# Expose modern WebGPU/WebGL paths to embedded Chromium; allow SwiftShader on VMs
+# where a hardware Vulkan adapter is unavailable.
+QTWEBENGINE_CHROMIUM_FLAGS="${QTWEBENGINE_CHROMIUM_FLAGS:-} --enable-unsafe-webgpu --enable-unsafe-swiftshader --ignore-gpu-blocklist --enable-gpu-rasterization"
+export QTWEBENGINE_CHROMIUM_FLAGS
 
 PYRUN="$HOME/.xui/bin/xui_python.sh"
 WEBHUB="$HOME/.xui/bin/xui_webhub.py"
@@ -28199,7 +28211,9 @@ if command -v python3 >/dev/null 2>&1 && [ -f "$WEBHUB" ] && \
 fi
 
 if command -v chromium-browser >/dev/null 2>&1; then
-  if [ "$MODE" = "normal" ]; then
+    if [ "$GAME_MODE" = "1" ]; then
+        exec chromium-browser --app="$URL" --start-fullscreen --enable-unsafe-webgpu --enable-unsafe-swiftshader --ignore-gpu-blocklist --enable-gpu-rasterization
+    elif [ "$MODE" = "normal" ]; then
     exec chromium-browser "$URL"
   elif [ "$MODE" = "kiosk" ]; then
     exec chromium-browser --kiosk "$URL"
@@ -28208,7 +28222,9 @@ if command -v chromium-browser >/dev/null 2>&1; then
   fi
 fi
 if command -v chromium >/dev/null 2>&1; then
-  if [ "$MODE" = "normal" ]; then
+    if [ "$GAME_MODE" = "1" ]; then
+        exec chromium --app="$URL" --start-fullscreen --enable-unsafe-webgpu --enable-unsafe-swiftshader --ignore-gpu-blocklist --enable-gpu-rasterization
+    elif [ "$MODE" = "normal" ]; then
     exec chromium "$URL"
   elif [ "$MODE" = "kiosk" ]; then
     exec chromium --kiosk "$URL"
@@ -28217,13 +28233,18 @@ if command -v chromium >/dev/null 2>&1; then
   fi
 fi
 if command -v firefox >/dev/null 2>&1; then
-  if [ "$MODE" = "normal" ]; then
+    if [ "$GAME_MODE" = "1" ]; then
+        exec firefox --kiosk "$URL"
+    elif [ "$MODE" = "normal" ]; then
     exec firefox "$URL"
   else
     exec firefox --kiosk "$URL"
   fi
 fi
 if command -v x-www-browser >/dev/null 2>&1; then
+    if [ "$GAME_MODE" = "1" ]; then
+        exec x-www-browser --kiosk "$URL"
+    fi
   exec x-www-browser "$URL"
 fi
 echo "No browser runtime found."
@@ -28756,6 +28777,53 @@ def _play_sfx(name):
             continue
 
 
+class GuideBlade(QtWidgets.QFrame):
+    activated = QtCore.pyqtSignal(int)
+
+    def __init__(self, index, text, clockwise=False, width=46, parent=None):
+        super().__init__(parent)
+        self.index = int(index)
+        self.text = str(text or '')
+        self.clockwise = bool(clockwise)
+        self.active = False
+        self.setFixedWidth(int(width))
+        self.setCursor(QtGui.QCursor(QtCore.Qt.PointingHandCursor))
+        self.setFocusPolicy(QtCore.Qt.StrongFocus)
+
+    def set_active(self, active):
+        self.active = bool(active)
+        self.update()
+
+    def paintEvent(self, event):
+        painter = QtGui.QPainter(self)
+        if self.active:
+            start, end, foreground = '#e5e9ed', '#ccd3da', '#303943'
+        elif self.index == 2:
+            start, end, foreground = '#46535e', '#35414b', '#f5f7fa'
+        else:
+            start, end, foreground = '#e5e9ed', '#ccd3da', '#303943'
+        gradient = QtGui.QLinearGradient(0, 0, 0, self.height())
+        gradient.setColorAt(0.0, QtGui.QColor(start))
+        gradient.setColorAt(1.0, QtGui.QColor(end))
+        painter.fillRect(self.rect(), gradient)
+        painter.setPen(QtGui.QColor(255, 255, 255, 190))
+        painter.drawRect(self.rect().adjusted(0, 0, -1, -1))
+        painter.save()
+        painter.translate(self.width() / 2, self.height() / 2)
+        painter.rotate(90 if self.clockwise else -90)
+        painter.setPen(QtGui.QColor(foreground))
+        font = QtGui.QFont('Segoe UI', 11, QtGui.QFont.Bold)
+        painter.setFont(font)
+        painter.drawText(QtCore.QRect(-self.height() / 2, -self.width() / 2,
+                                      self.height(), self.width()),
+                         QtCore.Qt.AlignCenter, self.text)
+        painter.restore()
+
+    def mousePressEvent(self, event):
+        self.activated.emit(self.index)
+        super().mousePressEvent(event)
+
+
 class Guide(QtWidgets.QDialog):
     def __init__(self, gamertag='Player1', paused_pid=None, previous_window=None):
         super().__init__()
@@ -28765,6 +28833,14 @@ class Guide(QtWidgets.QDialog):
         self.action = ''
         self._open_anim = None
         self._last_row = 0
+        self._section_index = 1
+        self._sections = [
+            ('Games & Apps', ['Mis juegos', 'Reciente', 'Descargas activas', 'Manage Storage', 'Close Game']),
+            ('Player', ['Xbox Home', 'Friends', 'Party', 'Messages', 'Chat', 'Beacons & Activity', 'Minimize']),
+            ('Media', ['Video Marketplace', 'YouTube', 'Netflix', 'Twitch', 'Music Marketplace', 'System Music']),
+            ('Settings', ['System Settings', 'Network Setup', 'Account Security', 'Canjear codigo', 'Sign Out']),
+        ]
+        self.blades = []
         self._target_was_fullscreen = False
         self._topmost_timer = QtCore.QTimer(self)
         self._topmost_timer.setInterval(250)
@@ -28786,53 +28862,40 @@ class Guide(QtWidgets.QDialog):
         self.setStyleSheet('''
             QDialog { background:rgba(13, 19, 22, 0.78); }
             QFrame#xguide_panel {
-                background:qlineargradient(x1:0,y1:0,x2:0,y2:1, stop:0 #727b80, stop:1 #a8afb2);
+                background:qlineargradient(x1:0,y1:0,x2:0,y2:1, stop:0 #899296, stop:1 #a8afb2);
                 border:2px solid #dfe5e6;
                 border-radius:3px;
             }
-            QLabel#xguide_title { color:#f4f7f7; font-size:42px; font-weight:800; }
-            QLabel#xguide_meta { color:#eef3f3; font-size:30px; font-weight:600; }
+            QLabel#xguide_title { color:#f4f7f7; font-size:26px; font-weight:800; }
+            QLabel#xguide_meta { color:#eef3f3; font-size:14px; font-weight:700; }
             QListWidget#xguide_list {
                 background:#dfe5e6;
                 color:#263238;
-                border:1px solid #9ca7aa;
-                font-size:31px;
+                border:1px solid #b6c0c3;
+                font-size:17px;
                 outline:none;
             }
-            QListWidget#xguide_list::item { padding:8px 16px; min-height:54px; border-bottom:1px solid #b5bec0; }
+            QListWidget#xguide_list::item { padding:6px 12px; min-height:28px; border-bottom:1px solid #c5ccce; }
             QListWidget#xguide_list::item:selected {
-                background:#078d13;
+                background:#54b43b;
                 color:#f5fff5;
-                border-bottom:1px solid #54b75a;
+                border-bottom:1px solid #79ca5f;
             }
-            QFrame#xguide_actions { background:#7d8588; border:1px solid #a8afb2; }
-            QPushButton#xguide_action_btn {
-                text-align:left;
-                color:#f4f7f7;
-                background:#5f696d;
-                border:1px solid #dfe5e6;
-                padding:8px 12px;
-                font-size:27px;
-                font-weight:800;
-                min-height:54px;
-            }
-            QPushButton#xguide_action_btn:hover, QPushButton#xguide_action_btn:focus {
-                background:#078d13;
-                border:1px solid #54b75a;
-            }
-            QLabel#xguide_hint { color:#eef3f3; font-size:26px; font-weight:700; }
+            QLabel#xguide_hint { color:#eef3f3; font-size:13px; font-weight:800; }
         ''')
         outer = QtWidgets.QVBoxLayout(self)
         outer.setContentsMargins(18, 18, 18, 18)
         panel = QtWidgets.QFrame()
         panel.setObjectName('xguide_panel')
-        panel.setMinimumSize(920, 500)
-        panel.setMaximumSize(1360, 820)
+        screen_bounds = screen.geometry() if screen is not None else QtCore.QRect(0, 0, 1280, 720)
+        panel_width = min(max(560, int(screen_bounds.width() * 0.81)), max(1, screen_bounds.width() - 24))
+        panel_height = min(max(390, int(screen_bounds.height() * 0.86)), max(1, screen_bounds.height() - 24))
+        panel.setFixedSize(panel_width, panel_height)
         outer.addWidget(panel, 0, QtCore.Qt.AlignCenter)
 
         root = QtWidgets.QVBoxLayout(panel)
-        root.setContentsMargins(14, 12, 14, 12)
-        root.setSpacing(10)
+        root.setContentsMargins(10, 8, 10, 8)
+        root.setSpacing(6)
 
         top = QtWidgets.QHBoxLayout()
         title = QtWidgets.QLabel('Xbox Guide')
@@ -28845,56 +28908,56 @@ class Guide(QtWidgets.QDialog):
         root.addLayout(top)
 
         body = QtWidgets.QHBoxLayout()
-        body.setSpacing(10)
+        body.setSpacing(0)
+        for idx, (label, width) in enumerate((('Games & Apps', 46), ('Player', 58))):
+            blade = GuideBlade(idx, label, clockwise=False, width=width)
+            blade.activated.connect(self._set_section)
+            self.blades.append(blade)
+            body.addWidget(blade, 0)
+
         self.listw = QtWidgets.QListWidget()
         self.listw.setObjectName('xguide_list')
-        self.listw.addItems([
-            'Reciente',
-            'Mensajes recientes',
-            'Social global',
-            'Beacons & Activity',
-            'Mis juegos',
-            'Descargas activas',
-            'Canjear codigo',
-            'Manage Storage',
-            'System Settings',
-            'Network Setup',
-            'Account Security',
-        ])
-        self.listw.setCurrentRow(0)
         self.listw.setFocusPolicy(QtCore.Qt.StrongFocus)
         self.listw.itemActivated.connect(self._accept_current)
         self.listw.itemDoubleClicked.connect(self._accept_current)
         self.listw.currentRowChanged.connect(self._on_row_changed)
         self.listw.installEventFilter(self)
         self.installEventFilter(self)
-        body.addWidget(self.listw, 7)
-
-        actions = QtWidgets.QFrame()
-        actions.setObjectName('xguide_actions')
-        actions_l = QtWidgets.QVBoxLayout(actions)
-        actions_l.setContentsMargins(8, 8, 8, 8)
-        actions_l.setSpacing(6)
-        for txt in ('Inicio de Xbox', 'Manage Storage', 'System Settings', 'Close Game', 'Sign Out'):
-            b = QtWidgets.QPushButton(txt)
-            b.setObjectName('xguide_action_btn')
-            b.clicked.connect(lambda _=False, action=txt: self._accept_action(action))
-            actions_l.addWidget(b)
-        actions_l.addStretch(1)
-        body.addWidget(actions, 3)
-        for button in actions.findChildren(QtWidgets.QPushButton):
-            button.setFocusPolicy(QtCore.Qt.NoFocus)
-            button.installEventFilter(self)
+        body.addWidget(self.listw, 1)
+        for idx, (label, width) in enumerate((('Media', 46), ('Settings', 50)), start=2):
+            blade = GuideBlade(idx, label, clockwise=True, width=width)
+            blade.activated.connect(self._set_section)
+            self.blades.append(blade)
+            body.addWidget(blade, 0)
         root.addLayout(body, 1)
 
-        hint = QtWidgets.QLabel('<font color="#49b93e">A Select</font>   <font color="#cf2d2d">B Back</font>   <font color="#2b7fd8">X Sign Out</font>   <font color="#ddb126">Y Inicio de Xbox</font>')
+        hint = QtWidgets.QLabel('<font color="#49b93e">A</font> Select&nbsp;&nbsp; <font color="#cf2d2d">B</font> Back&nbsp;&nbsp; <font color="#2b7fd8">X</font> Close Game&nbsp;&nbsp; <font color="#ddb126">Y</font> Minimize Dashboard&nbsp;&nbsp; <font color="#e7eff6">LB/RB</font> Page')
         hint.setObjectName('xguide_hint')
         root.addWidget(hint)
+
+        self._populate_section(self._section_index)
 
         self._clock = QtCore.QTimer(self)
         self._clock.timeout.connect(self._refresh_meta)
         self._clock.start(1000)
         self._refresh_meta()
+
+    def _populate_section(self, index):
+        self._section_index = int(index) % len(self._sections)
+        _name, rows = self._sections[self._section_index]
+        self.listw.clear()
+        self.listw.addItems(rows)
+        if self.listw.count():
+            self.listw.setCurrentRow(0)
+        for blade in self.blades:
+            blade.set_active(blade.index == self._section_index)
+
+    def _set_section(self, index):
+        self._populate_section(index)
+        self.listw.setFocus(QtCore.Qt.OtherFocusReason)
+
+    def _cycle_section(self, delta):
+        self._set_section((self._section_index + int(delta)) % len(self._sections))
 
     def _on_row_changed(self, row):
         try:
@@ -28907,8 +28970,7 @@ class Guide(QtWidgets.QDialog):
 
     def _refresh_meta(self):
         now = QtCore.QDateTime.currentDateTime().toString('HH:mm')
-        pid_meta = f' PID:{self.paused_pid}' if self.paused_pid else ''
-        self.meta.setText(f'{self.gamertag}    {now}{pid_meta}')
+        self.meta.setText(f'◩  ◉  {now}   DASH')
 
     def _accept_current(self, *_):
         it = self.listw.currentItem()
@@ -28953,8 +29015,17 @@ class Guide(QtWidgets.QDialog):
             if key in (QtCore.Qt.Key_X, QtCore.Qt.Key_Space):
                 self._accept_action('Close Game')
                 return True
-            if key in (QtCore.Qt.Key_Y, QtCore.Qt.Key_Tab):
+            if key == QtCore.Qt.Key_Y:
+                self._accept_action('Minimize')
+                return True
+            if key == QtCore.Qt.Key_Tab:
                 self.listw.setCurrentRow(min(self.listw.count() - 1, self.listw.currentRow() + 1))
+                return True
+            if key in (QtCore.Qt.Key_PageUp, QtCore.Qt.Key_BracketLeft):
+                self._cycle_section(-1)
+                return True
+            if key in (QtCore.Qt.Key_PageDown, QtCore.Qt.Key_BracketRight):
+                self._cycle_section(1)
                 return True
             if key == QtCore.Qt.Key_Left:
                 self._accept_action('Inicio de Xbox')
@@ -29229,6 +29300,23 @@ def _handle_action(action, parent):
         if getattr(parent, 'previous_window', None):
             subprocess.run(['xdotool', 'windowactivate', '--sync', str(parent.previous_window)], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False)
         return
+    if name == 'Minimize':
+        if shutil.which('xdotool'):
+            for pattern in ('XUI - Xbox 360 Style', 'XUI'):
+                try:
+                    windows = subprocess.check_output(
+                        ['xdotool', 'search', '--onlyvisible', '--name', pattern],
+                        text=True, stderr=subprocess.DEVNULL, timeout=1.0,
+                    ).splitlines()
+                except (OSError, subprocess.SubprocessError):
+                    windows = []
+                if windows:
+                    subprocess.run(
+                        ['xdotool', 'windowminimize', windows[-1]],
+                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False,
+                    )
+                    break
+        return
     if name == 'Xbox Home':
         _activate_dashboard()
         _resume_paused()
@@ -29376,7 +29464,7 @@ def main():
                 d.action = ''
                 d.hide_overlay()
             elif raw == 'tab':
-                d.listw.setCurrentRow(min(d.listw.count() - 1, d.listw.currentRow() + 1))
+                d._accept_action('Minimize')
             elif raw == 'closegame':
                 d._accept_action('Close Game')
             elif raw == 'home':
@@ -29386,9 +29474,9 @@ def main():
             elif raw == 'left':
                 d.listw.setCurrentRow(max(0, d.listw.currentRow() - 1))
             elif raw == 'pageup':
-                d.listw.setCurrentRow(max(0, d.listw.currentRow() - 5))
+                d._cycle_section(-1)
             elif raw == 'pagedown':
-                d.listw.setCurrentRow(min(d.listw.count() - 1, d.listw.currentRow() + 5))
+                d._cycle_section(1)
             client.write(b'ok\n')
             client.flush()
             client.disconnectFromServer()
