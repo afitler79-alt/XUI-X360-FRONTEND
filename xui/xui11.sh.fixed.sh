@@ -20071,31 +20071,123 @@ def _install_xbox360_game(game_id):
     print(f'Instalado en: {destination}')
 
 
+def _xbox360_install_directory(item, game_id):
+    install_path = Path(str(item.get('installed_path') or '')).expanduser()
+    if install_path.is_dir():
+        return install_path
+    slug = re.sub(r'[^A-Za-z0-9._-]+', '_', str(item.get('name', game_id))).strip('._')[:80] or str(game_id)
+    roots = [
+        Path(_select_largest_secondary_disk() or str(Path.home() / '.xui' / 'GAMES' / 'Xbox360')),
+        Path.home() / '.xui' / 'GAMES' / 'xbox360_repo',
+    ]
+    for root in roots:
+        for suffix in ('', '_extracted'):
+            candidate = root / f'{slug}{suffix}'
+            if candidate.is_dir():
+                return candidate
+    legacy_root = Path.home() / '.xui' / 'GAMES' / 'xbox360_repo'
+    wanted = re.sub(r'[^a-z0-9]+', '', slug.casefold())
+    if legacy_root.is_dir():
+        for candidate in legacy_root.iterdir():
+            if candidate.is_dir() and re.sub(r'[^a-z0-9]+', '', candidate.name.removesuffix('_extracted').casefold()) == wanted:
+                return candidate
+    return roots[0] / slug
+
+
+def _xbox360_launch_plan(install_path):
+    files = [path for path in install_path.rglob('*') if path.is_file()]
+    xex_files = sorted(
+        (path for path in files if path.suffix.lower() == '.xex'),
+        key=lambda path: (path.name.lower() != 'default.xex', str(path).lower()),
+    )
+    if xex_files:
+        return 'xenia', xex_files[0]
+
+    # Xbox 360 disc images are supported by the repository's Xenia integration.
+    iso_files = sorted((path for path in files if path.suffix.lower() in ('.iso', '.xiso')),
+                       key=lambda path: str(path).lower())
+    if iso_files:
+        return 'xenia', iso_files[0]
+
+    appimages = sorted((path for path in files if path.suffix.lower() == '.appimage'), key=lambda p: str(p).lower())
+    native = sorted(
+        (path for path in files if path.suffix.lower() in ('.x86_64', '.x86', '.elf')),
+        key=lambda p: str(p).lower(),
+    )
+    scripts = sorted(
+        (path for path in files if path.suffix.lower() == '.sh'
+         and re.search(r'(?:^|[/_-])(run|start|launch|game)(?:[/_.-]|$)', path.name, re.IGNORECASE)),
+        key=lambda p: (not re.search(r'(?:^|[/_-])run(?:[/_.-]|$)', p.name, re.IGNORECASE), str(p).lower()),
+    )
+    bare_bins = sorted(
+        (path for path in files if not path.suffix and os.access(path, os.X_OK)
+         and path.name.lower() not in ('install', 'setup', 'uninstall', 'update')),
+        key=lambda p: str(p).lower(),
+    )
+    windows = sorted((path for path in files if path.suffix.lower() == '.exe'), key=lambda p: str(p).lower())
+    if appimages:
+        return 'native', appimages[0]
+    if native:
+        return 'native', native[0]
+    if scripts:
+        return 'native-script', scripts[0]
+    if bare_bins:
+        return 'native', bare_bins[0]
+    if windows:
+        return 'windows', windows[0]
+    raise ValueError(
+        f'No se encontraron archivos ejecutables compatibles (XEX/ISO de Xbox 360, AppImage, binario Linux o EXE) en {install_path}.'
+    )
+
+
 def _launch_xbox360_game(game_id):
     item = next((row for row in _load_xbox360_items() if str(row.get('id')) == str(game_id)), None)
     if item is None:
         raise ValueError('Juego no encontrado en el catálogo Xbox 360.')
-    install_path = Path(str(item.get('installed_path') or '')).expanduser()
+    install_path = _xbox360_install_directory(item, game_id)
     if not install_path.is_dir():
-        slug = re.sub(r'[^A-Za-z0-9._-]+', '_', str(item.get('name', game_id))).strip('._')[:80] or str(game_id)
-        root = Path(_select_largest_secondary_disk() or str(Path.home() / '.xui' / 'GAMES' / 'Xbox360'))
-        install_path = root / slug
-    xex_files = sorted(
-        (path for path in install_path.rglob('*') if path.is_file() and path.suffix.lower() == '.xex'),
-        key=lambda path: (path.name.lower() != 'default.xex', str(path).lower()),
-    ) if install_path.is_dir() else []
-    if not xex_files:
-        raise ValueError(f'No se encontró un XEX instalado para {item.get("name", game_id)} en {install_path}.')
-    xenia = Path.home() / '.xui' / 'emulators' / 'xenia-canary' / 'xenia_canary_linux.AppImage'
-    if not xenia.is_file():
-        raise ValueError('Xenia Canary no está instalado. Instálalo desde el menú XUI antes de lanzar el juego.')
+        raise ValueError(f'No se encontró la instalación de {item.get("name", game_id)} en {install_path}. Pulsa Install antes de Launch.')
+    backend, target = _xbox360_launch_plan(install_path)
     helper = XUI_BIN / 'xui_play_game_intro.sh'
-    if not helper.is_file():
+    if not helper.is_file() or not os.access(helper, os.X_OK):
         raise ValueError(f'No se encontró el reproductor del boot screen: {helper}')
-    command = 'APPIMAGE_EXTRACT_AND_RUN=1 ' + ' '.join(
-        shlex.quote(part) for part in (str(xenia), str(xex_files[0]))
-    )
-    os.execv(str(helper), [str(helper), '--', '/bin/bash', '-lc', command])
+    intro = Path(os.environ.get('XUI_GAME_INTRO', str(Path.home() / '.xui' / 'assets' / 'appbootscreen.mp4')))
+    if not intro.is_file() or intro.stat().st_size == 0:
+        raise ValueError(f'Falta el boot screen requerido: {intro}. Ejecuta de nuevo el instalador.')
+    if not (shutil.which('mpv') or shutil.which('ffplay') or shutil.which('vlc')):
+        raise ValueError('No hay reproductor de vídeo disponible para el boot screen (instala mpv, ffplay o VLC).')
+
+    if backend == 'xenia':
+        emulator = Path.home() / '.xui' / 'emulators' / 'xenia-canary' / 'xenia_canary_linux.AppImage'
+        if not emulator.is_file():
+            raise ValueError('Xenia Canary no está instalado. Instálalo desde XUI y vuelve a intentarlo.')
+        if not os.access(emulator, os.X_OK):
+            emulator.chmod(emulator.stat().st_mode | 0o111)
+        game_command = [str(emulator), str(target)]
+    elif backend == 'windows':
+        launcher = Path.home() / '.xui' / 'bin' / 'xui_wine_run.sh'
+        if not launcher.is_file() or not os.access(launcher, os.X_OK):
+            raise ValueError('No se encontró el lanzador Wine de XUI para este ejecutable .exe.')
+        game_command = [str(launcher), str(target)]
+    elif backend == 'native-script':
+        game_command = ['bash', str(target)]
+    else:
+        if not os.access(target, os.X_OK):
+            target.chmod(target.stat().st_mode | 0o111)
+        game_command = [str(target)]
+
+    log_path = Path.home() / '.xui' / 'logs' / 'xbox360_launch.log'
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    launch_env = os.environ.copy()
+    if backend == 'xenia' or target.suffix.lower() == '.appimage':
+        launch_env['APPIMAGE_EXTRACT_AND_RUN'] = '1'
+    with log_path.open('ab') as log_file:
+        subprocess.Popen(
+            [str(helper), '--', *game_command],
+            stdin=subprocess.DEVNULL, stdout=log_file, stderr=subprocess.STDOUT,
+            start_new_session=True, close_fds=True, env=launch_env,
+        )
+    print(f'Lanzando con {backend}: {target}', flush=True)
 
 
 def _norm_item(raw):
@@ -20464,6 +20556,10 @@ def ensure_catalog_minimum(min_count=620):
     raw_items = data.get('all_items', data.get('items', []))
     if not isinstance(raw_items, list):
         raw_items = []
+    authoritative_xbox360 = [
+        item for item in (_norm_item(raw) for raw in _load_xbox360_items()) if item is not None
+    ]
+    authoritative_xbox360_ids = {item['id'] for item in authoritative_xbox360}
     items = []
     seen = set()
     xbox360_ids = set()
@@ -20472,6 +20568,8 @@ def ensure_catalog_minimum(min_count=620):
         if item is None:
             continue
         iid = item['id']
+        if iid in authoritative_xbox360_ids:
+            continue
         if _is_legacy_xbox360_repo_item(item):
             continue
         if item.get('category') == 'Xbox 360 Homebrew':
@@ -20490,6 +20588,12 @@ def ensure_catalog_minimum(min_count=620):
             continue
         seen.add(item['id'])
         items.append(item)
+    for item in authoritative_xbox360:
+        # The configured Xbox 360 catalog is the authoritative source for
+        # matching IDs; stale external-source copies used the legacy launcher.
+        seen.add(item['id'])
+        xbox360_ids.add(item['id'])
+        items.append(item)
     for raw in _load_external_items():
         item = _norm_item(raw)
         if item is None:
@@ -20501,13 +20605,6 @@ def ensure_catalog_minimum(min_count=620):
         if item['id'] in seen:
             continue
         seen.add(item['id'])
-        items.append(item)
-    for raw in _load_xbox360_items():
-        item = _norm_item(raw)
-        if item is None or item['id'] in seen:
-            continue
-        seen.add(item['id'])
-        xbox360_ids.add(item['id'])
         items.append(item)
     active_items, day_key = _daily_rotated_items(items, ALWAYS_VISIBLE_IDS | xbox360_ids, DAILY_ACTIVE_COUNT)
     out = {
@@ -21987,8 +22084,11 @@ class StoreWindow(QtWidgets.QMainWindow):
             shell_cmd = ' '.join(shlex.quote(part) for part in (
                 sys.executable, str(Path(__file__).resolve()), '--launch-xbox360', iid
             ))
-            self._run_detached(shell_cmd)
-            self.reload(f'Iniciando {item.get("name", "Xbox 360 Homebrew")} con Xenia…')
+            self._run_install_task(
+                item.get('name', 'Xbox 360 Homebrew'), shell_cmd,
+                success_msg=f'{item.get("name", "Homebrew")} iniciado.',
+                fail_msg=f'No se pudo lanzar {item.get("name", "Homebrew")}.',
+            )
             return
         cmd = str(item.get('launch', '')).strip()
         if not cmd and external_paid:
@@ -23242,14 +23342,41 @@ find_executable(){
   find "$root" -type f \( -iname '*.exe' -o -iname '*.x86_64' -o -iname '*.x86' -o -iname '*.appimage' -o -iname '*.sh' \) 2>/dev/null | head -n 1 || true
 }
 
+find_xbox_payload(){
+    local root="$1"
+    find "$root" -type f \( -iname '*.xex' -o -iname '*.iso' -o -iname '*.xiso' \) 2>/dev/null | sort | head -n 1 || true
+}
+
 if [ "$MODE" = "launch" ]; then
+    xbox_payload="$(find_xbox_payload "$EXTRACT_DIR")"
+    if [ -n "$xbox_payload" ]; then
+        XENIA_LAUNCHER="$HOME/.xui/bin/xui_xenia_canary.sh"
+        if [ -x "$XENIA_LAUNCHER" ]; then
+            echo "Launching Xbox 360 payload in Xenia: $xbox_payload"
+            exec "$XENIA_LAUNCHER" "$xbox_payload" "$@"
+        fi
+        echo "Xenia launcher is missing: $XENIA_LAUNCHER" >&2
+        exit 1
+    fi
   exe="$(find_executable "$EXTRACT_DIR" || true)"
   if [ -n "$exe" ] && [ -f "$exe" ]; then
     chmod +x "$exe" >/dev/null 2>&1 || true
     echo "Launching: $exe"
         INTRO_LAUNCHER="$HOME/.xui/bin/xui_play_game_intro.sh"
         if [ -x "$INTRO_LAUNCHER" ]; then
-            exec "$INTRO_LAUNCHER" -- "$exe" "$@"
+                        case "${exe,,}" in
+                            *.exe)
+                                WINE_LAUNCHER="$HOME/.xui/bin/xui_wine_run.sh"
+                                [ -x "$WINE_LAUNCHER" ] || { echo "Wine launcher missing: $WINE_LAUNCHER" >&2; exit 1; }
+                                exec "$INTRO_LAUNCHER" -- "$WINE_LAUNCHER" "$exe" "$@"
+                                ;;
+                            *.sh)
+                                exec "$INTRO_LAUNCHER" -- bash "$exe" "$@"
+                                ;;
+                            *)
+                                exec "$INTRO_LAUNCHER" -- "$exe" "$@"
+                                ;;
+                        esac
         fi
         echo "Required game boot screen launcher is missing: $INTRO_LAUNCHER" >&2
         exit 1
