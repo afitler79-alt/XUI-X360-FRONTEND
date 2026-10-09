@@ -11575,6 +11575,7 @@ class Dashboard(QtWidgets.QMainWindow):
         self._guide_open_last_at = 0.0
         self._guide_shortcut_cooldown = 0.35
         self._guide_shortcuts = []
+        self._guide_dialog = None
         self._games_inline = None
         self._qgamepads = {}
         self._gp_last_emit = {}
@@ -13840,25 +13841,38 @@ exit 1
         if last_open > 0.0 and (now - last_open) < self._guide_shortcut_cooldown:
             return
         self._guide_open_last_at = now
-        launcher = XUI_HOME / 'bin' / 'xui_global_guide.sh'
-        if not launcher.is_file() or not os.access(launcher, os.X_OK):
-            self._msg(
-                'Xbox Guide',
-                'No se encuentra el overlay global del Guide. Ejecuta de nuevo el instalador XUI.',
-            )
+
+        existing = getattr(self, '_guide_dialog', None)
+        if existing is not None:
+            try:
+                if existing.isVisible():
+                    existing.raise_()
+                    existing.activateWindow()
+                    return
+                existing.deleteLater()
+            except Exception:
+                pass
+            self._guide_dialog = None
+
+        dlg = XboxGuideMenu(current_gamertag(), self, sfx_cb=self._play_sfx, mode='dashboard')
+        self._guide_dialog = dlg
+        dlg.finished.connect(self._on_guide_dialog_closed)
+        result = dlg.exec_()
+        if result != QtWidgets.QDialog.Accepted:
+            self._play_sfx('back')
             return
+        sel = str(dlg.selected() or '').strip()
+        if not sel:
+            return
+        self._handle_xbox_guide_action(sel)
+
+    def _on_guide_dialog_closed(self, *_):
         try:
-            subprocess.Popen(
-                [str(launcher)],
-                stdin=subprocess.DEVNULL,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-                start_new_session=True,
-                close_fds=True,
-                env=os.environ.copy(),
-            )
-        except OSError as exc:
-            self._msg('Xbox Guide', f'No se pudo iniciar el overlay global:\n{exc}')
+            if getattr(self, '_guide_dialog', None) is not None:
+                self._guide_dialog.deleteLater()
+        except Exception:
+            pass
+        self._guide_dialog = None
 
     def _open_achievements_hub(self):
         self._play_sfx('open')
@@ -14400,9 +14414,16 @@ exit 1
         dialog.exec_()
 
     def _library_game_entries(self):
+        inventory = getattr(self, 'inventory', None)
+        if not isinstance(inventory, dict):
+            try:
+                inventory = load_inventory()
+            except Exception:
+                inventory = {'items': []}
+            self.inventory = inventory
         entries = []
         try:
-            for item in self.inventory.get('items', []):
+            for item in inventory.get('items', []):
                 if not isinstance(item, dict):
                     continue
                 name = str(item.get('name', '')).strip()
@@ -14413,10 +14434,17 @@ exit 1
         return list(dict.fromkeys(entries))
 
     def _find_library_game(self, action):
+        inventory = getattr(self, 'inventory', None)
+        if not isinstance(inventory, dict):
+            try:
+                inventory = load_inventory()
+            except Exception:
+                inventory = {'items': []}
+            self.inventory = inventory
         name = str(action or '').strip()
         if not name:
             return None
-        for item in self.inventory.get('items', []):
+        for item in inventory.get('items', []):
             try:
                 if str(item.get('name', '')).strip() == name:
                     return item
@@ -14461,6 +14489,12 @@ exit 1
         elif action == 'Clean XUI Cache':
             self._clean_xui_cache()
         elif action == 'My Games':
+            inventory = getattr(self, 'inventory', None)
+            if not isinstance(inventory, dict):
+                try:
+                    self.inventory = load_inventory()
+                except Exception:
+                    self.inventory = {'items': []}
             purchased = self._library_game_entries()
             options = ['Runner', 'Casino', 'Gem Match', 'FNAE', 'Xenia Canary', 'Launch Xbox 360 Game Dump', 'Dump Homebrew DVD to Xenia', 'Xbox 360 DVD Info', 'xemu (Original Xbox)', 'Launch Original Xbox XISO', 'Dump Homebrew DVD to xemu', 'Original Xbox Setup Info', 'Steam', 'RetroArch', 'Games Integrations']
             if purchased:
