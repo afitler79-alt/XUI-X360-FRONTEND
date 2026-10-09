@@ -28641,6 +28641,9 @@ class Guide(QtWidgets.QDialog):
         self._open_anim = None
         self._last_row = 0
         self._target_was_fullscreen = False
+        self._topmost_timer = QtCore.QTimer(self)
+        self._topmost_timer.setInterval(250)
+        self._topmost_timer.timeout.connect(self._maintain_overlay_topmost)
         self.setWindowTitle('Xbox Guide')
         self.setWindowFlags(
             QtCore.Qt.Dialog
@@ -28881,8 +28884,21 @@ class Guide(QtWidgets.QDialog):
                 subprocess.run(['xdotool', 'windowstate', overlay_id, '--add', 'ABOVE'], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False)
                 subprocess.run(['xdotool', 'windowraise', overlay_id], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False)
                 subprocess.run(['xdotool', 'windowactivate', '--sync', overlay_id], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False)
+                if shutil.which('wmctrl'):
+                    subprocess.run(['wmctrl', '-ir', overlay_id, '-b', 'add,above,fullscreen'], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False)
         except (OSError, subprocess.SubprocessError):
             pass
+
+    def _maintain_overlay_topmost(self):
+        if not self.isVisible():
+            self._topmost_timer.stop()
+            return
+        if self.previous_window and self._target_was_fullscreen:
+            subprocess.run(
+                ['xdotool', 'windowstate', str(self.previous_window), '--remove', 'FULLSCREEN'],
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False,
+            )
+        self._raise_overlay_window()
 
     def show_overlay(self):
         # The Guide process may stay alive while hidden; recapture the newly active
@@ -28909,7 +28925,8 @@ class Guide(QtWidgets.QDialog):
                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False,
             )
         self._raise_overlay_window()
-        QtCore.QTimer.singleShot(120, lambda: self._raise_overlay_window() if self.isVisible() else None)
+        self._topmost_timer.start()
+        QtCore.QTimer.singleShot(120, self._maintain_overlay_topmost)
 
     def _restore_target_window(self):
         if not self.previous_window:
@@ -28930,6 +28947,7 @@ class Guide(QtWidgets.QDialog):
         self._target_was_fullscreen = False
 
     def hide_overlay(self):
+        self._topmost_timer.stop()
         self.hide()
         self._restore_target_window()
 
