@@ -17133,7 +17133,9 @@ write_extras(){
   info "Writing casino, runner, missions, store and helper scripts"
   mkdir -p "$CASINO_DIR" "$GAMES_DIR" "$DATA_DIR" "$XUI_DIR/apps"
     copy_assets
-    write_game_intro_wrapper
+        if declare -F write_game_intro_wrapper >/dev/null 2>&1; then
+            write_game_intro_wrapper
+        fi
   cat > "$CASINO_DIR/poker_engine_v2.py" <<'PY'
 import itertools
 import random
@@ -19668,6 +19670,7 @@ PY
 import hashlib
 import http.cookiejar
 import json
+import os
 import random
 import re
 import shlex
