@@ -13163,8 +13163,8 @@ exit 1
     def _run_game(self, cmd, args=None):
         intro_launcher = XUI_HOME / 'bin' / 'xui_play_game_intro.sh'
         if not intro_launcher.is_file():
-            self._msg('Game intro', f'No se encontró el reproductor obligatorio del intro:\n{intro_launcher}')
-            return False
+            # The intro is optional; a missing helper must not block a game.
+            return self._run(str(cmd), args or [])
         command = [str(intro_launcher), '--', str(cmd), *(str(arg) for arg in (args or []))]
         shell_command = ' '.join(shlex.quote(part) for part in command)
         return self._run('/bin/sh', ['-c', shell_command])
@@ -24611,6 +24611,23 @@ else:
 PY
 BASH
   chmod +x "$BIN_DIR/xui_mission_mark.sh"
+
+    # Keep the maintained casino sources in sync with the app deployed by this
+    # repository. The embedded copies above remain as a single-file fallback.
+    local source_dir
+    source_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+    if [ -f "$source_dir/casino_revamp.py" ] && [ -f "$source_dir/casino_multiplayer.py" ] && [ -f "$source_dir/poker_engine_v2.py" ]; then
+        cp -f "$source_dir/casino_revamp.py" "$CASINO_DIR/casino.py"
+        cp -f "$source_dir/casino_multiplayer.py" "$CASINO_DIR/casino_multiplayer.py"
+        cp -f "$source_dir/poker_engine_v2.py" "$CASINO_DIR/poker_engine_v2.py"
+        chmod +x "$CASINO_DIR/casino.py"
+        info "Deployed maintained casino sources (LAN Texas Hold’em enabled)"
+    fi
+    if [ -f "$source_dir/runner_3d.py" ]; then
+        cp -f "$source_dir/runner_3d.py" "$GAMES_DIR/runner.py"
+        chmod +x "$GAMES_DIR/runner.py"
+        info "Deployed maintained Neon Sprint 3D runner"
+    fi
 }
 
 # Systemd user units and autostart wrapper
@@ -32744,14 +32761,6 @@ write_game_intro_wrapper(){
 #!/usr/bin/env bash
 set -euo pipefail
 INTRO="${XUI_GAME_INTRO:-$HOME/.xui/assets/appbootscreen.mp4}"
-if [[ ! -s "$INTRO" ]]; then
-    echo "Game intro video is missing: $INTRO" >&2
-    exit 1
-fi
-if ! command -v mpv >/dev/null 2>&1; then
-    echo "mpv is required to play the locked game intro." >&2
-    exit 1
-fi
 if [[ "${1:-}" != "--" ]]; then
     echo "Usage: $0 -- <game command> [args...]" >&2
     exit 2
@@ -32761,7 +32770,12 @@ if [[ "$#" -eq 0 ]]; then
     echo "No game command was provided." >&2
     exit 2
 fi
-mpv --no-terminal --really-quiet --fullscreen --no-config --input-conf=/dev/null --input-default-bindings=no --input-cursor=no --input-vo-keyboard=no --cursor-autohide=always --osc=no --osd-bar=no "$INTRO"
+if [[ -s "$INTRO" ]] && command -v mpv >/dev/null 2>&1; then
+    mpv --no-terminal --really-quiet --fullscreen --no-config --input-conf=/dev/null --input-default-bindings=no --input-cursor=no --input-vo-keyboard=no --cursor-autohide=always --osc=no --osd-bar=no "$INTRO" || \
+        echo "Game intro playback failed; starting the game anyway." >&2
+else
+    echo "Game intro video or mpv is unavailable; starting the game without the intro." >&2
+fi
 exec "$@"
 BASH
     chmod +x "$BIN_DIR/xui_play_game_intro.sh"
