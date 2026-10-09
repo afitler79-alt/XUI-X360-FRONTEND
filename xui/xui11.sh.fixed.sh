@@ -19810,7 +19810,9 @@ def _catalog_entries(payload):
             'source': 'XUI 360 Homebrew',
             'desc': 'Homebrew package from the XUI 360 catalog. Downloads and extracts locally.',
             'download_url': url,
-            'install': str(downloader) + f' --name {shlex.quote(name)} --url {shlex.quote(url)}',
+            # Route catalog downloads through the Python installer. It handles
+            # Google Drive confirmation pages and safely extracts archives.
+            'install': f'xui360repo:{game_id}',
             'launch': str(downloader) + f' --name {shlex.quote(name)} --url {shlex.quote(url)} --launch',
         })
     return clean
