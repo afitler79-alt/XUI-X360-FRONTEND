@@ -20681,6 +20681,12 @@ def ensure_catalog_minimum(min_count=620):
     raw_items = data.get('all_items', data.get('items', []))
     if not isinstance(raw_items, list):
         raw_items = []
+    curated_items = [_norm_item(raw) for raw in _curated_items()]
+    curated_items = [item for item in curated_items if item is not None]
+    authoritative_web_port_ids = {
+        item['id'] for item in curated_items
+        if str(item.get('source', '')).strip().casefold() == 'web ports'
+    }
     authoritative_xbox360 = [
         item for item in (_norm_item(raw) for raw in _load_xbox360_items()) if item is not None
     ]
@@ -20693,6 +20699,8 @@ def ensure_catalog_minimum(min_count=620):
         if item is None:
             continue
         iid = item['id']
+        if iid in authoritative_web_port_ids:
+            continue
         if iid in authoritative_xbox360_ids or iid == 'game_runner':
             # Refresh the cached Store card so the previous "Runner" listing
             # is replaced by the new Neon Sprint 3D game entry below.
@@ -20707,10 +20715,7 @@ def ensure_catalog_minimum(min_count=620):
             continue
         seen.add(iid)
         items.append(item)
-    for raw in _curated_items():
-        item = _norm_item(raw)
-        if item is None:
-            continue
+    for item in curated_items:
         if item['id'] in seen:
             continue
         seen.add(item['id'])
