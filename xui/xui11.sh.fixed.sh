@@ -13795,15 +13795,25 @@ exit 1
         if last_open > 0.0 and (now - last_open) < self._guide_shortcut_cooldown:
             return
         self._guide_open_last_at = now
-        self._play_sfx('open')
-        d = XboxGuideMenu(current_gamertag(), self, sfx_cb=self._play_sfx, mode='dashboard')
-        if d.exec_() == QtWidgets.QDialog.Accepted:
-            opt = d.selected()
-            if opt:
-                self._play_sfx('select')
-                self._handle_xbox_guide_action(opt)
-        else:
-            self._play_sfx('back')
+        launcher = XUI_HOME / 'bin' / 'xui_global_guide.sh'
+        if not launcher.is_file() or not os.access(launcher, os.X_OK):
+            self._msg(
+                'Xbox Guide',
+                'No se encuentra el overlay global del Guide. Ejecuta de nuevo el instalador XUI.',
+            )
+            return
+        try:
+            subprocess.Popen(
+                [str(launcher)],
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                start_new_session=True,
+                close_fds=True,
+                env=os.environ.copy(),
+            )
+        except OSError as exc:
+            self._msg('Xbox Guide', f'No se pudo iniciar el overlay global:\n{exc}')
 
     def _open_achievements_hub(self):
         self._play_sfx('open')
