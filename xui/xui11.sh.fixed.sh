@@ -443,14 +443,30 @@ BASH
 }
 
 copy_web_game_ports_catalog(){
-    local script_dir catalog_source
+    local script_dir catalog_source candidate
     script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-    catalog_source="$script_dir/win/web_game_ports.json"
-    if [ -f "$catalog_source" ]; then
+    catalog_source=""
+    for candidate in \
+        "$script_dir/win/web_game_ports.json" \
+        "$script_dir/web_game_ports.json" \
+        "$(dirname "$script_dir")/win/web_game_ports.json"; do
+        if [ -s "$candidate" ]; then
+            catalog_source="$candidate"
+            break
+        fi
+    done
+    if [ -n "$catalog_source" ]; then
+        if ! python3 -c 'import json,sys; d=json.load(open(sys.argv[1], encoding="utf-8")); assert isinstance(d.get("games"), list) and d["games"]' "$catalog_source" >/dev/null 2>&1; then
+            warn "Web game ports catalog is invalid: $catalog_source"
+            return 1
+        fi
         cp -f "$catalog_source" "$DATA_DIR/web_game_ports.json"
-        info "Copied web game ports catalog"
-    elif [ ! -s "$DATA_DIR/web_game_ports.json" ]; then
-        warn "Web game ports catalog not found beside installer; store will keep its existing catalog"
+        info "Copied $(python3 -c 'import json,sys; print(len(json.load(open(sys.argv[1], encoding="utf-8"))["games"]))' "$DATA_DIR/web_game_ports.json") web game entries"
+    elif [ -s "$DATA_DIR/web_game_ports.json" ]; then
+        info "Using existing web game ports catalog ($(python3 -c 'import json,sys; print(len(json.load(open(sys.argv[1], encoding="utf-8"))["games"]))' "$DATA_DIR/web_game_ports.json") entries)"
+    else
+        warn "Web game ports catalog missing. Put web_game_ports.json beside the installer or in its win/ folder."
+        return 1
     fi
 }
 
@@ -20576,7 +20592,7 @@ def _curated_items():
             'price': price_xui,
             'currency': 'XUI',
             'pricing': 'paid' if price_xui else 'free',
-            'category': 'Browser',
+            'category': 'Games',
             'source': 'Web Ports',
             'desc': description,
             'launch': str(XUI_BIN / 'xui_browser.sh') + ' --hub ' + shlex.quote(target_url) if target_url else '',
@@ -21263,7 +21279,7 @@ class StoreWindow(QtWidgets.QMainWindow):
         'Xbox 360': {'Xbox 360 Homebrew'},
         'Windows 8': {'Apps', 'Themes'},
         'Windows Phone': {'Accessories', 'MiniGames'},
-        'Web': {'Browser'},
+        'Web': {'Browser', 'Games'},
         'Free': 'pricing:free',
         'Paid': 'pricing:paid',
     }
