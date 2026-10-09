@@ -33099,6 +33099,9 @@ if [[ "$#" -eq 0 ]]; then
     echo "No game command was provided." >&2
     exit 2
 fi
+    if [[ "$(basename -- "$1")" == "xenia_canary_linux.AppImage" ]]; then
+        exec "$HOME/.xui/bin/xui_xenia_run.sh" "$@"
+    fi
 played=0
 if command -v mpv >/dev/null 2>&1 && mpv --no-terminal --really-quiet --fullscreen --no-config --input-conf=/dev/null --input-default-bindings=no --input-cursor=no --input-vo-keyboard=no --cursor-autohide=always --osc=no --osd-bar=no "$INTRO"; then
     played=1
@@ -33116,6 +33119,62 @@ fi
 exec "$@"
 BASH
     chmod +x "$BIN_DIR/xui_play_game_intro.sh"
+
+    cat > "$BIN_DIR/xui_xenia_run.sh" <<'BASH'
+#!/usr/bin/env bash
+set -uo pipefail
+XUI_HOME="$HOME/.xui"
+DATA_DIR="$XUI_HOME/data"
+PID_FILE="$DATA_DIR/active_game.pid"
+LOG_FILE="$XUI_HOME/logs/xenia.log"
+mkdir -p "$DATA_DIR" "$(dirname "$LOG_FILE")"
+if [[ "$#" -eq 0 ]]; then
+    echo "Usage: $0 <Xenia command> [args...]" >&2
+    exit 2
+fi
+
+# Prevent two Xenia windows from racing the Guide target-window tracking.
+if command -v flock >/dev/null 2>&1; then
+    exec 9>"$DATA_DIR/xenia_run.lock"
+    if ! flock -n 9; then
+        echo "Xenia is already running; refusing to create a duplicate instance." >&2
+        exit 0
+    fi
+fi
+
+"$@" >>"$LOG_FILE" 2>&1 &
+game_pid=$!
+printf '%s\n' "$game_pid" > "$PID_FILE"
+cleanup(){
+    if [[ "$(cat "$PID_FILE" 2>/dev/null || true)" == "$game_pid" ]]; then
+        rm -f "$PID_FILE"
+    fi
+}
+trap cleanup EXIT
+
+# Request EWMH fullscreen after Xenia has created its window. XUI's Guide is a
+# separate always-on-top window, so it remains drawable above this fullscreen window.
+if [[ "${XUI_XENIA_FULLSCREEN:-1}" != "0" ]] && command -v xdotool >/dev/null 2>&1; then
+    for _ in {1..120}; do
+        kill -0 "$game_pid" 2>/dev/null || break
+        window_id="$(xdotool search --onlyvisible --pid "$game_pid" 2>/dev/null | tail -n 1 || true)"
+        if [[ -z "$window_id" ]]; then
+            window_id="$(xdotool search --onlyvisible --name 'Xenia' 2>/dev/null | tail -n 1 || true)"
+        fi
+        if [[ -n "$window_id" ]]; then
+            xdotool windowstate "$window_id" --add FULLSCREEN >/dev/null 2>&1 || true
+            xdotool windowraise "$window_id" >/dev/null 2>&1 || true
+            break
+        fi
+        sleep 0.1
+    done
+else
+    echo "xdotool unavailable or fullscreen disabled; Xenia will use its own window mode." >>"$LOG_FILE"
+fi
+
+wait "$game_pid"
+BASH
+    chmod +x "$BIN_DIR/xui_xenia_run.sh"
 }
 
 write_xenia_canary_tools(){
@@ -33274,7 +33333,7 @@ if [[ "$#" -gt 0 ]]; then
     fi
     exec "$HOME/.xui/bin/xui_play_game_intro.sh" -- "$APPIMAGE" "$@"
 fi
-exec "$APPIMAGE" "$@"
+exec "$HOME/.xui/bin/xui_xenia_run.sh" "$APPIMAGE" "$@"
 BASH
   chmod +x "$BIN_DIR/xui_xenia_canary.sh"
 
