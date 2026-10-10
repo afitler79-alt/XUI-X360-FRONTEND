@@ -14422,16 +14422,21 @@ exit 1
                 inventory = {'items': []}
             self.inventory = inventory
         entries = []
+        seen = set()
         try:
             for item in inventory.get('items', []):
                 if not isinstance(item, dict):
                     continue
                 name = str(item.get('name', '')).strip()
-                if name:
-                    entries.append(name)
+                iid = str(item.get('id', '')).strip()
+                key = (name or iid).strip()
+                if not key or key in seen:
+                    continue
+                seen.add(key)
+                entries.append(name or iid)
         except Exception:
             entries = []
-        return list(dict.fromkeys(entries))
+        return entries
 
     def _find_library_game(self, action):
         inventory = getattr(self, 'inventory', None)
@@ -14441,12 +14446,19 @@ exit 1
             except Exception:
                 inventory = {'items': []}
             self.inventory = inventory
-        name = str(action or '').strip()
-        if not name:
+        action_text = str(action or '').strip()
+        if not action_text:
             return None
+        normalized = action_text.lower()
         for item in inventory.get('items', []):
             try:
-                if str(item.get('name', '')).strip() == name:
+                item_name = str(item.get('name', '')).strip()
+                item_id = str(item.get('id', '')).strip()
+                if item_name and item_name.lower() == normalized:
+                    return item
+                if item_id and item_id.lower() == normalized:
+                    return item
+                if item_name and item_name.lower() == normalized.replace('_', ' '):
                     return item
             except Exception:
                 continue
@@ -17685,7 +17697,20 @@ def load_store():
     items = data.get('items', [])
     if not isinstance(items, list):
         items = []
-    data['items'] = items
+    seen = set()
+    cleaned = []
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        iid = str(item.get('id', '') or '').strip()
+        if not iid:
+            continue
+        key = _norm_key(iid)
+        if key in seen:
+            continue
+        seen.add(key)
+        cleaned.append(item)
+    data['items'] = cleaned
     return data
 
 
@@ -17705,7 +17730,20 @@ def load_inventory():
     items = data.get('items', [])
     if not isinstance(items, list):
         items = []
-    data['items'] = items
+    seen = set()
+    cleaned = []
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        iid = str(item.get('id', '') or '').strip()
+        if not iid:
+            continue
+        key = _norm_key(iid)
+        if key in seen:
+            continue
+        seen.add(key)
+        cleaned.append(item)
+    data['items'] = cleaned
     return data
 
 
@@ -28676,14 +28714,37 @@ def _resume_paused():
 
 
 def _activate_dashboard():
-    cmd = (
-        '/bin/sh -lc '
-        '"xdotool search --name \'XUI - Xbox 360 Style\' windowactivate 2>/dev/null '
-        '|| xdotool search --name \'XUI\' windowactivate 2>/dev/null '
-        '|| xdotool search --name \'dashboard\' windowactivate 2>/dev/null"'
-    )
-    rc = subprocess.call(cmd, shell=True)
-    return rc == 0
+    """Activate the dashboard without invoking a shell string."""
+    xdotool = shutil.which('xdotool')
+    if not xdotool:
+        return False
+
+    for title in ('XUI - Xbox 360 Style', 'XUI', 'dashboard'):
+        try:
+            res = subprocess.run(
+                [xdotool, 'search', '--name', title],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.DEVNULL,
+                text=True,
+                check=False,
+                timeout=5,
+            )
+            if res.returncode != 0:
+                continue
+            windows = [w.strip() for w in (res.stdout or '').splitlines() if w.strip()]
+            for wid in windows:
+                subprocess.run(
+                    [xdotool, 'windowactivate', '--sync', str(wid)],
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    check=False,
+                    timeout=5,
+                )
+            if windows:
+                return True
+        except Exception:
+            continue
+    return False
 
 
 def _recent_text():
